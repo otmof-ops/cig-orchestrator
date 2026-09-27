@@ -57,16 +57,57 @@ pull fresh(fixture) {
 }
 
 # Any program, in `dir`, with this suite's own cig home: {code, out, err}.
-pull hop(dir, program, words) {
+pull hop_env(dir, program, words, more) {
   roll r = null
   burn {
     r = proc.run(program, words, {
       cwd: dir,
-      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", DEMO_REMOTE: dir + "-remote"},
+      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", DEMO_REMOTE: dir + "-remote"}.merge(more),
       timeout_ms: 120000,
     })
   }
   snuff r
+}
+
+pull hop(dir, program, words) {
+  snuff hop_env(dir, program, words, {})
+}
+
+# The stub toolchain first on PATH: every npm, cargo, go, uv... it runs is
+# recorded in <dir>-stub.log with its arguments and directory, and succeeds.
+pull stubbed(dir) {
+  snuff {PATH: path.join(root, "tests/fixtures/stub-bin") + ":" + env.get("PATH", ""), STUB_LOG: dir + "-stub.log"}
+}
+
+pull tool_stubbed(dir, words) {
+  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, stubbed(dir))
+}
+
+pull stub_log(dir) {
+  if fs.exists(dir + "-stub.log") {
+    snuff fs.read_text(dir + "-stub.log")
+  }
+  snuff ""
+}
+
+# `pieces` appear in `textv` in this order.
+pull in_order(textv, pieces) {
+  roll at = -1
+  for piece in pieces {
+    stick i = textv.find(piece)
+    assert(i >= 0, "expected `${piece}` in:\n${textv}")
+    assert(i > at, "`${piece}` came too early in:\n${textv}")
+    at = i
+  }
+}
+
+pull edit_manifest(dir, change) {
+  stick file = path.join(dir, "cig-tasks.json")
+  stick m = json.load(file)
+  change(m)
+  burn {
+    json.save(file, m, 2)
+  }
 }
 
 pull cig(dir, words) {
@@ -323,36 +364,35 @@ test("files a script creates are rolled back when a later task fails", pack() {
   assert(not there(dir, "out/file.txt"), "out/file.txt survived")
 })
 
-# ----- adopt ----------------------------------------------------------------
+# ----- adopt: scripts and task runners ------------------------------------------
 
-test("adopt finds scripts, make targets, npm scripts and just recipes", pack() {
+test("adopt turns a scripts, make, npm, just and Taskfile project into components", pack() {
   stick dir = fresh("tests/fixtures/polyglot")
   stick r = tool_in(dir, ["adopt"])
   exits(r, 0)
-  stick m = json.parse(r.out)
-  stick names = m.tasks.keys()
-  for want in ["bootstrap", "hello", "greet", "gen-docs", "deploy", "make:build", "make:test", "make:clean", "npm:lint", "npm:test", "npm:start", "just:fmt", "just:release"] {
-    assert(names.contains(want), "adopt missed ${want}: ${names}")
+  stick comps = json.parse(r.out).components
+  assert(comps.node.toolchain == "node-npm", "node: ${comps}")
+  for runner in ["make", "just", "task", "scripts"] {
+    assert(comps.has(runner), "adopt missed ${runner}: ${comps.keys()}")
+    assert(comps[runner].groups == false, "${runner} sits beside package.json and should stay out of the groups")
   }
-  for unwanted in ["notes", "hidden", "make:out", "make:VERSION", "npm:pretest", "just:_private", "just:set", "just:alias"] {
-    assert(not names.contains(unwanted), "adopt should have skipped ${unwanted}")
-  }
-  assert(m.tasks.bootstrap.cmd == ["bash", "script/bootstrap"], "shebang: ${m.tasks.bootstrap.cmd}")
-  assert(m.tasks.deploy.cmd == ["/bin/sh", "deploy.sh"], "shebang path: ${m.tasks.deploy.cmd}")
-  assert(m.tasks.greet.cmd == ["node", "scripts/greet.js"], "extension: ${m.tasks.greet.cmd}")
-  assert(m.tasks.hello.desc == "Say hello from Python.", "docstring: ${m.tasks.hello.desc}")
-  assert(m.tasks["gen-docs"].desc == "Generate the docs.", "comment after an SPDX line")
-  assert(m.tasks["make:build"].desc == "Build everything", "make ## description")
-  assert(m.tasks["just:fmt"].desc == "Format the sources", "just comment")
-  says(r.err, "Taskfile.yml")
+  says(r.err, "kept out of the stage groups")
   assert(not there(dir, "cig-tasks.json"), "adopt without --write wrote the file")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick all = tool_in(dir, ["list", "--all"]).out
+  for task in ["scripts:hello", "scripts:gen-docs", "scripts:deploy", "make:build", "make:clean", "just:fmt", "just:release", "task:hello", "node:lint", "node:test", "node:start"] {
+    says(all, task)
+  }
+  for hidden in ["node:pretest", "scripts:hidden", "scripts:notes", "just:_private", "just:set"] {
+    never_says(all, hidden + " ")
+  }
 })
 
 test("adopt --write saves it, refuses to overwrite, and unburn takes it back", pack() {
   stick dir = fresh("tests/fixtures/polyglot")
   stick w = tool_in(dir, ["adopt", "--write"])
   exits(w, 0)
-  says(w.out, "wrote cig-tasks.json: 13 task(s)")
+  says(w.out, "wrote cig-tasks.json: 5 components")
   stick first = last_run(dir).id
   stick again = tool_in(dir, ["adopt", "--write"])
   exits(again, 2)
@@ -364,10 +404,10 @@ test("adopt --write saves it, refuses to overwrite, and unburn takes it back", p
   assert(not there(dir, "cig-tasks.json"), "unburning the first write should remove it")
 })
 
-test("an adopted manifest runs as it is: a Python script, with arguments", pack() {
+test("an adopted project runs its scripts as they are, with arguments", pack() {
   stick dir = fresh("tests/fixtures/polyglot")
   exits(tool_in(dir, ["adopt", "--write"]), 0)
-  stick r = tool_in(dir, ["run", "hello", "--", "from", "cig"])
+  stick r = tool_in(dir, ["run", "scripts:hello", "--", "from", "cig"])
   exits(r, 0)
   says(r.out, "hello from python from cig")
   if proc.which("make") != null {
@@ -379,7 +419,413 @@ test("adopt in a project with nothing to adopt says so", pack() {
   stick dir = fresh("tests/fixtures/empty")
   stick r = tool_in(dir, ["adopt"])
   exits(r, 0)
-  says(r.err, "found no scripts")
+  says(r.err, "found no toolchain")
+})
+
+# ----- many languages, one chain -------------------------------------------------
+
+test("adopt finds every language in a monorepo and keeps the old glue out of the groups", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  stick r = tool_in(dir, ["adopt"])
+  exits(r, 0)
+  stick comps = json.parse(r.out).components
+  stick want = {
+    make: ".|make", scripts: ".|scripts", infra: "infra|terraform", ml: "ml|python-uv",
+    api: "services/api|go", "api-docker": "services/api|docker", worker: "services/worker|rust-cargo", web: "web|node-pnpm",
+  }
+  for name in want {
+    assert(comps.has(name), "adopt missed ${name}: ${comps.keys()}")
+    assert("${comps[name].path}|${comps[name].toolchain}" == want[name], "${name}: ${comps[name]}")
+  }
+  assert(comps.len() == want.len(), "extra components: ${comps.keys()}")
+  assert(comps.make.groups == false and comps.scripts.groups == false, "the root glue should stay out of the groups")
+  says(r.err, "make, scripts: at the root of a project with components below it, these usually chain the others")
+})
+
+test("adopt leaves out test data, a component's own tests, and stray script folders", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.mkdir(path.join(dir, "app/tests"))
+    fs.write_text(path.join(dir, "app/go.mod"), "module app\n\ngo 1.22\n")
+    fs.write_text(path.join(dir, "app/tests/package.json"), "{\"name\": \"e2e\"}\n")
+    fs.mkdir(path.join(dir, "tests/fixtures/sample"))
+    fs.write_text(path.join(dir, "tests/fixtures/sample/Cargo.toml"), "[package]\nname = \"sample\"\n")
+    fs.mkdir(path.join(dir, "skills/one/scripts"))
+    fs.write_text(path.join(dir, "skills/one/scripts/run.sh"), "#!/bin/sh\necho one\n")
+  }
+  stick r = tool_in(dir, ["adopt"])
+  exits(r, 0)
+  stick comps = json.parse(r.out).components
+  assert(comps.keys() == ["app"], "expected only app: ${comps.keys()}")
+})
+
+test("one stage runs in every language, in dependency order, each in its own directory", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick r = tool_stubbed(dir, ["run", "build"])
+  exits(r, 0)
+  says(r.out, "done: 6 tasks")
+  in_order(stub_log(dir), [
+    "go mod download @" + path.join(dir, "services/api"),
+    "go build ./... @" + path.join(dir, "services/api"),
+    "cargo fetch --locked @" + path.join(dir, "services/worker"),
+    "cargo build --workspace --locked @" + path.join(dir, "services/worker"),
+    "pnpm install --frozen-lockfile @" + path.join(dir, "web"),
+    "pnpm run build @" + path.join(dir, "web"),
+  ])
+  never_says(stub_log(dir), "make ")
+  stick listed = tool_in(dir, ["list"]).out
+  in_order(listed, ["ml:setup", "ml:format", "ml:lint", "ml:test", "api:setup", "web:setup", "web:lint", "web:check", "web:build"])
+  says(listed, "api:format-check     out=$(find . -name")
+  says(listed, "...   (in services/api)")
+  says(tool_in(dir, ["show", "api:format-check"]).out, "exit 1; fi")
+})
+
+test("ci runs format-check, lint, check, build and test in every language", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick r = tool_stubbed(dir, ["run", "ci"])
+  exits(r, 0)
+  says(r.out, "done: 24 tasks")
+  in_order(stub_log(dir), [
+    "terraform fmt -check -recursive -diff", "uv run --locked ruff format --check .", "cargo fmt --all --check",
+    "uv run --locked ruff check .", "cargo clippy --workspace --all-targets --locked -- -D warnings", "pnpm run lint",
+    "terraform validate", "go vet ./...", "pnpm run typecheck",
+    "go build ./...", "pnpm run build",
+    "uv run --locked pytest", "go test ./...", "cargo test --workspace --locked", "pnpm run test",
+  ])
+})
+
+test("after puts one component's stages behind another's", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  edit_manifest(dir, pack(m) {
+    m.components.api["after"] = ["web"]
+  })
+  says(tool_in(dir, ["show", "api:build"]).out, "needs      api:setup, web:build")
+  in_order(tool_in(dir, ["plan", "build"]).out, ["web:build", "api:build"])
+})
+
+test("a failure in one language stops the chain and rolls it back", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  edit_manifest(dir, pack(m) {
+    m.components.web["stages"] = {build: ["pnpm", "run", "build", "fail-please"]}
+    m["tasks"] = {stamp: {shell: "echo built > stamp.txt", needs: ["api:build"]}, ship: {needs: ["stamp", "build"]}}
+  })
+  stick r = tool_stubbed(dir, ["run", "ship"])
+  exits(r, 1)
+  says(r.err, "task `web:build` failed: pnpm run build fail-please exited 3")
+  says(stub_log(dir), "go build ./...")
+  assert(not there(dir, "stamp.txt"), "stamp.txt survived the rollback")
+})
+
+test("a project's own toolchain settings, stage overrides and toolchains win", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  edit_manifest(dir, pack(m) {
+    m["toolchains"] = {
+      "python-uv": {stages: {test: [["uv", "run", "pytest", "-x"]]}},
+      gen: {extends: "go", language: "Go with generate", stages: {build: [{shell: "go generate ./... && go build ./..."}]}},
+    }
+    m.components.ml["stages"] = {lint: false}
+    m.components.api["toolchain"] = "gen"
+  })
+  stick r = tool_stubbed(dir, ["run", "test"])
+  exits(r, 0)
+  says(stub_log(dir), "uv run pytest -x @")
+  stick listed = tool_in(dir, ["list"]).out
+  never_says(listed, "ml:lint")
+  says(listed, "go generate ./... && go build ./...")
+})
+
+test("pip's setup installs what the project's tests need", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  stick head = "[build-system]\nrequires = [\"setuptools\"]\n\n[project]\nname = \"x\"\n\n"
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), "{\"components\": {\"py\": {\"path\": \".\", \"toolchain\": \"python-pip\"}}}\n")
+  }
+  stick cases = [
+    [head + "[project.optional-dependencies]\ndocs = [\n  \"sphinx[x]>=7\",\n]\ndev = [\"pytest\"]\n", "pip install -e '.[dev]'"],
+    [head + "[dependency-groups]\ndev = [\"pytest\"]\n", "pip install -e . --group dev"],
+    [head + "[project.optional-dependencies]\ntest = [\"pytest\"]\n\n[tool.other]\ndev = 1\n", "pip install -e '.[test]'"],
+    [head + "[tool.other]\ndev = 1\n", "pip install -e .\n"],
+  ]
+  for c in cases {
+    burn {
+      fs.write_text(path.join(dir, "pyproject.toml"), c[0])
+    }
+    says(tool_in(dir, ["show", "py:setup"]).out + "\n", c[1])
+  }
+})
+
+test("doctor finds each toolchain, its version and the project's pins", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick r = tool_stubbed(dir, ["doctor"])
+  exits(r, 0)
+  says(r.out, "pin      node pinned 20 (web/.nvmrc): does not match 99.1.0")
+  says(r.out, "pin      go needs at least 1.22 (services/api/go.mod): satisfied by 99.1.0")
+  says(r.out, "0 missing tool(s), 1 version mismatch(es)")
+  edit_manifest(dir, pack(m) {
+    m.components["numerics"] = {path: ".", toolchain: "fortran-fpm"}
+  })
+  stick missing = tool_stubbed(dir, ["doctor"])
+  exits(missing, 1)
+  says(missing.out, "missing  fpm")
+  says(missing.out, "https://fpm.fortran-lang.org")
+})
+
+test("toolchains lists what this knows, and one in full", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  stick r = tool_in(dir, ["toolchains"])
+  exits(r, 0)
+  stick count = int(r.out.split(" ").first())
+  assert(count >= 50, "only ${count} toolchains")
+  for id in ["node-pnpm", "python-uv", "rust-cargo", "go", "java-gradle", "dotnet", "cmake", "ruby-bundler", "php-composer", "elixir-mix", "swift-spm", "flutter", "zig", "terraform", "make"] {
+    says(r.out, id)
+  }
+  says(tool_in(dir, ["toolchains", "rust-cargo"]).out, "\"cargo\"")
+  says(tool_in(dir, ["toolchains", "--markdown"]).out, "| `node-pnpm` | JavaScript / TypeScript |")
+  stick bad = tool_in(dir, ["toolchains", "rust"])
+  exits(bad, 2)
+  says(bad.err, "did you mean rust-cargo")
+})
+
+test("two task runners in one directory: one runs the stages, so nothing runs twice", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "Makefile"), ".PHONY: build\nbuild:\n\techo make-build\n")
+    fs.write_text(path.join(dir, "justfile"), "build:\n    echo just-build\n")
+  }
+  stick r = tool_in(dir, ["adopt", "--write"])
+  exits(r, 0)
+  says(r.err, "just: its targets are tasks (just:<target>), kept out of the stage groups because make already runs the stages")
+  stick b = tool_stubbed(dir, ["run", "build"])
+  exits(b, 0)
+  says(stub_log(dir), "make build @")
+  never_says(stub_log(dir), "just build")
+  exits(tool_stubbed(dir, ["run", "just:build"]), 0)
+  says(stub_log(dir), "just build @")
+})
+
+test("--only runs a stage group without its setup", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick r = tool_stubbed(dir, ["run", "--only", "build"])
+  exits(r, 0)
+  says(r.out, "done: 3 tasks")
+  says(stub_log(dir), "go build ./...")
+  never_says(stub_log(dir), "go mod download")
+  never_says(stub_log(dir), "pnpm install")
+})
+
+test("adopt --force finds the project again and keeps the tasks written by hand", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  edit_manifest(dir, pack(m) {
+    m["tasks"] = {ship: {shell: "echo shipping", needs: ["build"]}}
+    m.components.web["after"] = ["ml"]
+  })
+  edit_manifest(dir, pack(m) {
+    m.components["jobs"] = m.components.worker
+    m.components.remove("worker")
+    m.components["docs"] = {path: "docs", toolchain: "shell", stages: {build: {shell: "echo docs"}}}
+    m.components["gone"] = {path: "old-service", toolchain: "go"}
+  })
+  burn {
+    fs.mkdir(path.join(dir, "services/billing"))
+    fs.write_text(path.join(dir, "services/billing/go.mod"), "module billing\n\ngo 1.23\n")
+  }
+  stick again = tool_in(dir, ["adopt", "--write", "--force"])
+  exits(again, 0)
+  says(again.err, "billing: new since the manifest was written")
+  says(again.err, "docs: kept as the manifest has it")
+  says(again.err, "gone: dropped, because old-service is no longer a directory")
+  stick m = json.load(path.join(dir, "cig-tasks.json"))
+  assert(m.tasks.has("ship"), "adopt --force dropped the hand-written task: ${m.tasks}")
+  assert(m.components.web.get("after", []) == ["ml"], "adopt --force dropped web's after: ${m.components.web}")
+  assert(m.components.has("jobs") and not m.components.has("worker"), "the rename did not survive: ${m.components.keys()}")
+  assert(m.components.has("billing") and m.components.has("docs") and not m.components.has("gone"), "components: ${m.components.keys()}")
+  stick listed = tool_in(dir, ["list"]).out
+  says(listed, "ship")
+  stick checked = tool_in(dir, ["check"])
+  exits(checked, 0)
+  says(checked.out, "0 error(s)")
+})
+
+test("env files, the environment and stdin reach a task, templates filled", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.write_text(path.join(dir, ".env"), "# settings\nexport GREETING=\"hi there\"\nEMPTY=\n")
+  }
+  edit_manifest(dir, pack(m) {
+    m.tasks["greet"] = {cmd: ["bash", "-c", "echo \"$GREETING / {{project}} / {{env.TOWN}} / $EMPTY.\""], env_file: ".env"}
+    m.tasks["shout"] = {cmd: ["tr", "a-z", "A-Z"], stdin: "commit {{version.commit}}"}
+  })
+  stick g = hop_env(dir, "cig", ["run", tool, "--", "run", "greet"], {TOWN: "Ballarat"})
+  exits(g, 0)
+  says(g.out, "hi there / chain / Ballarat / .")
+  stick sh = tool_in(dir, ["run", "shout"])
+  exits(sh, 0)
+  says(sh.out, "COMMIT ABC123")
+})
+
+# ----- values between languages --------------------------------------------------
+
+test("one language's output becomes another's arguments, environment and input", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick r = tool_in(dir, ["run", "report"])
+  exits(r, 0)
+  says(r.out, "v=1.4.0 c=abc123 n=3")
+  says(r.out, "from python: 1.4.0 3")
+  says(tool_in(dir, ["run", "each"]).out, "[a][b][c]")
+  says(tool_in(dir, ["run", "json-arg"]).out, "abc123")
+  says(tool_in(dir, ["run", "env-pass"]).out, "v1.4.0 from env-pass")
+  says(tool_in(dir, ["run", "notes"]).out, "line two|")
+  stick shown = tool_in(dir, ["show", "report"]).out
+  says(shown, "uses       the output of version, stats")
+})
+
+test("|sh quotes a value for a shell line, so a value cannot run as a command", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  edit_manifest(dir, pack(m) {
+    m.tasks["evil"] = {cmd: ["printf", "x; echo INJECTED $(echo too) {a,b}"], capture: "text"}
+    m.tasks["safe"] = {shell: "printf '<%s>' {{evil|sh}} {{words|sh}}"}
+  })
+  stick r = tool_in(dir, ["run", "safe"])
+  exits(r, 0)
+  says(r.out, "<x; echo INJECTED $(echo too) {a,b}><b><a><c>")
+  never_says(r.out, "\n    INJECTED")
+})
+
+test("outputs shows what the last run handed on", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  exits(tool_in(dir, ["run", "report"]), 0)
+  stick v = json.parse(tool_in(dir, ["outputs", "version"]).out)
+  assert(v.commit == "abc123", "outputs: ${v}")
+  says(tool_in(dir, ["outputs"]).out, "\"count\": \"3\"")
+})
+
+test("a task whose inputs have not changed is skipped until they do", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  says(tool_in(dir, ["run", "make-out"]).out, "made")
+  says(tool_in(dir, ["run", "make-out"]).out, "up to date")
+  burn {
+    fs.write_text(path.join(dir, "in.txt"), "second\n")
+  }
+  says(tool_in(dir, ["run", "make-out"]).out, "made")
+  says(tool_in(dir, ["run", "make-out", "--force"]).out, "made")
+  assert(read(dir, "out/result.txt") == "second\n", "the output was not rebuilt")
+})
+
+test("a value from an earlier task is an input too, and globs name inputs", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(path.join(dir, "src/deep"))
+    fs.write_text(path.join(dir, "src/deep/a.txt"), "a\n")
+    fs.write_text(path.join(dir, "VERSION"), "1.0\n")
+  }
+  edit_manifest(dir, pack(m) {
+    m.tasks["ver"] = {cmd: ["cat", "VERSION"], capture: "text"}
+    m.tasks["stamp"] = {shell: "cat src/deep/*.txt > stamp.txt && echo stamped {{ver}}", inputs: ["src/**/*.txt"], produces: ["stamp.txt", "st*.txt"]}
+    m.tasks["no-wheel"] = {cmd: ["true"], produces: ["dist/*.whl"]}
+  })
+  says(tool_in(dir, ["run", "stamp"]).out, "stamped 1.0")
+  says(tool_in(dir, ["run", "stamp"]).out, "up to date")
+  burn {
+    fs.write_text(path.join(dir, "VERSION"), "1.1\n")
+  }
+  says(tool_in(dir, ["run", "stamp"]).out, "stamped 1.1")
+  says(tool_in(dir, ["run", "stamp"]).out, "up to date")
+  burn {
+    fs.write_text(path.join(dir, "src/deep/b.txt"), "b\n")
+  }
+  says(tool_in(dir, ["run", "stamp"]).out, "stamped 1.1")
+  assert(read(dir, "stamp.txt") == "a\nb\n", "stamp.txt: ${read(dir, "stamp.txt")}")
+  stick none = tool_in(dir, ["run", "no-wheel"])
+  exits(none, 1)
+  says(none.err, "did not produce dist/*.whl")
+})
+
+test("a task must produce what it says, and capture what it promises", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick liar = tool_in(dir, ["run", "liar"])
+  exits(liar, 1)
+  says(liar.err, "task `liar` exited 0 but did not produce never.txt")
+  stick bad = tool_in(dir, ["run", "bad-json"])
+  exits(bad, 1)
+  says(bad.err, "captures json, and its stdout is not JSON: not json")
+})
+
+test("a dry run plans the chain and leaves its templates unresolved", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick r = cig(dir, ["run", "--dry-run", tool, "--", "run", "report"])
+  exits(r, 0)
+  says(r.out, "dry run: 3 tasks planned, none executed")
+  says(r.out, "v={{version.version}}")
+})
+
+test("check finds broken templates, pipes, captures and components", pack() {
+  stick dir = fresh("tests/fixtures/broken")
+  stick r = tool_in(dir, ["check"])
+  exits(r, 1)
+  for piece in [
+    "{{nobody.value}} names no task",
+    "unknown filter",
+    "stdin_from `ghost` is not a task",
+    "`capture` is one of",
+    "path `nowhere` is not a directory",
+    "toolchain `rustt` is not one this knows; did you mean rust-cargo",
+    "is after `phantom`, which is not a component",
+    "unknown key `lang`, ignored; did you mean `toolchain`?",
+  ] {
+    says(r.out, piece)
+  }
+})
+
+# ----- the polyglot example ---------------------------------------------------------
+
+pull has_node_and_python() {
+  if proc.which("node") == null or proc.which("python3") == null {
+    exhale "      (skipped: needs node and python3 on PATH)"
+    snuff false
+  }
+  snuff true
+}
+
+test("the polyglot example releases: Python's numbers, Node's page, bash's deploy", pack() {
+  if not has_node_and_python() {
+    snuff
+  }
+  stick dir = fresh("examples/polyglot")
+  exits(tool_in(dir, ["check"]), 0)
+  stick r = tool_in(dir, ["run", "release"])
+  exits(r, 0)
+  in_order(r.out, ["] data:lint:", "] web:lint:", "] data:test:", "] web:test:", "] version:", "] stats:", "] site:", "] deploy:", "] announce:"])
+  says(r.out, "live: file://")
+  says(read(dir, "public/2.3.0/index.html"), "5 orders, 555.84 in total; the top region is north")
+  stick id = last_run(dir).id
+  stick undone = cig(dir, ["unburn", id])
+  exits(undone, 0)
+  says(undone.out + undone.err, "took 2.3.0 back from public")
+  assert(not there(dir, "public/2.3.0/index.html"), "the deploy survived unburn")
+})
+
+test("the polyglot example rebuilds the page when Python's numbers change", pack() {
+  if not has_node_and_python() {
+    snuff
+  }
+  stick dir = fresh("examples/polyglot")
+  exits(tool_in(dir, ["run", "site"]), 0)
+  says(tool_in(dir, ["run", "site"]).out, "up to date")
+  burn {
+    fs.append_text(path.join(dir, "data/sales.csv"), "south,500.00\n")
+  }
+  stick again = tool_in(dir, ["run", "site"])
+  exits(again, 0)
+  says(again.out, "built ")
+  says(read(dir, "web/dist/index.html"), "6 orders, 1055.84 in total; the top region is south")
 })
 
 # ----- the launcher ---------------------------------------------------------

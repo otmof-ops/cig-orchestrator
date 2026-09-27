@@ -1,8 +1,64 @@
 # Findings
 
-What building this orchestrator taught about CigScript. Two rounds: the
-sandbox (against 1.1.0 with the hardening round merged), and 0.1.0 of the
-tool (against 1.1.1).
+What building this orchestrator taught about CigScript. Three rounds: the
+sandbox (against 1.1.0 with the hardening round merged), 0.1.0 of the tool,
+and 0.2.0, the polyglot orchestrator (both against 1.1.1).
+
+## Round three: building 0.2.0 (CigScript 1.1.1)
+
+0.2.0 runs eight components' stages as one chain and hands values from one
+language to the next, so it leans on hops, the pack and the rollback far
+harder than 0.1.0 did.
+
+Gaps, left for a decision:
+
+- **Hop watching journals every file a setup creates, and skips four
+  directory names.** `python3 -m venv .venv` inside the pack took 2.55 s and
+  wrote 2,016 journal ops for its 1,010 files; outside cig it takes 1.57 s.
+  The scan skips `.git`, `node_modules`, `target` and `.cigscript` (BURN.md),
+  so `.venv`, `.gradle`, `.terraform`, `build`, `dist`, `vendor`,
+  `__pycache__`, `.dart_tool`, `_build` and `.stack-work` are journaled, and
+  a large `uv sync` or Gradle build pays for every file. A skip list in the
+  `pack` declaration, or a `.cigignore`, would let a project choose; it is
+  the "hop watch exclusions" item the hardening round left open.
+- **A script cannot fail with a message of its own without quoting its own
+  source.** Coughing is the only way to end with an error and a rollback
+  (`exit(n)` ends cleanly and keeps the burns), and the report frames the
+  `cough` line inside the script. For a tool written in CigScript, its users
+  see the tool's source under their task's failure. A way to raise an error
+  that rolls back and reports only its message would fix it; until then the
+  tool coughs a variable named for what happened (`cough the_run_failed`),
+  so the quoted line reads as a sentence.
+- **Keywords cannot name a variable or a parameter, though LANGUAGE.md says
+  they are reserved as statement starters only.** `pull f(pack)`,
+  `pull f(chain)` and `stick burn = 1` are all `E200`; only map keys and
+  names after a dot accept them. Either the parser could take them in
+  binding positions or the section could say where they are refused. The
+  knowledge base's `node_manager` takes `packer` for this reason.
+- **Still open from round two, and felt more now:** hop output is captured,
+  never streamed, so `cigo run ci` across eight components is silent until
+  each task ends; and a script still cannot learn its own run id to print
+  the `cig unburn <id>` line itself.
+
+Worked around, fixed upstream in #16 (unreleased):
+
+- `fs.glob` with a leading `./` matches nothing and can list `""`, and
+  `path.join(".", pattern)` produces exactly that `./`. The tool strips the
+  prefix and drops empty matches before using globs for `inputs` and
+  `produces`.
+
+Worked as advertised, and relied on:
+
+- Maps keep insertion order (LANGUAGE.md says so), which keeps components,
+  stages and the knowledge base in the order they were written.
+- A chain of 24 tasks built at run time, named, quiet, with one step's
+  failure carrying the task's own error as `cause`.
+- Compensations keep their state after the run ends: the deploy's undo in
+  `examples/polyglot` runs from `cig unburn` with the arguments the templates
+  gave it during the run.
+- Simulated hops in a dry run return `simulated: true`, which is how the tool
+  knows to keep `{{...}}` templates in the plan instead of failing on output
+  that no task produced.
 
 ## Round two: building 0.1.0 (CigScript 1.1.1)
 

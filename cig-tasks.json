@@ -1,21 +1,44 @@
 {
   "project": "cig-orchestrator",
+  "components": {
+    "cig": {
+      "path": ".",
+      "toolchain": "cigscript",
+      "desc": "orchestrate.cig and the test suite, through cig's static checker"
+    },
+    "shell": {
+      "path": ".",
+      "toolchain": "shell",
+      "stages": {
+        "format": false,
+        "format-check": false,
+        "lint": {
+          "shell": "git ls-files -z -- '*.sh' bin/cigo ':!tests/fixtures' | xargs -0 shellcheck"
+        }
+      },
+      "desc": "shellcheck over the launcher, the installer and the examples' scripts; the fixtures are shaped like other people's scripts on purpose"
+    }
+  },
   "tasks": {
-    "lint-tool": {
-      "cmd": ["cig", "check", "orchestrate.cig"],
-      "desc": "cig's static checker over the tool"
-    },
-    "lint-tests": {
-      "cmd": ["cig", "check", "tests/run.cig"],
-      "desc": "cig's static checker over the test suite"
-    },
-    "lint-shell": {
-      "shell": "if command -v shellcheck >/dev/null; then shellcheck bin/cigo install.sh examples/demo-app/scripts/*.sh; else echo 'shellcheck not installed; skipped'; fi",
-      "desc": "shellcheck over the launcher, the installer and the demo's scripts, when it is installed"
+    "toolchains-doc": {
+      "shell": "cig run --no-check orchestrate.cig -- toolchains --markdown > TOOLCHAINS.md.new && mv TOOLCHAINS.md.new TOOLCHAINS.md",
+      "inputs": [
+        "orchestrate.cig"
+      ],
+      "produces": [
+        "TOOLCHAINS.md"
+      ],
+      "desc": "TOOLCHAINS.md, written from the knowledge base in orchestrate.cig"
     },
     "test": {
-      "cmd": ["cig", "run", "tests/run.cig"],
-      "needs": ["lint-tool", "lint-tests", "lint-shell"],
+      "cmd": [
+        "cig",
+        "run",
+        "tests/run.cig"
+      ],
+      "needs": [
+        "lint"
+      ],
       "timeout_ms": 900000,
       "desc": "the test suite, itself written in CigScript"
     }

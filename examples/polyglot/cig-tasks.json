@@ -1,0 +1,65 @@
+{
+  "project": "sales-site",
+  "toolchains": {
+    "py-plain": {
+      "language": "Python, standard library only",
+      "short": "py",
+      "tools": ["python3"],
+      "versions": {"python": ["python3", "--version"]},
+      "stages": {
+        "lint": [["python3", "-m", "py_compile", "stats.py", "test_stats.py"]],
+        "test": [["python3", "-m", "unittest", "-q"]]
+      }
+    },
+    "node-plain": {
+      "language": "Node.js, no dependencies",
+      "short": "node",
+      "tools": ["node"],
+      "versions": {"node": ["node", "--version"]},
+      "stages": {
+        "lint": [["node", "--check", "build.mjs"]],
+        "test": [["node", "--test", "--test-reporter=spec"]]
+      }
+    }
+  },
+  "components": {
+    "data": {"path": "data", "toolchain": "py-plain", "env": {"PYTHONDONTWRITEBYTECODE": "1"}},
+    "web": {"path": "web", "toolchain": "node-plain", "after": ["data"]}
+  },
+  "tasks": {
+    "version": {
+      "cmd": ["cat", "VERSION"],
+      "capture": "text",
+      "desc": "the release number, as text: {{version}}"
+    },
+    "stats": {
+      "cmd": ["python3", "stats.py", "sales.csv"],
+      "cwd": "data",
+      "env": {"PYTHONDONTWRITEBYTECODE": "1"},
+      "capture": "json",
+      "desc": "Python: totals from the CSV as JSON, so {{stats.total}} is a value"
+    },
+    "site": {
+      "cmd": ["node", "build.mjs", "--version", "{{version}}"],
+      "cwd": "web",
+      "env": {"TOTAL": "{{stats.total}}", "ORDERS": "{{stats.orders}}", "TOP_REGION": "{{stats.top_region}}"},
+      "inputs": ["*.mjs"],
+      "produces": ["dist/index.html"],
+      "desc": "Node: the page from Python's numbers; hands on {{site.page}} through $CIG_OUTPUT"
+    },
+    "deploy": {
+      "cmd": ["bash", "deploy/deploy.sh", "{{site.page}}", "{{version}}"],
+      "undo": ["bash", "deploy/undeploy.sh", "{{version}}"],
+      "needs": ["test"],
+      "desc": "bash: publishes to $DEPLOY_TO (default ./public); the undo takes it back"
+    },
+    "announce": {
+      "cmd": ["python3", "deploy/announce.py", "{{deploy.url}}", "{{site.bytes}}"],
+      "desc": "Python again, with what bash and Node handed on"
+    },
+    "release": {
+      "needs": ["ci", "announce"],
+      "desc": "every language's lint and tests, then the chain"
+    }
+  }
+}
