@@ -1,0 +1,43 @@
+{
+  "project": "demo-app",
+  "tasks": {
+    "lint": {
+      "cmd": ["python3", "scripts/lint.py", "src"],
+      "desc": "trailing whitespace and tabs in src/"
+    },
+    "build": {
+      "cmd": ["bash", "scripts/build.sh"],
+      "needs": ["lint"],
+      "desc": "build/app from src/"
+    },
+    "test": {
+      "cmd": ["bash", "scripts/test.sh"],
+      "needs": ["build"],
+      "timeout_ms": 10000,
+      "desc": "the built app must greet"
+    },
+    "flaky": {
+      "cmd": ["bash", "scripts/flaky.sh"],
+      "needs": ["build"],
+      "retries": 3,
+      "desc": "fails twice, then works: retries at work"
+    },
+    "package": {
+      "cmd": ["bash", "scripts/package.sh"],
+      "needs": ["test", "flaky"],
+      "desc": "dist/app-<version>.tar.gz"
+    },
+    "deploy": {
+      "cmd": ["bash", "scripts/deploy.sh"],
+      "needs": ["package"],
+      "undo": ["bash", "scripts/undeploy.sh"],
+      "desc": "to $DEMO_REMOTE, outside the project: undo says how to take it back"
+    },
+    "notify": {
+      "cmd": ["bash", "scripts/notify.sh"],
+      "needs": ["deploy"],
+      "ok": [0, 1],
+      "desc": "exits 1 for no channel configured, which the ok list accepts"
+    }
+  }
+}

@@ -1,0 +1,407 @@
+#!/usr/bin/env cig
+# The test suite for cig-orchestrator, written in CigScript. Every test copies
+# a fixture into .test-work/, runs the tool there as a child `cig` with its own
+# CIGSCRIPT_HOME (so nothing reaches your run history), and checks what it
+# printed and what it left on disk. From the repository root:
+#
+#   cig run tests/run.cig              every test
+#   cig run tests/run.cig -- adopt     the tests whose name contains "adopt"
+#   cigo run test                      the same, through the tool itself
+#
+# A failing suite rolls itself back, .test-work/ included; to look around
+# after a failure, run it with `cig run --no-rollback tests/run.cig`.
+
+pack { "./.test-work" }
+
+stick root = fs.cwd()
+stick tool = path.join(root, "orchestrate.cig")
+stick launcher = path.join(root, "bin", "cigo")
+stick work = path.join(root, ".test-work")
+stick home = path.join(work, "cig-home")
+stick only = args.get(0, "")
+
+if not fs.is_file(tool) {
+  log.error("run this from the repository root: cig run tests/run.cig")
+  exit(2)
+}
+
+roll passed = 0
+roll failed = []
+roll copies = 0
+
+pull test(name, body) {
+  if only != "" and not name.contains(only) {
+    snuff
+  }
+  try {
+    body()
+    passed += 1
+    exhale "ok    ${name}"
+  } ashtray e {
+    failed.push(name)
+    exhale "FAIL  ${name}"
+    for line in e.message.lines() {
+      exhale "        ${line}"
+    }
+  }
+}
+
+# A fresh copy of a fixture, under .test-work/.
+pull fresh(fixture) {
+  copies += 1
+  stick dir = path.join(work, "${copies}-${path.base(fixture)}")
+  burn {
+    fs.cp(path.join(root, fixture), dir)
+  }
+  snuff dir
+}
+
+# Any program, in `dir`, with this suite's own cig home: {code, out, err}.
+pull hop(dir, program, words) {
+  roll r = null
+  burn {
+    r = proc.run(program, words, {
+      cwd: dir,
+      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", DEMO_REMOTE: dir + "-remote"},
+      timeout_ms: 120000,
+    })
+  }
+  snuff r
+}
+
+pull cig(dir, words) {
+  snuff hop(dir, "cig", words)
+}
+
+# The tool, the way a dev runs it without the launcher.
+pull tool_in(dir, words) {
+  snuff cig(dir, ["run", tool, "--"] + words)
+}
+
+pull last_run(dir) {
+  snuff json.parse(cig(dir, ["--json", "runs"]).out)[0]
+}
+
+pull exits(r, want) {
+  assert(r.code == want, "exit ${r.code}, wanted ${want}\n--- stdout\n${r.out}--- stderr\n${r.err}")
+}
+
+pull says(textv, piece) {
+  assert(textv.contains(piece), "expected `${piece}` in:\n${textv}")
+}
+
+pull never_says(textv, piece) {
+  assert(not textv.contains(piece), "did not expect `${piece}` in:\n${textv}")
+}
+
+pull there(dir, rel) {
+  snuff fs.exists(path.join(dir, rel))
+}
+
+pull read(dir, rel) {
+  snuff fs.read_text(path.join(dir, rel))
+}
+
+if fs.exists(work) {
+  burn {
+    fs.rm(work)
+  }
+}
+
+# ----- the basics -----------------------------------------------------------
+
+test("help and version answer anywhere, manifest or not", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  stick r = tool_in(dir, ["help"])
+  exits(r, 0)
+  says(r.out, "cigo adopt")
+  says(tool_in(dir, ["version"]).out, "cig-orchestrator ")
+})
+
+test("without a manifest, the error says how to start", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  stick r = tool_in(dir, ["list"])
+  exits(r, 2)
+  says(r.err, "no cig-tasks.json")
+  says(r.err, "cigo adopt")
+})
+
+test("an unknown command, flag or task is a usage error", pack() {
+  stick dir = fresh("examples/demo-app")
+  exits(tool_in(dir, ["frobnicate"]), 2)
+  stick r = tool_in(dir, ["run", "deploy", "--frob"])
+  exits(r, 2)
+  says(r.err, "unknown flag `--frob`")
+  stick q = tool_in(dir, ["run", "deplyo"])
+  exits(q, 2)
+  says(q.err, "no task named `deplyo`; did you mean deploy?")
+})
+
+test("list shows each task's command, needs and extras", pack() {
+  stick dir = fresh("examples/demo-app")
+  stick r = tool_in(dir, ["list"])
+  exits(r, 0)
+  says(r.out, "demo-app: 7 tasks")
+  says(r.out, "bash scripts/deploy.sh   needs package  [undo]")
+  says(r.out, "[retries 3]")
+  says(r.out, "# the built app must greet")
+})
+
+test("plan resolves dependencies, each task once, in order", pack() {
+  stick dir = fresh("examples/demo-app")
+  stick r = tool_in(dir, ["plan", "deploy"])
+  exits(r, 0)
+  says(r.out, "6 tasks, in this order:")
+  says(r.out, " 1. lint")
+  says(r.out, " 6. deploy")
+  never_says(r.out, "notify")
+  says(tool_in(dir, ["plan", "--only", "deploy"]).out, "1 task, in this order:")
+})
+
+test("check passes a good manifest", pack() {
+  stick dir = fresh("examples/demo-app")
+  stick r = tool_in(dir, ["check"])
+  exits(r, 0)
+  says(r.out, "7 task(s), 0 error(s), 0 warning(s)")
+})
+
+test("check finds what is wrong before anything runs", pack() {
+  stick dir = fresh("tests/fixtures/broken")
+  stick r = tool_in(dir, ["check"])
+  exits(r, 1)
+  for piece in [
+    "dependency loop: a > b > a",
+    "`definitely-not-installed-xyz` is not on PATH",
+    "`scripts/nope.sh` does not exist",
+    "never reaches a shell",
+    "unknown key `need`, ignored; did you mean `needs`?",
+    "has both `cmd` and `shell`",
+    "has nothing to run",
+    "needs `nobody`, which is not a task",
+    "`ok` must be exit codes",
+    "got a string",
+    "unknown key `colour` at the top",
+  ] {
+    says(r.out, piece)
+  }
+  stick p = tool_in(dir, ["plan", "a"])
+  exits(p, 2)
+  says(p.err, "dependency loop")
+})
+
+# ----- running --------------------------------------------------------------
+
+test("run deploy runs the closure, retries the flaky script, deploys outside", pack() {
+  stick dir = fresh("examples/demo-app")
+  stick r = tool_in(dir, ["run", "deploy"])
+  exits(r, 0)
+  says(r.out, "demo-app: lint > build > test > flaky > package > deploy")
+  says(r.out, "[4/6] flaky: bash scripts/flaky.sh")
+  says(r.out, "exit 7; trying again (3 of 4)")
+  says(r.out, "(attempt 3)")
+  says(r.out, "done: 6 tasks")
+  assert(read(dir + "-remote", "current").trim() == "0.1.0", "the deploy did not land")
+  assert(read(dir, "build/.flaky-count").trim() == "3", "flaky ran a different number of times")
+  says(read(dir, ".cig-orchestrator/logs/flaky.log"), "attempt 3")
+  assert(fs.list(path.join(dir, ".cig-orchestrator/reports")).len() == 1, "no report")
+})
+
+test("cig unburn undoes a whole run: outputs removed, the deploy's undo run", pack() {
+  stick dir = fresh("examples/demo-app")
+  exits(tool_in(dir, ["run", "deploy"]), 0)
+  stick u = cig(dir, ["unburn", last_run(dir).id])
+  exits(u, 0)
+  says(u.out + u.err, "undoing deploy: bash scripts/undeploy.sh")
+  says(u.out + u.err, "undeployed v0.1.0")
+  assert(not there(dir + "-remote", "current"), "the undo did not run")
+  assert(not there(dir, "build/app"), "build/app is still there")
+  assert(not there(dir, "dist/app-0.1.0.tar.gz"), "the package is still there")
+  assert(not there(dir, ".cig-orchestrator"), "the logs are still there")
+})
+
+test("a failing task rolls the whole run back, and nothing is deployed", pack() {
+  stick dir = fresh("examples/demo-app")
+  burn {
+    fs.write_text(path.join(dir, "src/greeting.txt"), "goodbye from demo-app\n")
+  }
+  stick r = tool_in(dir, ["run", "deploy"])
+  exits(r, 1)
+  says(r.out, "test: FAILED")
+  says(r.out, "stopped at test")
+  says(r.err, "task `test` failed: bash scripts/test.sh exited 1")
+  says(r.err, "rolling back")
+  assert(not there(dir, "build/app"), "build/app survived the rollback")
+  assert(not there(dir + "-remote", "current"), "something was deployed")
+})
+
+test("a later failure runs the deploy's undo during the rollback", pack() {
+  stick dir = fresh("examples/demo-app")
+  stick manifest = path.join(dir, "cig-tasks.json")
+  stick m = json.load(manifest)
+  m.tasks["verify"] = {cmd: ["bash", "-c", "echo remote looks wrong >&2; exit 4"], needs: ["deploy"]}
+  burn {
+    json.save(manifest, m, 2)
+  }
+  stick r = tool_in(dir, ["run", "verify"])
+  exits(r, 1)
+  says(r.out, "deployed v0.1.0")
+  says(r.out + r.err, "undoing deploy")
+  assert(not there(dir + "-remote", "current"), "the deploy was not undone")
+})
+
+test("--no-rollback keeps what the finished tasks made, and unburn still undoes it", pack() {
+  stick dir = fresh("examples/demo-app")
+  burn {
+    fs.write_text(path.join(dir, "src/greeting.txt"), "goodbye from demo-app\n")
+  }
+  exits(cig(dir, ["run", "--no-rollback", tool, "--", "run", "deploy"]), 1)
+  assert(there(dir, "build/app"), "build/app was rolled back anyway")
+  exits(cig(dir, ["unburn", last_run(dir).id]), 0)
+  assert(not there(dir, "build/app"), "unburn left build/app")
+})
+
+test("--dry-run plans every task and executes none", pack() {
+  stick dir = fresh("examples/demo-app")
+  stick r = cig(dir, ["run", "--dry-run", tool, "--", "run", "deploy"])
+  exits(r, 0)
+  says(r.out, "dry run: 6 tasks planned, none executed")
+  says(r.err, "compensated")
+  says(r.err, "run bash scripts/deploy.sh")
+  says(r.err, "nothing was changed")
+  assert(not there(dir, "build"), "a dry run built something")
+  assert(not there(dir + "-remote", "current"), "a dry run deployed")
+})
+
+test("arguments after -- reach the last task named, quoted for a shell", pack() {
+  stick dir = fresh("tests/fixtures/edge")
+  stick r = tool_in(dir, ["run", "echo", "--", "a", "b c", "it's"])
+  exits(r, 0)
+  says(r.out, "[a]\n    [b c]\n    [it's]")
+  stick s = tool_in(dir, ["run", "echo-shell", "--", "a", "b c", "it's"])
+  exits(s, 0)
+  says(s.out, "<a><b c><it's>")
+})
+
+test("a timeout is a failed attempt, and retries apply to it", pack() {
+  stick dir = fresh("tests/fixtures/edge")
+  stick r = tool_in(dir, ["run", "slow"])
+  exits(r, 1)
+  says(r.out, "ran longer than 300 ms")
+  says(r.out, "trying again (2 of 2)")
+  says(r.err, "task `slow` failed: sleep 5 exited -1 after 2 attempts")
+})
+
+test("retries end, and the error says how many attempts it took", pack() {
+  stick dir = fresh("tests/fixtures/edge")
+  stick r = tool_in(dir, ["run", "stubborn"])
+  exits(r, 1)
+  says(r.out, "trying again (3 of 3)")
+  says(r.err, "exited 3 after 3 attempts")
+})
+
+test("ok, env and cwd reach the task", pack() {
+  stick dir = fresh("tests/fixtures/edge")
+  exits(tool_in(dir, ["run", "answers-one"]), 0)
+  says(tool_in(dir, ["run", "greets"]).out, "hi from greets")
+  stick r = tool_in(dir, ["run", "in-sub"])
+  exits(r, 0)
+  says(r.out, "/sub\n")
+})
+
+test("--only skips the dependencies", pack() {
+  stick dir = fresh("tests/fixtures/edge")
+  stick r = tool_in(dir, ["run", "--only", "after-files"])
+  exits(r, 1)
+  never_says(r.out, "makes-files")
+})
+
+test("files a script creates are rolled back when a later task fails", pack() {
+  stick dir = fresh("tests/fixtures/edge")
+  stick r = tool_in(dir, ["run", "after-files"])
+  exits(r, 1)
+  says(r.err, "hop created")
+  assert(not there(dir, "out/file.txt"), "out/file.txt survived")
+})
+
+# ----- adopt ----------------------------------------------------------------
+
+test("adopt finds scripts, make targets, npm scripts and just recipes", pack() {
+  stick dir = fresh("tests/fixtures/polyglot")
+  stick r = tool_in(dir, ["adopt"])
+  exits(r, 0)
+  stick m = json.parse(r.out)
+  stick names = m.tasks.keys()
+  for want in ["bootstrap", "hello", "greet", "gen-docs", "deploy", "make:build", "make:test", "make:clean", "npm:lint", "npm:test", "npm:start", "just:fmt", "just:release"] {
+    assert(names.contains(want), "adopt missed ${want}: ${names}")
+  }
+  for unwanted in ["notes", "hidden", "make:out", "make:VERSION", "npm:pretest", "just:_private", "just:set", "just:alias"] {
+    assert(not names.contains(unwanted), "adopt should have skipped ${unwanted}")
+  }
+  assert(m.tasks.bootstrap.cmd == ["bash", "script/bootstrap"], "shebang: ${m.tasks.bootstrap.cmd}")
+  assert(m.tasks.deploy.cmd == ["/bin/sh", "deploy.sh"], "shebang path: ${m.tasks.deploy.cmd}")
+  assert(m.tasks.greet.cmd == ["node", "scripts/greet.js"], "extension: ${m.tasks.greet.cmd}")
+  assert(m.tasks.hello.desc == "Say hello from Python.", "docstring: ${m.tasks.hello.desc}")
+  assert(m.tasks["gen-docs"].desc == "Generate the docs.", "comment after an SPDX line")
+  assert(m.tasks["make:build"].desc == "Build everything", "make ## description")
+  assert(m.tasks["just:fmt"].desc == "Format the sources", "just comment")
+  says(r.err, "Taskfile.yml")
+  assert(not there(dir, "cig-tasks.json"), "adopt without --write wrote the file")
+})
+
+test("adopt --write saves it, refuses to overwrite, and unburn takes it back", pack() {
+  stick dir = fresh("tests/fixtures/polyglot")
+  stick w = tool_in(dir, ["adopt", "--write"])
+  exits(w, 0)
+  says(w.out, "wrote cig-tasks.json: 13 task(s)")
+  stick first = last_run(dir).id
+  stick again = tool_in(dir, ["adopt", "--write"])
+  exits(again, 2)
+  says(again.err, "already exists")
+  exits(tool_in(dir, ["adopt", "--write", "--force"]), 0)
+  exits(cig(dir, ["unburn", last_run(dir).id]), 0)
+  assert(there(dir, "cig-tasks.json"), "unburning --force should put the first write back")
+  exits(cig(dir, ["unburn", first]), 0)
+  assert(not there(dir, "cig-tasks.json"), "unburning the first write should remove it")
+})
+
+test("an adopted manifest runs as it is: a Python script, with arguments", pack() {
+  stick dir = fresh("tests/fixtures/polyglot")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick r = tool_in(dir, ["run", "hello", "--", "from", "cig"])
+  exits(r, 0)
+  says(r.out, "hello from python from cig")
+  if proc.which("make") != null {
+    says(tool_in(dir, ["run", "make:test"]).out, "testing")
+  }
+})
+
+test("adopt in a project with nothing to adopt says so", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  stick r = tool_in(dir, ["adopt"])
+  exits(r, 0)
+  says(r.err, "found no scripts")
+})
+
+# ----- the launcher ---------------------------------------------------------
+
+test("cigo finds the project from a subdirectory and hands cig its own flags", pack() {
+  stick dir = fresh("examples/demo-app")
+  stick r = hop(path.join(dir, "scripts"), "sh", [launcher, "list"])
+  exits(r, 0)
+  says(r.out, "demo-app: 7 tasks")
+  stick d = hop(dir, "sh", [launcher, "--dry-run", "run", "build"])
+  exits(d, 0)
+  says(d.err, "dry-run plan")
+  assert(not there(dir, "build"), "a dry run through cigo built something")
+})
+
+# ----- the end --------------------------------------------------------------
+
+exhale ""
+exhale "${passed} passed, ${failed.len()} failed"
+if not failed.is_empty() {
+  cough "failing: ${failed.join(", ")}"
+}
+burn {
+  fs.rm(work)
+}

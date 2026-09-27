@@ -1,0 +1,15 @@
+{
+  "project": "edge",
+  "defaults": {"timeout_ms": 20000},
+  "tasks": {
+    "echo": {"cmd": ["bash", "echo-args.sh"], "desc": "prints its arguments"},
+    "echo-shell": {"shell": "printf '<%s>'", "desc": "a shell line; arguments are quoted onto it"},
+    "slow": {"cmd": ["sleep", "5"], "timeout_ms": 300, "retries": 1},
+    "stubborn": {"cmd": ["bash", "-c", "echo nope >&2; exit 3"], "retries": 2},
+    "answers-one": {"cmd": ["bash", "-c", "exit 1"], "ok": [0, 1]},
+    "greets": {"cmd": ["bash", "-c", "echo \"$GREETING from $CIG_TASK\""], "env": {"GREETING": "hi"}},
+    "in-sub": {"cmd": ["pwd"], "cwd": "sub"},
+    "makes-files": {"cmd": ["bash", "-c", "mkdir -p out && echo made > out/file.txt"]},
+    "after-files": {"cmd": ["bash", "-c", "exit 9"], "needs": ["makes-files"]}
+  }
+}

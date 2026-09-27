@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Install what the project needs.
+set -euo pipefail
+echo "bootstrapped"

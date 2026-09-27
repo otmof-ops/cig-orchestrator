@@ -1,0 +1,12 @@
+set shell := ["bash", "-c"]
+alias f := fmt
+
+# Format the sources
+fmt:
+    echo formatting
+
+_private:
+    echo hidden
+
+release version="1.0":
+    echo releasing {{version}}

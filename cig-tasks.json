@@ -1,0 +1,23 @@
+{
+  "project": "cig-orchestrator",
+  "tasks": {
+    "lint-tool": {
+      "cmd": ["cig", "check", "orchestrate.cig"],
+      "desc": "cig's static checker over the tool"
+    },
+    "lint-tests": {
+      "cmd": ["cig", "check", "tests/run.cig"],
+      "desc": "cig's static checker over the test suite"
+    },
+    "lint-shell": {
+      "shell": "if command -v shellcheck >/dev/null; then shellcheck bin/cigo install.sh examples/demo-app/scripts/*.sh; else echo 'shellcheck not installed; skipped'; fi",
+      "desc": "shellcheck over the launcher, the installer and the demo's scripts, when it is installed"
+    },
+    "test": {
+      "cmd": ["cig", "run", "tests/run.cig"],
+      "needs": ["lint-tool", "lint-tests", "lint-shell"],
+      "timeout_ms": 900000,
+      "desc": "the test suite, itself written in CigScript"
+    }
+  }
+}

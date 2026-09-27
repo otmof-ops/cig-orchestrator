@@ -1,0 +1,38 @@
+#!/bin/sh
+# cigo: the launcher for cig-orchestrator. All the logic is in orchestrate.cig;
+# this finds it, finds the project (the nearest directory up that has a
+# cig-tasks.json), and hands cig the flags that are cig's own.
+tool="$(cd "$(dirname "$0")/.." && pwd)/orchestrate.cig"
+
+if ! command -v cig >/dev/null 2>&1; then
+  echo "cigo: cig is not on PATH; install CigScript first: https://github.com/otmof-ops/CigScript" >&2
+  exit 127
+fi
+
+global=""
+run=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run|--no-check|--no-rollback) run="$run $1"; shift ;;
+    --max-steps) run="$run $1 ${2:-}"; shift 2 ;;
+    --json|--no-color|--no-doctor|--plain) global="$global $1"; shift ;;
+    *) break ;;
+  esac
+done
+
+case "${1:-help}" in
+  adopt|help|version|--help|-h|--version) ;;
+  *)
+    dir=$PWD
+    while [ "$dir" != "/" ] && [ ! -f "$dir/cig-tasks.json" ]; do
+      dir=$(dirname "$dir")
+    done
+    if [ -f "$dir/cig-tasks.json" ] && [ "$dir" != "$PWD" ]; then
+      cd "$dir" || exit 1
+    fi
+    ;;
+esac
+
+# The flag lists are single words, split on purpose.
+# shellcheck disable=SC2086
+exec cig $global run $run "$tool" -- "$@"

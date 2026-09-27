@@ -1,0 +1,10 @@
+{
+  "name": "polyglot",
+  "private": true,
+  "scripts": {
+    "lint": "eslint .",
+    "pretest": "echo before the tests",
+    "test": "node scripts/greet.js",
+    "start": "node index.js"
+  }
+}
