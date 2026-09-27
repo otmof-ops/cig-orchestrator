@@ -129,7 +129,8 @@ cigo run test        # cig's checker over the tool and the tests, shellcheck, th
   deletes are listed as irreversible, with the detail. Hop watching skips
   `.git`, `node_modules` and `target`.
 - A task cannot change the environment of the tasks after it.
-- Directories a script creates are left behind, empty, after a rollback (a
-  CigScript gap, reported upstream).
+- With cig 1.1.1, directories a script creates are left behind, empty, after
+  a rollback; [CigScript #16](https://github.com/otmof-ops/CigScript/pull/16)
+  removes them too.
 
 What building this turned up in CigScript itself is in [FINDINGS.md](FINDINGS.md).
