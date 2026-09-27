@@ -1,0 +1,141 @@
+#!/usr/bin/env cig
+# orchestrate.cig: a chill little orchestrator.
+#
+# It does not build, test or deploy anything itself. Devs already have
+# scripts for that (see scripts/). This file reads tasks.json, works out
+# the order, calls the scripts as hops, keeps a log per task and a report
+# per run, and lets the kernel do what a shell cannot: dry-run the whole
+# thing, roll it back when a step fails, and undo a deploy weeks later with
+# `cig unburn <run>`.
+#
+#   cig run orchestrate.cig -- list
+#   cig run orchestrate.cig -- plan deploy
+#   cig run --dry-run orchestrate.cig -- run deploy
+#   cig run orchestrate.cig -- run deploy
+#   cig runs; cig unburn <run>
+
+pack { "./build", "./dist", "./remote", "./logs", "./reports" }
+
+stick manifest = json.load("tasks.json")
+stick tasks = manifest.tasks
+
+pull usage() {
+  exhale "usage: cig run orchestrate.cig -- list | plan <task> | run <task>"
+  exit(2)
+}
+
+# The dependency closure of `target`, in the order the tasks must run.
+pull resolve(target) {
+  roll order = []
+  roll seen = {}
+  pull visit(name, trail) {
+    if seen.has(name) {
+      snuff
+    }
+    if not tasks.has(name) {
+      cough "no task named `${name}`" + (trail.len() > 0 and " (wanted by ${trail.join(" > ")})" or "")
+    }
+    if trail.contains(name) {
+      cough "dependency loop: ${trail.join(" > ")} > ${name}"
+    }
+    for dep in tasks[name].get("needs", []) {
+      visit(dep, trail + [name])
+    }
+    seen[name] = true
+    order.push(name)
+  }
+  visit(target, [])
+  snuff order
+}
+
+# One attempt at a task's command: the hop, its log line, its verdict.
+# The effects sit in their own burn so the checker knows this helper burns;
+# called from inside a compensating block, the hop still counts as covered.
+pull attempt(name, t, n) {
+  stick words = t.cmd.split(" ")
+  stick started = time.now_ms()
+  roll r = null
+  burn {
+    try {
+      r = proc.run(words.first(), words.slice(1), {timeout_ms: t.get("timeout_ms", 60000)})
+    } ashtray e {
+      # A hop that could not run, or ran out of time, is a failed attempt
+      # like any other, and the retry loop gets to decide.
+      r = {code: -1, out: "", err: e.message, duration_ms: time.now_ms() - started}
+    }
+    fs.append_text("logs/${name}.log",
+      "[${time.now_iso()}] attempt ${n}: ${t.cmd} -> exit ${r.code} (${r.duration_ms} ms)\n" +
+      "--- stdout\n${r.out}--- stderr\n${r.err}\n")
+  }
+  stick ok = t.get("ok", [0]).contains(r.code)
+  snuff {name: name, attempt: n, code: r.code, ok: ok, ms: time.now_ms() - started, out: r.out.trim(), err: r.err.trim()}
+}
+
+# Run a task with its retries. A task with an `undo` gets a compensation,
+# so a later failure in this run, or `cig unburn` weeks from now, undoes it.
+pull run_task(name) {
+  stick t = tasks[name]
+  stick tries = t.get("retries", 0) + 1
+  roll result = null
+  roll n = 0
+  if t.has("undo") {
+    burn (s) {
+      s.task = name
+      s.undo = t.undo
+      while n < tries and (result == null or not result.ok) {
+        n += 1
+        result = attempt(name, t, n)
+      }
+    } unburn {
+      log.warn("undoing ${s.task}: ${s.undo}")
+      proc.shell(s.undo)
+    }
+  } else {
+    burn {
+      while n < tries and (result == null or not result.ok) {
+        n += 1
+        result = attempt(name, t, n)
+      }
+    }
+  }
+  if not result.ok {
+    cough {message: "task `${name}` failed: ${t.cmd} exited ${result.code} after ${n} attempt(s)", task: name, code: result.code, stderr: result.err}
+  }
+  log.info("${name}: ok in ${result.ms} ms" + (n > 1 and " (attempt ${n})" or ""))
+  snuff result
+}
+
+stick command = args.get(0, "help")
+if command == "list" {
+  exhale "${manifest.project}: ${tasks.len()} task(s)"
+  for name in tasks {
+    stick t = tasks[name]
+    stick needs = t.get("needs", [])
+    exhale "  ${name.pad_right(8)} ${t.cmd.pad_right(30)} needs: ${needs.join(", ")}" +
+      (t.has("undo") and "  [undo]" or "") +
+      (t.has("retries") and "  [retries ${t.retries}]" or "")
+  }
+} else if command == "plan" {
+  exhale resolve(args.get(1, "deploy")).join(" > ")
+} else if command == "run" {
+  stick target = args.get(1, "deploy")
+  stick order = resolve(target)
+  stick started = time.now_ms()
+  log.info("${manifest.project}: ${order.join(" > ")}")
+  # The tasks become the steps of a chain built here, so the run gets the
+  # chain's narration, timing and per-step report for free.
+  stick steps = order.map(pack(name) => pack() => run_task(name))
+  stick report = light(steps, {quiet: true, names: order})
+  stick results = report.steps.map(pack(step) => step.result)
+  burn {
+    json.save("reports/${time.stamp()}.json", {
+      project: manifest.project, target: target, ok: report.ok, ms: report.ms, tasks: results,
+    })
+  }
+  exhale "ok: ${order.len()} task(s) in ${report.ms} ms"
+  for r in results {
+    exhale "  ${r.name.pad_right(8)} exit ${r.code}  ${r.ms} ms" + (r.attempt > 1 and "  (${r.attempt} attempts)" or "")
+  }
+} else {
+  usage()
+}

@@ -1,0 +1,6 @@
+# what a run leaves behind; cig unburn <run> removes it, and so does a failed run
+build/
+dist/
+remote/
+logs/
+reports/
