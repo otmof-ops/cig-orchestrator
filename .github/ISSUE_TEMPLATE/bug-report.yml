@@ -1,0 +1,56 @@
+name: Something went wrong
+description: cigo did the wrong thing, said the wrong thing, or stopped when it shouldn't have.
+title: "bug: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Nobody's on trial. Four things make a report easy to fix; the rest is optional.
+        Take anything secret out of what you paste.
+  - type: textarea
+    id: manifest
+    attributes:
+      label: The manifest
+      description: cig-tasks.json, or the part that matters.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: The command you ran
+      placeholder: cigo run ci
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: What it printed
+      description: Everything, including any error code (E600 and so on). Paste, don't summarize.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions and platform
+      description: "`cigo version`, `cig --version`, and your operating system."
+      placeholder: cig-orchestrator 0.2.0, cig 1.1.1, Linux x86_64
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: The failing task's log, if there is one
+      description: ".cig-orchestrator/logs/<task>.log. Read it before you paste it: your tools print what they print."
+      render: text
+  - type: markdown
+    attributes:
+      value: "What you get back: a fix, and a test that keeps it fixed."

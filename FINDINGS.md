@@ -114,7 +114,7 @@ chain built at run time with `light`, `cig check`, `cig run --dry-run`,
 
 ### Worked as advertised
 
-- The dry run planned all six tasks with the deploy hop labelled
+- The dry run planned all six tasks with the deploy hop labeled
   `compensated`, and nothing touched the disk.
 - The real run journaled every file the scripts created (reversible) and
   modified (irreversible), retried the flaky script three times, and wrote

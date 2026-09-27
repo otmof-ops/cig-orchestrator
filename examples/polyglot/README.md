@@ -2,6 +2,8 @@
 
 Three languages in one chain, and no glue script at the end of it.
 
+<p align="center"><img src="../../docs/assets/glue-vs-chain.svg" alt="The glue script this example replaces, and the chain that replaces it" width="820"></p>
+
 - **Python** (`data/stats.py`) totals a sales CSV and prints the result as
   JSON.
 - **Node** (`web/build.mjs`) builds `web/dist/index.html` from those numbers,

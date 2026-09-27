@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="140" viewBox="0 0 640 140" role="img" aria-label="cig-orchestrator: every language, one chain, no glue script">
+  <title>cig-orchestrator</title>
+  <defs>
+    <radialGradient id="ember" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#fff7ed"/>
+      <stop offset="45%" stop-color="#fb923c"/>
+      <stop offset="100%" stop-color="#ea580c" stop-opacity="0.9"/>
+    </radialGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f3f4f6"/>
+      <stop offset="100%" stop-color="#e5e7eb"/>
+    </linearGradient>
+    <linearGradient id="paper-up" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f3f4f6"/>
+      <stop offset="100%" stop-color="#e5e7eb"/>
+    </linearGradient>
+  </defs>
+  <!-- four sticks standing in the pack, filters up: every language in the project -->
+  <g stroke="#d1d5db" stroke-width="1.2">
+    <rect x="28" y="44" width="16" height="40" rx="3" fill="url(#paper-up)"/>
+    <rect x="48" y="30" width="16" height="54" rx="3" fill="url(#paper-up)"/>
+    <rect x="68" y="52" width="16" height="32" rx="3" fill="url(#paper-up)"/>
+    <rect x="88" y="38" width="16" height="46" rx="3" fill="url(#paper-up)"/>
+  </g>
+  <g fill="#d6b370">
+    <rect x="28" y="28" width="16" height="20" rx="4"/>
+    <rect x="48" y="14" width="16" height="20" rx="4"/>
+    <rect x="68" y="36" width="16" height="20" rx="4"/>
+    <rect x="88" y="22" width="16" height="20" rx="4"/>
+  </g>
+  <g fill="#c8a25f" opacity="0.6">
+    <rect x="30" y="33" width="12" height="3"/><rect x="30" y="41" width="12" height="3"/>
+    <rect x="50" y="19" width="12" height="3"/><rect x="50" y="27" width="12" height="3"/>
+    <rect x="70" y="41" width="12" height="3"/><rect x="70" y="49" width="12" height="3"/>
+    <rect x="90" y="27" width="12" height="3"/><rect x="90" y="35" width="12" height="3"/>
+  </g>
+  <!-- the pack -->
+  <rect x="20" y="66" width="92" height="62" rx="8" fill="url(#paper)" stroke="#d1d5db" stroke-width="1.5"/>
+  <rect x="20" y="66" width="92" height="7" rx="3" fill="#d1d5db" opacity="0.7"/>
+  <rect x="20" y="94" width="92" height="12" fill="#f97316" opacity="0.9"/>
+  <!-- one taken out and lit: the chain -->
+  <g transform="translate(0 0)">
+    <rect x="124" y="92" width="28" height="20" rx="5" fill="#d6b370"/>
+    <rect x="127" y="96" width="22" height="3" fill="#c8a25f" opacity="0.6"/>
+    <rect x="127" y="105" width="22" height="3" fill="#c8a25f" opacity="0.6"/>
+    <rect x="150" y="92" width="62" height="20" rx="5" fill="url(#paper)" stroke="#d1d5db" stroke-width="1.5"/>
+    <circle cx="214" cy="102" r="17" fill="#f97316" opacity="0.14"/>
+    <circle cx="214" cy="102" r="11" fill="url(#ember)"/>
+  </g>
+  <g fill="none" stroke="#9ca3af" stroke-width="2.2" stroke-linecap="round" opacity="0.85">
+    <path d="M 214 84 C 204 74, 226 66, 214 56"/>
+    <path d="M 222 82 C 234 72, 212 66, 224 52"/>
+    <path d="M 206 86 C 196 78, 208 70, 202 60"/>
+  </g>
+  <!-- wordmark -->
+  <text x="252" y="86" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="38" font-weight="700" fill="#6b7280" letter-spacing="-1">cig-<tspan fill="#f97316">orchestrator</tspan></text>
+  <text x="254" y="114" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="14" fill="#9ca3af">every language, one chain, no glue script</text>
+</svg>

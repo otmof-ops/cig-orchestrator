@@ -610,6 +610,39 @@ test("a stage override with nothing to run is an error in check", pack() {
   says(tool_in(dir, ["show", "api:check"]).out, "timeout_ms 7000")
 })
 
+test("check reads a project's own toolchains: keys, conditions, stages and vars", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  stick m = {
+    toolchains: {
+      mine: {
+        language: "Mine", detcet: ["file:x"], detect: ["fiel:mine.toml"],
+        stages: {biuld: [["make"]], test: [{when: ["tool:x"]}], lint: "make lint", check: [{when: [["glob:*.x", "grepp:a:b"]], cmd: ["x"]}]},
+        vars: {flag: [{when: ["file:a"]}], other: "x"},
+      },
+      fine: {language: "Fine", detect: ["file:fine.toml", ["glob:*.f", "not:file:skip"]], stages: {build: [["make", "{flag}"], {when: ["json:package.json:a.b"], shell: "x"}]}, vars: {flag: [{value: "-j2"}]}},
+    },
+    tasks: {x: {cmd: ["true"]}},
+  }
+  burn {
+    json.save(path.join(dir, "cig-tasks.json"), m, 2)
+  }
+  stick r = tool_in(dir, ["check"])
+  exits(r, 1)
+  for piece in [
+    "toolchain mine: unknown key `detcet`, ignored; did you mean `detect`?",
+    "toolchain mine: `detect`: `fiel:mine.toml` is not a condition",
+    "toolchain mine: `stages.biuld` is not a stage; did you mean `build`?",
+    "toolchain mine: `stages.test`: an alternative needs `cmd` or `shell`",
+    "toolchain mine: `stages.lint` must be a list of alternatives",
+    "toolchain mine: `stages.check`: `grepp:a:b` is not a condition",
+    "toolchain mine: `vars.flag`: each alternative needs a `value`",
+    "toolchain mine: `vars.other` must be a list of alternatives",
+  ] {
+    says(r.out, piece)
+  }
+  never_says(r.out, "toolchain fine:")
+})
+
 test("check warns about replacing ci only when there is a ci to replace", pack() {
   stick dir = fresh("tests/fixtures/empty")
   burn {
@@ -652,6 +685,16 @@ test("doctor finds each toolchain, its version and the project's pins", pack() {
   exits(missing, 1)
   says(missing.out, "missing  fpm")
   says(missing.out, "https://fpm.fortran-lang.org")
+})
+
+test("gleam builds and tests with gleam", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "gleam.toml"), "name = \"app\"\n")
+  }
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  exits(tool_stubbed(dir, ["run", "test"]), 0)
+  says(stub_log(dir), "gleam test @" + dir)
 })
 
 test("toolchains lists what this knows, and one in full", pack() {
@@ -881,7 +924,7 @@ test("the polyglot example releases: Python's numbers, Node's page, bash's deplo
   stick r = tool_in(dir, ["run", "release"])
   exits(r, 0)
   in_order(r.out, ["] data:lint:", "] web:lint:", "] data:test:", "] web:test:", "] version:", "] stats:", "] site:", "] deploy:", "] announce:"])
-  says(r.out, "live: file://")
+  says(r.out, "live: public/2.3.0/index.html (196 bytes)")
   says(read(dir, "public/2.3.0/index.html"), "5 orders, 555.84 in total; the top region is north")
   stick id = last_run(dir).id
   stick undone = cig(dir, ["unburn", id])

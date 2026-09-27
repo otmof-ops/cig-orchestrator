@@ -1,0 +1,59 @@
+name: Teach cigo a toolchain
+description: A language, build tool or package manager cigo should know how to set up, check, build and test.
+title: "toolchain: "
+labels: ["toolchain", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tell me how you work with it today; that's the whole entry. You don't need to know
+        the knowledge base's format, and you'll get to try it on your project before it lands.
+  - type: input
+    id: tool
+    attributes:
+      label: The language and the tool
+      placeholder: "Nim with nimble, Kotlin Multiplatform with Gradle, mdBook..."
+    validations:
+      required: true
+  - type: textarea
+    id: recognized
+    attributes:
+      label: How a project that uses it is recognized
+      description: The files it always has at its root, such as a manifest, a lockfile or a config file.
+      placeholder: book.toml
+    validations:
+      required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: The commands you run
+      description: |
+        Whichever apply: setup (install from the lockfile), format, format-check, lint, check,
+        build, test, package, run, clean. Say when a command depends on a config file being there.
+      render: sh
+      placeholder: |
+        build: mdbook build
+        test: mdbook test
+        clean: mdbook clean
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Where projects pin its version
+      description: A version file, a line in .tool-versions or mise.toml, a field in a manifest.
+  - type: input
+    id: docs
+    attributes:
+      label: Its documentation
+      placeholder: https://...
+    validations:
+      required: true
+  - type: dropdown
+    id: try
+    attributes:
+      label: Can you try a build of it before it lands?
+      options:
+        - Yes, on a real project
+        - Yes, on a small example
+        - Not right now

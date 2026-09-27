@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="450" viewBox="0 0 820 450" role="img" aria-label="Before: a glue script calls Python, Node and bash by hand and scrapes each output with jq and sed; a failure after the deploy leaves it out there. After: one chain in cig-tasks.json passes values between the languages as data, and a failure runs the deploy's undo and puts back what the tasks created.">
+  <title>The glue script, and the chain that replaces it</title>
+  <defs>
+    <marker id="grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9ca3af"/>
+    </marker>
+    <marker id="hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f97316"/>
+    </marker>
+  </defs>
+  <style>
+    .box { fill: none; stroke: #9ca3af; stroke-width: 1.8; }
+    .hotbox { fill: none; stroke: #f97316; stroke-width: 2; }
+    .h { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 15px; font-weight: 700; fill: #f97316; }
+    .n { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; font-weight: 700; fill: #6b7280; }
+    .m { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; fill: #6b7280; }
+    .s { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; fill: #9ca3af; }
+    .o { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; fill: #f97316; }
+    .k { font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 12.5px; fill: #9ca3af; }
+    .bad { font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 13px; fill: #6b7280; }
+    .glue { stroke: #9ca3af; stroke-width: 1.8; fill: none; stroke-dasharray: 5 4; marker-end: url(#grey); }
+    .flow { stroke: #f97316; stroke-width: 2; fill: none; marker-end: url(#hot); }
+  </style>
+
+  <!-- before -->
+  <text x="24" y="34" class="h">before: one more language, just to glue the others</text>
+  <text x="24" y="54" class="k">release.sh calls each language by hand, then scrapes one's output for the next</text>
+
+  <rect x="24" y="80" width="150" height="58" rx="10" class="box"/>
+  <text x="99" y="104" text-anchor="middle" class="m">python3 stats.py</text>
+  <text x="99" y="123" text-anchor="middle" class="k">prints JSON</text>
+
+  <path d="M 176 109 L 333 109" class="glue"/>
+  <text x="254" y="99" text-anchor="middle" class="s">| jq -r .total</text>
+
+  <rect x="335" y="80" width="150" height="58" rx="10" class="box"/>
+  <text x="410" y="104" text-anchor="middle" class="m">node build.mjs</text>
+  <text x="410" y="123" text-anchor="middle" class="k">builds the page</text>
+
+  <path d="M 487 109 L 644 109" class="glue"/>
+  <text x="565" y="99" text-anchor="middle" class="s">| sed -n 's/…/p'</text>
+
+  <rect x="646" y="80" width="150" height="58" rx="10" class="box"/>
+  <text x="721" y="104" text-anchor="middle" class="m">bash deploy.sh</text>
+  <text x="721" y="123" text-anchor="middle" class="k">ships it</text>
+
+  <text x="24" y="174" class="bad"><tspan fill="#f97316">✗</tspan>  a step after the deploy fails: the deploy stays out there, and the next run starts wherever this one stopped</text>
+
+  <path d="M 24 204 L 796 204" stroke="#d1d5db" stroke-width="1" stroke-dasharray="3 5"/>
+
+  <!-- after -->
+  <text x="24" y="240" class="h">after: one chain, in cig-tasks.json</text>
+  <text x="24" y="260" class="k">every language keeps its own command; values pass between them as data, and the whole chain can be undone</text>
+
+  <rect x="24" y="286" width="132" height="84" rx="10" class="box"/>
+  <text x="90" y="309" text-anchor="middle" class="n">version</text>
+  <text x="90" y="330" text-anchor="middle" class="s">cat VERSION</text>
+  <text x="90" y="352" text-anchor="middle" class="o">capture: text</text>
+
+  <path d="M 158 328 L 182 328" class="flow"/>
+
+  <rect x="184" y="286" width="132" height="84" rx="10" class="box"/>
+  <text x="250" y="309" text-anchor="middle" class="n">stats</text>
+  <text x="250" y="330" text-anchor="middle" class="s">python3 stats.py</text>
+  <text x="250" y="352" text-anchor="middle" class="o">capture: json</text>
+
+  <path d="M 318 328 L 342 328" class="flow"/>
+
+  <rect x="344" y="286" width="132" height="84" rx="10" class="box"/>
+  <text x="410" y="309" text-anchor="middle" class="n">site</text>
+  <text x="410" y="330" text-anchor="middle" class="s">node build.mjs</text>
+  <text x="410" y="352" text-anchor="middle" class="o">{{stats.total}}</text>
+
+  <path d="M 478 328 L 502 328" class="flow"/>
+
+  <rect x="504" y="286" width="132" height="84" rx="10" class="hotbox"/>
+  <text x="570" y="309" text-anchor="middle" class="n">deploy</text>
+  <text x="570" y="330" text-anchor="middle" class="s">bash deploy.sh</text>
+  <text x="570" y="352" text-anchor="middle" class="o">{{site.page}}</text>
+  <text x="570" y="388" text-anchor="middle" class="k">undo: undeploy.sh</text>
+
+  <path d="M 638 328 L 662 328" class="flow"/>
+
+  <rect x="664" y="286" width="132" height="84" rx="10" class="box"/>
+  <text x="730" y="309" text-anchor="middle" class="n">announce</text>
+  <text x="730" y="330" text-anchor="middle" class="s">python3 announce.py</text>
+  <text x="730" y="352" text-anchor="middle" class="o">{{deploy.where}}</text>
+
+  <text x="24" y="420" class="bad"><tspan fill="#f97316">✓</tspan>  a step fails: the chain stops, the deploy's undo runs, and everything the tasks created is put back</text>
+  <text x="24" y="440" class="s">cigo run release  ·  cigo --dry-run run release  ·  cig unburn &lt;run&gt;</text>
+</svg>

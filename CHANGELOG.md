@@ -53,13 +53,22 @@ Every language in the project, one chain, no glue script.
   `build.zig.zon` as minimums). `show` explains one task.
 - `check` also finds unknown toolchains and components, broken templates
   and filters, `stdin_from` a task that does not exist, bad `capture`
-  kinds, and stage overrides or toolchain vars that would leave a task
-  with nothing to run; suggestions are by edit distance (`rustt`: did you
-  mean rust-cargo?).
+  kinds, stage overrides or toolchain vars that would leave a task with
+  nothing to run, and a project toolchain's unknown keys, conditions,
+  alternatives and vars; suggestions are by edit distance, a swapped pair
+  of letters counting as one (`rustt`: did you mean rust-cargo?).
 - `list` orders each component's tasks by stage and shortens long command
   lines; `show` has the whole of it.
-- `examples/polyglot`: Python, Node and bash in one chain with an undo.
-- 53 tests, with a stub toolchain that records what every language would
+- `examples/polyglot`: Python, Node and bash in one chain with an undo;
+  the paths it hands on are relative to the project, so its output reads
+  the same wherever it's cloned.
+- **Docs.** A new README with diagrams and a real terminal run, and guides
+  under `docs/`: getting started, adopting a project, chaining languages,
+  coming from make and friends, the manifest, commands, your own
+  toolchains, CI, troubleshooting, how it works, and the roadmap. Also
+  CONTRIBUTING, SUPPORT and SECURITY, issue forms for bugs, toolchain,
+  quality-of-life and guidance requests, and a pull request template.
+- 55 tests, with a stub toolchain that records what every language would
   run and where.
 
 ## 0.1.0 — 2026-09-28

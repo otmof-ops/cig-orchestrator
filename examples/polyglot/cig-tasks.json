@@ -54,7 +54,7 @@
       "desc": "bash: publishes to $DEPLOY_TO (default ./public); the undo takes it back"
     },
     "announce": {
-      "cmd": ["python3", "deploy/announce.py", "{{deploy.url}}", "{{site.bytes}}"],
+      "cmd": ["python3", "deploy/announce.py", "{{deploy.where}}", "{{site.bytes}}"],
       "desc": "Python again, with what bash and Node handed on"
     },
     "release": {

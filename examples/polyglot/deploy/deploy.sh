@@ -9,5 +9,5 @@ target="${DEPLOY_TO:-public}/$version"
 mkdir -p "$target"
 cp "$page" "$target/index.html"
 echo "deployed $version to $target"
-# A named value for the task after this one: {{deploy.url}}.
-echo "url=file://$(cd "$target" && pwd)/index.html" >> "$CIG_OUTPUT"
+# A named value for the task after this one: {{deploy.where}}.
+echo "where=$target/index.html" >> "$CIG_OUTPUT"

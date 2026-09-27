@@ -100,7 +100,7 @@ stick INTERPRETERS = {
 
 # ----- the toolchains ---------------------------------------------------------
 #
-# What each toolchain is called, how to recognise it, and how it runs each
+# What each toolchain is called, how to recognize it, and how it runs each
 # stage. Conditions (`detect`, `workspace`, `when`) are checked in the
 # component's directory; a list inside the list means "any of these":
 #   file:X   dir:X   glob:PATTERN   grep:FILE:REGEX   json:FILE:key.path
@@ -763,7 +763,7 @@ stick TOOLCHAINS = {
     detect: [["glob:*.tf", "glob:*.tofu", "glob:*.tf.json"]], tools: [],
     versions: {terraform: ["{tf}", "version"]}, pins: {terraform: [".terraform-version", ".tool-versions:terraform", "mise.toml:terraform"]},
     install: "https://developer.hashicorp.com/terraform/install",
-    note: "setup initialises without the backend so no credentials are needed; plan is a task of its own and apply is never run",
+    note: "setup initializes without the backend so no credentials are needed; plan is a task of its own and apply is never run",
     vars: {tf: [{when: ["tool:terraform"], value: "terraform"}, {when: ["tool:tofu"], value: "tofu"}, {value: "terraform"}]},
     stages: {
       setup: [{when: ["file:.terraform.lock.hcl"], cmd: ["{tf}", "init", "-input=false", "-backend=false", "-lockfile=readonly"]}, ["{tf}", "init", "-input=false", "-backend=false"]],
@@ -982,16 +982,24 @@ pull to_text(v) {
   snuff str(v)
 }
 
-# Levenshtein distance: the edits that turn one name into the other.
+# The edits that turn one name into the other, a swap of two neighboring
+# letters counting as one ("biuld" is one edit from "build"): the optimal
+# string alignment distance.
 pull distance(a, b) {
   stick xs = a.chars()
   stick ys = b.chars()
+  roll before = []
   roll prev = range(ys.len() + 1)
   for i in range(xs.len()) {
     roll row = [i + 1]
     for j in range(ys.len()) {
-      row.push(math.min(prev[j + 1] + 1, row[j] + 1, prev[j] + pick(xs[i] == ys[j], 0, 1)))
+      roll d = math.min(prev[j + 1] + 1, row[j] + 1, prev[j] + pick(xs[i] == ys[j], 0, 1))
+      if i > 0 and j > 0 and xs[i] == ys[j - 1] and xs[i - 1] == ys[j] {
+        d = math.min(d, before[j - 1] + 1)
+      }
+      row.push(d)
     }
+    before = prev
     prev = row
   }
   snuff prev.last()
@@ -1661,6 +1669,39 @@ stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms"]
 stick COMPONENT_KEYS = ["path", "toolchain", "after", "stages", "env", "env_file", "groups", "timeout_ms", "retries", "retry_delay_ms", "desc"]
 stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces"]
 stick CAPTURES = ["text", "json", "lines", "kv"]
+stick TOOLCHAIN_KEYS = ["language", "short", "extends", "detect", "family", "priority", "auto", "kind", "workspace", "claims_subtree",
+  "stages", "extras", "order", "vars", "scripts", "targets", "targets_run", "tools", "versions", "pins", "install", "note"]
+stick CONDITION_KINDS = ["file", "dir", "glob", "grep", "json", "tool", "not"]
+
+# The first condition in `c` (a condition, or a list of them, nested for
+# "any of") that is not one cigo knows how to check, or null.
+pull bad_condition(c) {
+  if type_of(c) == "list" {
+    for x in c {
+      stick b = bad_condition(x)
+      if b != null {
+        snuff b
+      }
+    }
+    snuff null
+  }
+  stick s = str(c)
+  stick at = s.find(":")
+  if at <= 0 {
+    snuff s
+  }
+  stick kind = s.slice(0, at)
+  if kind == "not" {
+    snuff pick(bad_condition(s.slice(at + 1)) == null, null, s)
+  }
+  if not CONDITION_KINDS.contains(kind) or s.slice(at + 1) == "" {
+    snuff s
+  }
+  if (kind == "grep" or kind == "json") and s.slice(at + 1).find(":") <= 0 {
+    snuff s
+  }
+  snuff null
+}
 stick NEAR_MISSES = {
   need: "needs", deps: "needs", depends: "needs", depends_on: "needs", requires: "needs", dependencies: "needs",
   command: "cmd", commands: "cmd", run: "cmd", script: "cmd", exec: "cmd", argv: "cmd",
@@ -3018,6 +3059,84 @@ pull do_check(g) {
     }
     snuff ""
   }
+  stick CONDITIONS_ARE = "conditions are file:, dir:, glob:, grep:FILE:REGEX, json:FILE:key, tool: and not:"
+  pull check_conditions(where, key, conds) {
+    stick b = bad_condition(as_list(conds))
+    if b != null {
+      problem("error", where, "`${key}`: `${b}` is not a condition; ${CONDITIONS_ARE}")
+    }
+  }
+  pull check_toolchain(where, tc) {
+    for key in tc.keys() {
+      if not TOOLCHAIN_KEYS.contains(key) {
+        stick near = similar(TOOLCHAIN_KEYS, key, {})
+        if near.is_empty() {
+          problem("warning", where, "unknown key `${key}`, ignored")
+        } else {
+          problem("warning", where, "unknown key `${key}`, ignored; did you mean `${near.first()}`?")
+        }
+      }
+    }
+    for key in ["detect", "workspace"] {
+      if tc.has(key) {
+        check_conditions(where, key, tc[key])
+      }
+    }
+    for table in ["stages", "extras"] {
+      stick defs = tc.get(table, {})
+      if type_of(defs) != "map" {
+        problem("error", where, "`${table}` must be a map of names to lists of alternatives")
+        continue
+      }
+      for name in defs {
+        if table == "stages" and not STAGES.contains(name) {
+          stick near = similar(STAGES, name, {})
+          if near.is_empty() {
+            problem("warning", where, "`stages.${name}` is not a stage; a task that isn't a stage goes under `extras`")
+          } else {
+            problem("warning", where, "`stages.${name}` is not a stage; did you mean `${near.first()}`? (a task that isn't a stage goes under `extras`)")
+          }
+        }
+        stick alts = defs[name]
+        if type_of(alts) != "list" {
+          problem("error", where, "`${table}.${name}` must be a list of alternatives, like [[\"make\", \"${name}\"]]")
+          continue
+        }
+        for alt in alts {
+          if type_of(alt) == "map" {
+            if not alt.has("cmd") and not alt.has("shell") {
+              problem("error", where, "`${table}.${name}`: an alternative needs `cmd` or `shell`")
+            }
+            if alt.has("when") {
+              check_conditions(where, "${table}.${name}", alt.when)
+            }
+          } else if type_of(alt) != "list" {
+            problem("error", where, "`${table}.${name}`: an alternative is a command list or a map with `cmd` or `shell`")
+          }
+        }
+      }
+    }
+    stick vars = tc.get("vars", {})
+    if type_of(vars) != "map" {
+      problem("error", where, "`vars` must be a map of names to lists of alternatives")
+    } else {
+      for v in vars {
+        stick alts = vars[v]
+        if type_of(alts) != "list" {
+          problem("error", where, "`vars.${v}` must be a list of alternatives, like [{\"when\": [\"file:Cargo.lock\"], \"value\": [\"--locked\"]}, {\"value\": []}]")
+          continue
+        }
+        if not alts.all(pack(a) => type_of(a) == "map" and a.has("value")) {
+          problem("error", where, "`vars.${v}`: each alternative needs a `value`")
+        }
+        for a in alts {
+          if type_of(a) == "map" and a.has("when") {
+            check_conditions(where, "vars.${v}", a.when)
+          }
+        }
+      }
+    }
+  }
   pull check_program(name, argv, cwd, level) {
     stick prog = argv.first()
     if prog.contains("{{") {
@@ -3059,9 +3178,12 @@ pull do_check(g) {
       stick tc = own_tc[id]
       if type_of(tc) != "map" {
         problem("error", "toolchain ${id}", "must be a map")
-      } else if tc.has("extends") and not TOOLCHAINS.has(str(tc.extends)) and not own_tc.has(str(tc.extends)) {
+        continue
+      }
+      if tc.has("extends") and not TOOLCHAINS.has(str(tc.extends)) and not own_tc.has(str(tc.extends)) {
         problem("error", "toolchain ${id}", "extends `${tc.extends}`, which is not a toolchain; ${close_toolchains(g.kb, str(tc.extends))}")
       }
+      check_toolchain("toolchain ${id}", tc)
     }
   }
   stick defined = m.get("components", {})
@@ -3503,13 +3625,13 @@ pull do_toolchains() {
     exhale "rather than editing it."
     exhale ""
     exhale "A component is a directory and one of these. `cigo adopt` chooses them from"
-    exhale "what each directory holds (the *recognised by* column: a comma is *and*, `or`"
+    exhale "what each directory holds (the *recognized by* column: a comma is *and*, `or`"
     exhale "is *or*), and a project changes any of them or adds its own under `toolchains`"
     exhale "in `cig-tasks.json`. `cigo toolchains <name>` prints one in full: each stage's"
     exhale "commands with the conditions that choose between them, the tools `cigo doctor`"
     exhale "looks for, and the version pins it compares."
     exhale ""
-    exhale "| toolchain | language | recognised by | stages |"
+    exhale "| toolchain | language | recognized by | stages |"
     exhale "|---|---|---|---|"
     for id in kb {
       stick tc = kb[id]
