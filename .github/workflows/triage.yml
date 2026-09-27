@@ -1,0 +1,54 @@
+name: triage
+on:
+  issues:
+    types: [opened, labeled]
+
+permissions:
+  issues: write
+
+jobs:
+  acknowledge:
+    if: github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const labels = issue.labels.map((l) => l.name);
+            const guides = `https://github.com/${context.repo.owner}/${context.repo.repo}/tree/main/docs`;
+            const replies = {
+              guidance: "Thanks for asking. Every guidance request gets a direct answer here, with steps for your project. If you haven't yet, paste what `cigo adopt` prints (it changes nothing): it shows what cigo sees.",
+              toolchain: "Thanks. A toolchain request becomes a knowledge-base entry, tested against a stub of the tool, and you'll get to try it on your project before it lands. The reply here will say what's proposed.",
+              qol: "Thanks. Requests like this are how cigo and CigScript catch up with the best of every other tool. The reply here will say what we think and why; accepted ones go on the roadmap.",
+              bug: "Thanks for the report. It gets a fix, and a test that keeps it fixed. If a task failed, its full log is in `.cig-orchestrator/logs/<task>.log`; add it here if you haven't (read it first).",
+            };
+            const kind = Object.keys(replies).find((k) => labels.includes(k));
+            if (!labels.includes("needs-triage")) {
+              await github.rest.issues.addLabels({ ...context.repo, issue_number: issue.number, labels: ["needs-triage"] });
+            }
+            const reply = kind ? replies[kind] : "Thanks for opening this; it'll be read and answered here.";
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: issue.number,
+              body: `${reply}\n\nThe guides are at ${guides} if you want to look around in the meantime.`,
+            });
+
+  accepted:
+    if: github.event.action == 'labeled' && github.event.label.name == 'accepted'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            try {
+              await github.rest.issues.removeLabel({ ...context.repo, issue_number: issue.number, name: "needs-triage" });
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: issue.number,
+              body: "Accepted: it's on the roadmap (docs/roadmap.md). This issue closes with the version that has it, and the changelog will say so.",
+            });
