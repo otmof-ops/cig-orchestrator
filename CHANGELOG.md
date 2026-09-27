@@ -45,19 +45,21 @@ Every language in the project, one chain, no glue script.
   a language's own commands, stays out of the stage groups, and only one
   runner per directory joins them. `adopt --force` keeps the names and
   settings of components it finds again, the ones written by hand, and the
-  manifest's tasks, toolchains and defaults.
+  manifest's tasks, toolchains and defaults, and follows a component that
+  moved to another package manager (npm to pnpm, pip to uv).
 - `doctor`: each toolchain's tools and versions against the project's pins
   (`.nvmrc`, `.python-version`, `.tool-versions`, `mise.toml`,
   `rust-toolchain.toml`, `global.json` and others; `go.mod` and
   `build.zig.zon` as minimums). `show` explains one task.
 - `check` also finds unknown toolchains and components, broken templates
-  and filters, `stdin_from` a task that does not exist, and bad `capture`
-  kinds; suggestions are by edit distance (`rustt`: did you mean
-  rust-cargo?).
+  and filters, `stdin_from` a task that does not exist, bad `capture`
+  kinds, and stage overrides or toolchain vars that would leave a task
+  with nothing to run; suggestions are by edit distance (`rustt`: did you
+  mean rust-cargo?).
 - `list` orders each component's tasks by stage and shortens long command
   lines; `show` has the whole of it.
 - `examples/polyglot`: Python, Node and bash in one chain with an undo.
-- 48 tests, with a stub toolchain that records what every language would
+- 53 tests, with a stub toolchain that records what every language would
   run and where.
 
 ## 0.1.0 — 2026-09-28

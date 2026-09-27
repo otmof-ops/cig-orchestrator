@@ -203,6 +203,11 @@ build before test and package. Stages the toolchain has but the component's
 its task runner's targets are tasks too (`web:storybook`, `make:deploy`):
 `cigo list --all` shows them.
 
+A command in a stage override can use the toolchain's vars: `{component}`,
+`{dir}`, and the ones `cigo toolchains <name>` lists, like `{locked}` for
+Cargo. A var that has no value for the component stops its task, and
+`cigo check` says which.
+
 **Toolchains** under `toolchains` change a built-in one for this project
 (`stages` and `vars` merge, anything else replaces), or add a new one:
 `{"extends": "go", "stages": {"build": [{"shell": "go generate ./... && go build ./..."}]}}`

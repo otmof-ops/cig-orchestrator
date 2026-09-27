@@ -559,6 +559,84 @@ test("pip's setup installs what the project's tests need", pack() {
   }
 })
 
+test("adopt --force follows a project that changed package managers, keeping its settings", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.mkdir(path.join(dir, "web"))
+    fs.write_text(path.join(dir, "web/package.json"), "{\"name\": \"web\", \"scripts\": {\"build\": \"echo b\"}}\n")
+    fs.write_text(path.join(dir, "web/package-lock.json"), "{}\n")
+  }
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  assert(json.load(path.join(dir, "cig-tasks.json")).components.web.toolchain == "node-npm", "the first adopt should say npm")
+  edit_manifest(dir, pack(m) {
+    m.components.web["desc"] = "the front end"
+  })
+  burn {
+    fs.rm(path.join(dir, "web/package-lock.json"))
+    fs.write_text(path.join(dir, "web/pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
+  }
+  stick again = tool_in(dir, ["adopt", "--write", "--force"])
+  exits(again, 0)
+  says(again.err, "web: node-npm no longer fits web, so it is node-pnpm now")
+  stick c = json.load(path.join(dir, "cig-tasks.json")).components.web
+  assert(c.toolchain == "node-pnpm" and c.get("desc", "") == "the front end", "web: ${c}")
+})
+
+test("a toolchain var with no value stops the task instead of reaching the command", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  edit_manifest(dir, pack(m) {
+    m["toolchains"] = {"rust-cargo": {vars: {locked: [{when: ["file:no-such-marker"], value: ["--locked"]}]}}}
+  })
+  stick c = tool_in(dir, ["check"])
+  exits(c, 1)
+  says(c.out, "worker: setup: {locked} has no value in services/worker")
+  stick r = tool_stubbed(dir, ["run", "worker:setup"])
+  exits(r, 2)
+  says(r.err, "{locked} has no value in services/worker")
+  never_says(stub_log(dir), "{locked}")
+})
+
+test("a stage override with nothing to run is an error in check", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  edit_manifest(dir, pack(m) {
+    m.components.api["stages"] = {lint: {timeout_ms: 5000}, "check": {timeout_ms: 7000}}
+  })
+  stick c = tool_in(dir, ["check"])
+  exits(c, 1)
+  says(c.out, "api: stages.lint adds options, but go has no lint stage here; give it `cmd` or `shell`")
+  never_says(c.out, "stages.check")
+  says(tool_in(dir, ["show", "api:check"]).out, "timeout_ms 7000")
+})
+
+test("check warns about replacing ci only when there is a ci to replace", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), "{\"components\": {\"s\": {\"path\": \".\", \"toolchain\": \"scripts\"}}, \"tasks\": {\"ci\": {\"cmd\": [\"true\"]}}}\n")
+  }
+  never_says(tool_in(dir, ["check"]).out, "replaces the stage group `ci`")
+  stick mono = fresh("tests/fixtures/monorepo")
+  exits(tool_in(mono, ["adopt", "--write"]), 0)
+  edit_manifest(mono, pack(m) {
+    m["tasks"] = {ci: {cmd: ["true"]}}
+  })
+  says(tool_in(mono, ["check"]).out, "replaces the stage group `ci`")
+})
+
+test("a Makefile rule with several targets gives each of them", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "Makefile"), ".PHONY: build test lint\nbuild test: deps\n\techo $@\nlint:\n\techo lint\ndeps:\n\techo deps\n")
+  }
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick listed = tool_in(dir, ["list"]).out
+  for task in ["make:build", "make:test", "make:lint"] {
+    says(listed, task)
+  }
+  never_says(listed, "make:deps")
+})
+
 test("doctor finds each toolchain, its version and the project's pins", pack() {
   stick dir = fresh("tests/fixtures/monorepo")
   exits(tool_in(dir, ["adopt", "--write"]), 0)

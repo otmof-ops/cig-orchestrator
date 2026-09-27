@@ -1340,11 +1340,17 @@ pull read_targets(dir, kind) {
     }
     roll prev = ""
     for line in lines {
-      stick c = text.captures(line, '^([A-Za-z0-9][A-Za-z0-9_-]*)[ \t]*:([^=].*)?$')
-      if c != null and (phony.is_empty() or phony.contains(c[1])) {
+      # `build test: deps` is a rule for two targets.
+      stick c = text.captures(line, '^([A-Za-z0-9][A-Za-z0-9_-]*(?:[ \t]+[A-Za-z0-9][A-Za-z0-9_-]*)*)[ \t]*:([^=].*)?$')
+      if c != null {
         stick rest = c.get(2, null) ?? ""
         stick at = rest.find("##")
-        add(c[1], pick(at >= 0, tidy(rest.slice(at + 2)), comment_of(prev)), null)
+        stick d = pick(at >= 0, tidy(rest.slice(at + 2)), comment_of(prev))
+        for target in c[1].split() {
+          if phony.is_empty() or phony.contains(target) {
+            add(target, d, null)
+          }
+        }
       }
       prev = line
     }
@@ -1586,7 +1592,9 @@ pull resolve_component(name, comp, kb) {
       }
     }
   }
-  # 4. What the project says, which always wins.
+  # 4. What the project says, which always wins. Its commands take the same
+  # vars as the toolchain's ({component}, {py}, {locked}...).
+  roll problems = []
   stick given = comp.get("stages", {})
   for stage in given {
     stick ov = given[stage]
@@ -1594,18 +1602,35 @@ pull resolve_component(name, comp, kb) {
     if ov == false or ov == null {
       home.remove(stage)
     } else if type_of(ov) == "list" or type_of(ov) == "string" {
-      home[stage] = {cmd: argv_of(ov), source: MANIFEST}
+      home[stage] = {cmd: fill(argv_of(ov) ?? [], vars), source: MANIFEST}
     } else if type_of(ov) == "map" {
-      if ov.has("cmd") or ov.has("shell") {
-        home[stage] = ov.merge({source: MANIFEST})
+      if ov.has("shell") {
+        home[stage] = ov.merge({source: MANIFEST, shell: fill_text(ov.shell, vars)})
+      } else if ov.has("cmd") {
+        home[stage] = ov.merge({source: MANIFEST, cmd: fill(argv_of(ov.cmd) ?? [], vars)})
       } else if home.has(stage) {
         home[stage] = home[stage].merge(ov)
       } else {
-        home[stage] = ov.merge({source: MANIFEST})
+        problems.push("stages.${stage} adds options, but ${tc_id} has no " + pick(STAGES.contains(stage), "${stage} stage", "`${stage}` target") + " here; give it `cmd` or `shell`")
       }
     }
   }
-  snuff {dir: dir, toolchain: tc_id, stages: stages, extras: extras, order: STAGE_NEEDS.merge(tc.get("order", {})), note: tc.get("note", "")}
+  # A var none of whose alternatives applies has no value here, and would
+  # reach the command as the literal text {name}.
+  stick declared = tc.get("vars", {}).keys()
+  for table in [stages, extras] {
+    for s in table {
+      stick spec = table[s]
+      stick words = as_list(spec.get("cmd", [])).map(pack(w) => str(w)) + pick(spec.has("shell"), [str(spec.get("shell", ""))], [])
+      for v in declared {
+        if words.any(pack(w) => w.contains("{" + v + "}")) and not spec.has("unresolved") {
+          spec.unresolved = "{${v}} has no value in ${dir}: none of its alternatives apply here, so give the var one without `when`"
+          problems.push("${s}: ${spec.unresolved}")
+        }
+      }
+    }
+  }
+  snuff {dir: dir, toolchain: tc_id, stages: stages, extras: extras, order: STAGE_NEEDS.merge(tc.get("order", {})), note: tc.get("note", ""), problems: problems}
 }
 
 # The stages `stage` waits for inside its component, skipping the ones the
@@ -1707,7 +1732,7 @@ pull component_task(comp_name, r, stage, spec, needs) {
       t[key] = c[key]
     }
   }
-  for key in ["ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces", "desc"] {
+  for key in ["ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces", "desc", "unresolved"] {
     if spec.has(key) {
       t[key] = spec[key]
     }
@@ -2483,6 +2508,11 @@ pull do_run(g, wanted) {
   if not extra.is_empty() and tasks[last].get("group", false) {
     fail("arguments after `--` go to one task, and `${last}` is a group; name one of ${tasks[last].needs.join(", ")}")
   }
+  for n in names {
+    if tasks[n].has("unresolved") {
+      fail("task `${n}` cannot run: ${tasks[n].unresolved}; `cigo check` lists every problem")
+    }
+  }
   stick ctx = {tasks: tasks, defaults: g.manifest.get("defaults", {}), last: last}
   burn {
     fs.mkdir(RUN_DIR)
@@ -2647,6 +2677,14 @@ pull soft_manifest() {
   snuff pick(type_of(m) == "map", m, {})
 }
 
+# Does the toolchain a manifest names still fit `dir` at least as well as the
+# one adopt would choose now? A project that moved from npm to pnpm, or from
+# pip to uv, no longer does; a toolchain of the project's own always does.
+pull fits_as_well(kb, old_id, new_id, dir) {
+  stick old = kb.get(old_id, {})
+  snuff holds_all(dir, as_list(old.get("detect", []))) and old.get("priority", 10) >= kb.get(new_id, {}).get("priority", 10)
+}
+
 # Adopting again finds the project again and keeps what the manifest already
 # says: a component found again (same directory, same kind of toolchain) keeps
 # its name and settings, and one written by hand stays while its directory does.
@@ -2671,7 +2709,14 @@ pull merge_components(found, before, kb) {
     if hit != null {
       used.push(hit)
       matched.push(name)
-      out[hit] = before[hit]
+      stick was = before[hit]
+      stick old_id = str(was.get("toolchain", ""))
+      if old_id != c.toolchain and TOOLCHAINS.has(old_id) and not fits_as_well(kb, old_id, c.toolchain, c.path) {
+        out[hit] = was.merge({toolchain: c.toolchain})
+        notes.push({about: [], text: "${hit}: ${old_id} no longer fits ${c.path}, so it is ${c.toolchain} now; if ${old_id} was on purpose, set it back in ${MANIFEST}"})
+      } else {
+        out[hit] = was
+      }
     } else {
       roll n = name
       roll i = 2
@@ -3062,6 +3107,11 @@ pull do_check(g) {
       if c.has("stages") and type_of(c.stages) != "map" {
         problem("error", name, "`stages` must be a map of stage names to commands")
       }
+      if g.components.has(name) {
+        for trouble in as_list(g.components[name].get("problems", [])) {
+          problem("error", name, trouble)
+        }
+      }
       if c.has("groups") and type_of(c.groups) != "bool" {
         problem("error", name, "`groups` is true or false")
       }
@@ -3104,7 +3154,8 @@ pull do_check(g) {
           problem("warning", name, "`cmd` is split on spaces and never reaches a shell, so its quotes, pipes and globs are passed as they are; use `shell` for a command line, or write `cmd` as a list")
         }
       }
-      if (STAGES.contains(name) or name == "ci") and g.components.values().any(pack(c) => c.stages.has(name) or name == "ci") {
+      stick would_group = pick(name == "ci", CI_STAGES.any(pack(x) => x != name and g.tasks.has(x)), GROUP_STAGES.contains(name) and g.components.values().any(pack(c) => c.spec.get("groups", true) != false and c.stages.has(name)))
+      if would_group {
         problem("warning", name, "replaces the stage group `${name}`; the components' own ${name} tasks still run when named")
       }
       if t.has("needs") and type_of(t.needs) != "list" and type_of(t.needs) != "string" {
@@ -3155,6 +3206,8 @@ pull do_check(g) {
       stick argv = argv_of(t.get("cmd", null))
       if argv != null and not argv.is_empty() {
         check_program(name, argv, str(t.get("cwd", ".")), pick(own, "error", "warning"))
+      } else if not own and not t.has("shell") and not t.get("bad", false) {
+        problem("error", name, "has nothing to run: its stage or target gives it no `cmd` or `shell`")
       }
     }
     for s in strings_of(t) {
