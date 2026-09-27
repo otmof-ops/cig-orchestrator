@@ -1,141 +1,929 @@
 #!/usr/bin/env cig
-# orchestrate.cig: a chill little orchestrator.
+# cig-orchestrator: keep the scripts you have, run them through CigScript.
 #
-# It does not build, test or deploy anything itself. Devs already have
-# scripts for that (see scripts/). This file reads tasks.json, works out
-# the order, calls the scripts as hops, keeps a log per task and a report
-# per run, and lets the kernel do what a shell cannot: dry-run the whole
-# thing, roll it back when a step fails, and undo a deploy weeks later with
-# `cig unburn <run>`.
+# One file, all CigScript. It reads cig-tasks.json in the project root and runs
+# each task's command (a shell script, a Python script, a make target, an npm
+# script: anything with an exit code) as a hop, in dependency order. cig does
+# the rest: `--dry-run` executes nothing and prints the plan; every file the
+# scripts create inside the project is journaled, so a failed run is rolled
+# back and `cig unburn <run>` undoes a good one; a task's `undo` becomes a
+# compensation for what no journal can see, like a deploy.
 #
-#   cig run orchestrate.cig -- list
-#   cig run orchestrate.cig -- plan deploy
-#   cig run --dry-run orchestrate.cig -- run deploy
-#   cig run orchestrate.cig -- run deploy
-#   cig runs; cig unburn <run>
+#   cigo adopt [--write] [--force]    propose cig-tasks.json from the scripts already here
+#   cigo list                         the tasks
+#   cigo check                        the manifest, checked before anything runs
+#   cigo plan [<task>...] [--only]    the order a run would take
+#   cigo run <task>... [--only] [-- <args for the last task named>]
+#
+# cig's own flags go first: `cigo --dry-run run deploy`, `cigo --no-rollback run test`.
+# Without the launcher: cig run path/to/orchestrate.cig -- <command> ...
 
-pack { "./build", "./dist", "./remote", "./logs", "./reports" }
+pack { "." }
 
-stick manifest = json.load("tasks.json")
-stick tasks = manifest.tasks
+stick VERSION = "0.1.0"
+stick MANIFEST = "cig-tasks.json"
+stick STATE = ".cig-orchestrator"
 
-pull usage() {
-  exhale "usage: cig run orchestrate.cig -- list | plan <task> | run <task>"
+stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell"]
+stick TOP_KEYS = ["project", "defaults", "tasks"]
+stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms"]
+stick NEAR_MISSES = {
+  need: "needs", deps: "needs", depends: "needs", depends_on: "needs", after: "needs", requires: "needs",
+  command: "cmd", commands: "cmd", run: "cmd", script: "cmd", exec: "cmd", argv: "cmd",
+  sh: "shell", bash: "shell",
+  description: "desc", help: "desc", summary: "desc",
+  timeout: "timeout_ms", retry: "retries", attempts: "retries",
+  dir: "cwd", workdir: "cwd", working_dir: "cwd",
+  environment: "env", rollback: "undo", revert: "undo", cleanup: "undo",
+}
+stick SHELL_CHARS = ["|", "&", ";", ">", "<", "$", "`", "*", "?", "'", "\"", "~"]
+stick INTERPRETERS = {
+  sh: ["bash"], bash: ["bash"], zsh: ["zsh"],
+  py: ["python3"],
+  js: ["node"], mjs: ["node"], cjs: ["node"],
+  rb: ["ruby"], pl: ["perl"], php: ["php"], lua: ["lua"], r: ["Rscript"],
+  ps1: ["pwsh", "-NoProfile", "-File"],
+  cig: ["cig", "run"],
+}
+stick SCRIPT_DIRS = ["script", "scripts", "bin", "tools"]
+stick ROOT_SCRIPT_EXTS = ["sh", "bash"]
+
+# ----- the command line -----------------------------------------------------
+
+stick command = args.get(0, "help")
+roll words = []
+roll extra = []
+roll passing = false
+for a in args.slice(1) {
+  if passing {
+    extra.push(a)
+  } else if a == "--" {
+    passing = true
+  } else {
+    words.push(a)
+  }
+}
+stick flags = words.filter(pack(w) => w.starts_with("--"))
+stick targets = words.filter(pack(w) => not w.starts_with("--"))
+
+# ----- small helpers --------------------------------------------------------
+
+pull fail(message) {
+  log.error(message)
   exit(2)
 }
 
-# The dependency closure of `target`, in the order the tasks must run.
-pull resolve(target) {
+pull pick(condition, yes, no) {
+  if condition {
+    snuff yes
+  }
+  snuff no
+}
+
+pull expect_flags(allowed) {
+  for f in flags {
+    if not allowed.contains(f) {
+      if allowed.is_empty() {
+        fail("`${command}` takes no flags; got `${f}`")
+      }
+      fail("unknown flag `${f}` for `${command}`; it takes ${allowed.join(", ")}")
+    }
+  }
+}
+
+pull expect_no_targets() {
+  if not targets.is_empty() {
+    fail("`${command}` takes no task names; got ${targets.join(", ")}")
+  }
+}
+
+pull duration(ms) {
+  if ms < 1000 {
+    snuff "${ms} ms"
+  }
+  snuff "${math.round(ms / 1000.0, 1)} s"
+}
+
+pull tidy(textv) {
+  roll t = textv.trim()
+  if t.len() > 100 {
+    t = t.slice(0, 97) + "..."
+  }
+  snuff t
+}
+
+# A word as a shell would need it to read it back as one word.
+pull quote(word) {
+  if word != "" and text.matches(word, '^[A-Za-z0-9_./=:,+@%-]+$') {
+    snuff word
+  }
+  snuff "'" + word.replace("'", "'\\''") + "'"
+}
+
+pull slug(name) {
+  roll s = text.replace(name.lower(), '[^a-z0-9]+', "-")
+  while s.starts_with("-") {
+    s = s.slice(1)
+  }
+  while s.ends_with("-") {
+    s = s.slice(0, s.len() - 1)
+  }
+  snuff pick(s == "", "task", s)
+}
+
+# ----- the manifest ---------------------------------------------------------
+
+pull load() {
+  if not fs.is_file(MANIFEST) {
+    fail("no ${MANIFEST} in ${fs.cwd()}; `cigo adopt` proposes one from the scripts this project already has")
+  }
+  roll m = null
+  try {
+    m = json.load(MANIFEST)
+  } ashtray e {
+    fail("${MANIFEST} is not valid JSON: ${e.message}")
+  }
+  if type_of(m) != "map" or type_of(m.get("tasks", null)) != "map" {
+    fail("${MANIFEST} needs a `tasks` map, like {\"tasks\": {\"build\": {\"cmd\": [\"bash\", \"scripts/build.sh\"]}}}")
+  }
+  snuff m
+}
+
+pull project_of(m) {
+  snuff str(m.get("project", path.base(fs.cwd())))
+}
+
+pull needs_of(t) {
+  stick n = t.get("needs", [])
+  if type_of(n) == "string" {
+    snuff [n]
+  }
+  if type_of(n) != "list" {
+    snuff []
+  }
+  snuff n.map(pack(x) => str(x))
+}
+
+pull ok_codes(t) {
+  stick ok = t.get("ok", [0])
+  if type_of(ok) == "int" {
+    snuff [ok]
+  }
+  snuff ok
+}
+
+# `cmd` as a list is the argv; as a string it is split on whitespace. Neither
+# goes through a shell: that is what `shell` is for, by name.
+pull argv_of(value) {
+  if type_of(value) == "list" {
+    snuff value.map(pack(w) => str(w))
+  }
+  if type_of(value) == "string" {
+    snuff value.split()
+  }
+  snuff null
+}
+
+pull label_of(t) {
+  if t.has("shell") {
+    snuff str(t.shell)
+  }
+  stick argv = argv_of(t.get("cmd", null))
+  if argv == null or argv.is_empty() {
+    snuff "(nothing to run)"
+  }
+  snuff argv.map(quote).join(" ")
+}
+
+# What a task runs, with the extra arguments from the command line appended.
+pull command_of(name, t, more) {
+  if t.has("shell") {
+    roll line = str(t.shell)
+    for w in more {
+      line = line + " " + quote(w)
+    }
+    snuff {shell: line, label: line}
+  }
+  stick argv = argv_of(t.get("cmd", null))
+  if argv == null or argv.is_empty() {
+    fail("task `${name}` has nothing to run: give it `cmd` (a list like [\"bash\", \"scripts/build.sh\"]) or `shell` (a string); `cigo check` looks over the whole file")
+  }
+  stick full = argv + more
+  snuff {argv: full, label: full.map(quote).join(" ")}
+}
+
+pull undo_of(t) {
+  if t.has("undo_shell") {
+    snuff {shell: str(t.undo_shell), label: str(t.undo_shell)}
+  }
+  if t.has("undo") {
+    stick argv = argv_of(t.undo)
+    if argv != null and not argv.is_empty() {
+      snuff {argv: argv, label: argv.map(quote).join(" ")}
+    }
+  }
+  snuff null
+}
+
+pull known(tasks, wanted) {
+  stick names = tasks.keys()
+  stick close = names.filter(pack(n) => n.len() > 2 and wanted.len() > 2 and (n.contains(wanted) or wanted.contains(n) or wanted.starts_with(n.slice(0, 3))))
+  if not close.is_empty() {
+    snuff "did you mean ${close.slice(0, 3).join(" or ")}?"
+  }
+  if names.is_empty() {
+    snuff "there are no tasks yet"
+  }
+  snuff "tasks here: ${names.slice(0, 8).join(", ")}" + pick(names.len() > 8, ", ...", "")
+}
+
+# The tasks to run for `wanted`, dependencies first, each once.
+pull resolve(tasks, wanted, only) {
+  for name in wanted {
+    if not tasks.has(name) {
+      cough "no task named `${name}`; ${known(tasks, name)}"
+    }
+  }
+  if only {
+    snuff wanted.unique()
+  }
   roll order = []
-  roll seen = {}
+  roll done = {}
   pull visit(name, trail) {
-    if seen.has(name) {
+    if done.has(name) {
       snuff
     }
-    if not tasks.has(name) {
-      cough "no task named `${name}`" + (trail.len() > 0 and " (wanted by ${trail.join(" > ")})" or "")
-    }
     if trail.contains(name) {
-      cough "dependency loop: ${trail.join(" > ")} > ${name}"
+      cough "dependency loop: ${(trail + [name]).join(" > ")}"
     }
-    for dep in tasks[name].get("needs", []) {
-      visit(dep, trail + [name])
+    if not tasks.has(name) {
+      cough "`${trail.last()}` needs `${name}`, and there is no task by that name"
     }
-    seen[name] = true
+    stick t = tasks[name]
+    if type_of(t) == "map" {
+      for dep in needs_of(t) {
+        visit(dep, trail + [name])
+      }
+    }
+    done[name] = true
     order.push(name)
   }
-  visit(target, [])
+  for name in wanted {
+    visit(name, [])
+  }
   snuff order
 }
 
-# One attempt at a task's command: the hop, its log line, its verdict.
-# The effects sit in their own burn so the checker knows this helper burns;
-# called from inside a compensating block, the hop still counts as covered.
-pull attempt(name, t, n) {
-  stick words = t.cmd.split(" ")
+pull resolve_or_fail(tasks, wanted, only) {
+  roll order = null
+  try {
+    order = resolve(tasks, wanted, only)
+  } ashtray e {
+    fail(e.message)
+  }
+  snuff order
+}
+
+# ----- running one task -----------------------------------------------------
+
+pull hop_options(name, t, defaults) {
+  roll env = {CIG_TASK: name}
+  stick given = t.get("env", {})
+  if type_of(given) == "map" {
+    for k in given {
+      env[k] = str(given[k])
+    }
+  }
+  roll o = {
+    timeout_ms: int(t.get("timeout_ms", defaults.get("timeout_ms", 600000))),
+    env: env,
+  }
+  if t.has("cwd") {
+    o.cwd = str(t.cwd)
+  }
+  snuff o
+}
+
+# One attempt: the hop, its log, its output shown, its verdict. A command that
+# cannot start, or runs out of time, is a failed attempt like any other, so
+# retries apply to it too.
+pull attempt(name, t, cmd, opts, n) {
   stick started = time.now_ms()
   roll r = null
   burn {
     try {
-      r = proc.run(words.first(), words.slice(1), {timeout_ms: t.get("timeout_ms", 60000)})
+      if cmd.has("shell") {
+        r = proc.shell(cmd.shell, opts)
+      } else {
+        r = proc.run(cmd.argv.first(), cmd.argv.slice(1), opts)
+      }
     } ashtray e {
-      # A hop that could not run, or ran out of time, is a failed attempt
-      # like any other, and the retry loop gets to decide.
-      r = {code: -1, out: "", err: e.message, duration_ms: time.now_ms() - started}
+      r = {code: -1, out: "", err: e.message + "\n", duration_ms: time.now_ms() - started}
     }
-    fs.append_text("logs/${name}.log",
-      "[${time.now_iso()}] attempt ${n}: ${t.cmd} -> exit ${r.code} (${r.duration_ms} ms)\n" +
-      "--- stdout\n${r.out}--- stderr\n${r.err}\n")
+    fs.append_text("${STATE}/logs/${name}.log",
+      "== ${time.now_iso()} attempt ${n}: ${cmd.label}\n" + r.out + r.err +
+      "== exit ${r.code} in ${r.duration_ms} ms\n\n")
   }
-  stick ok = t.get("ok", [0]).contains(r.code)
-  snuff {name: name, attempt: n, code: r.code, ok: ok, ms: time.now_ms() - started, out: r.out.trim(), err: r.err.trim()}
+  for line in r.out.trim_end().lines() {
+    exhale "    " + line
+  }
+  for line in r.err.trim_end().lines() {
+    exhale "    " + line
+  }
+  snuff {code: r.code, ok: ok_codes(t).contains(r.code), ms: time.now_ms() - started, simulated: r.get("simulated", false)}
 }
 
-# Run a task with its retries. A task with an `undo` gets a compensation,
-# so a later failure in this run, or `cig unburn` weeks from now, undoes it.
-pull run_task(name) {
-  stick t = tasks[name]
-  stick tries = t.get("retries", 0) + 1
+pull failure(name, cmd, result, n) {
+  snuff {
+    message: "task `${name}` failed: ${cmd.label} exited ${result.code}" + pick(n > 1, " after ${n} attempts", ""),
+    task: name,
+    exit_code: result.code,
+  }
+}
+
+pull run_task(ctx, name, index, total) {
+  stick t = ctx.tasks[name]
+  stick cmd = ctx.cmds[name]
+  stick d = ctx.defaults
+  stick tries = int(t.get("retries", d.get("retries", 0))) + 1
+  stick delay = int(t.get("retry_delay_ms", d.get("retry_delay_ms", 0)))
+  stick opts = hop_options(name, t, d)
+  exhale "[${index}/${total}] ${name}: ${cmd.label}"
   roll result = null
   roll n = 0
-  if t.has("undo") {
-    burn (s) {
-      s.task = name
-      s.undo = t.undo
-      while n < tries and (result == null or not result.ok) {
-        n += 1
-        result = attempt(name, t, n)
+  pull attempts() {
+    while n < tries and (result == null or not result.ok) {
+      n += 1
+      if n > 1 and delay > 0 {
+        time.sleep_ms(delay)
       }
-    } unburn {
-      log.warn("undoing ${s.task}: ${s.undo}")
-      proc.shell(s.undo)
+      result = attempt(name, t, cmd, opts, n)
+      if not result.ok and n < tries {
+        exhale "    exit ${result.code}; trying again (${n + 1} of ${tries})"
+      }
+    }
+  }
+  stick undo = undo_of(t)
+  if undo == null {
+    attempts()
+    if not result.ok {
+      cough failure(name, cmd, result, n)
     }
   } else {
-    burn {
-      while n < tries and (result == null or not result.ok) {
-        n += 1
-        result = attempt(name, t, n)
+    # The undo is journaled as a compensation once the task succeeds: a later
+    # failure in this run, or `cig unburn` weeks from now, runs it with this
+    # state. A task that failed has nothing to undo, so none is recorded.
+    burn (s) {
+      s.task = name
+      s.undo = undo
+      s.cwd = opts.get("cwd", ".")
+      s.env = opts.env
+      s.timeout_ms = opts.timeout_ms
+      attempts()
+      if not result.ok {
+        cough failure(name, cmd, result, n)
+      }
+    } unburn {
+      log.warn("undoing ${s.task}: ${s.undo.label}")
+      stick how = {cwd: s.cwd, env: s.env, timeout_ms: s.timeout_ms, check: true}
+      roll done = null
+      if s.undo.has("shell") {
+        done = proc.shell(s.undo.shell, how)
+      } else {
+        done = proc.run(s.undo.argv.first(), s.undo.argv.slice(1), how)
+      }
+      for line in (done.out + done.err).trim_end().lines() {
+        exhale "    " + line
       }
     }
   }
-  if not result.ok {
-    cough {message: "task `${name}` failed: ${t.cmd} exited ${result.code} after ${n} attempt(s)", task: name, code: result.code, stderr: result.err}
-  }
-  log.info("${name}: ok in ${result.ms} ms" + (n > 1 and " (attempt ${n})" or ""))
-  snuff result
+  exhale "    ok, ${duration(result.ms)}" + pick(n > 1, " (attempt ${n})", "")
+  snuff {task: name, exit_code: result.code, ms: result.ms, attempts: n, simulated: result.simulated}
 }
 
-stick command = args.get(0, "help")
-if command == "list" {
-  exhale "${manifest.project}: ${tasks.len()} task(s)"
+# ----- commands -------------------------------------------------------------
+
+pull do_help() {
+  exhale "cig-orchestrator ${VERSION}: keep the scripts you have, run them through CigScript."
+  exhale ""
+  exhale "  cigo adopt [--write] [--force]   find the scripts, make targets, npm scripts and just"
+  exhale "                                   recipes this project already has; propose ${MANIFEST}"
+  exhale "  cigo list                        the tasks, what they run, what they need"
+  exhale "  cigo check                       the manifest, checked before anything runs"
+  exhale "  cigo plan [<task>...] [--only]   the order a run would take"
+  exhale "  cigo run <task>... [--only]      run them, dependencies first; arguments after"
+  exhale "                  [-- <args>]      `--` go to the last task named"
+  exhale "  cigo help | version"
+  exhale ""
+  exhale "cig's own flags go before the command:"
+  exhale "  cigo --dry-run run deploy        the plan, nothing executed"
+  exhale "  cigo --no-rollback run deploy    keep what finished tasks made when a later one fails"
+  exhale "Afterwards: `cig runs` lists every run, `cig unburn <run>` undoes one."
+}
+
+pull do_list(m) {
+  expect_flags([])
+  expect_no_targets()
+  stick tasks = m.tasks
+  stick names = tasks.keys()
+  if names.is_empty() {
+    exhale "${project_of(m)}: no tasks in ${MANIFEST}"
+    snuff
+  }
+  stick width = names.map(pack(x) => x.len()).max()
+  exhale "${project_of(m)}: ${names.len()} task" + pick(names.len() == 1, "", "s") + " in ${MANIFEST}"
+  for name in names {
+    stick t = tasks[name]
+    if type_of(t) != "map" {
+      exhale "  ${name.pad_right(width)}  (not a task; `cigo check` says why)"
+      continue
+    }
+    roll line = "  ${name.pad_right(width)}  ${label_of(t)}"
+    stick needs = needs_of(t)
+    if not needs.is_empty() {
+      line = line + "   needs ${needs.join(", ")}"
+    }
+    if t.has("undo") or t.has("undo_shell") {
+      line = line + "  [undo]"
+    }
+    if t.has("retries") {
+      line = line + "  [retries ${t.retries}]"
+    }
+    exhale line
+    if t.has("desc") {
+      exhale "  ${" ".repeat(width)}  # ${t.desc}"
+    }
+  }
+}
+
+pull do_plan(m, wanted) {
+  expect_flags(["--only"])
+  stick tasks = m.tasks
+  stick order = resolve_or_fail(tasks, pick(wanted.is_empty(), tasks.keys(), wanted), flags.contains("--only"))
+  if order.is_empty() {
+    exhale "nothing to run"
+    snuff
+  }
+  stick width = order.map(pack(x) => x.len()).max()
+  exhale "${order.len()} task" + pick(order.len() == 1, "", "s") + ", in this order:"
+  for pair in order.enumerate() {
+    exhale "  ${str(pair[0] + 1).pad_left(2)}. ${pair[1].pad_right(width)}  ${label_of(tasks[pair[1]])}"
+  }
+}
+
+pull do_check(m) {
+  expect_flags([])
+  expect_no_targets()
+  roll problems = []
+  pull problem(level, where, message) {
+    problems.push({level: level, where: where, message: message})
+  }
+  pull hint_for(key) {
+    if NEAR_MISSES.has(key) {
+      snuff "; did you mean `${NEAR_MISSES[key]}`?"
+    }
+    snuff ""
+  }
+  pull check_program(name, argv, cwd) {
+    stick prog = argv.first()
+    if prog.contains("/") {
+      if not fs.exists(path.join(cwd, prog)) {
+        problem("error", name, "`${prog}` does not exist")
+      }
+    } else if proc.which(prog) == null {
+      problem("error", name, "`${prog}` is not on PATH")
+    }
+    for w in argv.slice(1) {
+      if not w.starts_with("-") and INTERPRETERS.has(path.ext(w).lower()) and not fs.exists(path.join(cwd, w)) {
+        problem("error", name, "`${w}` does not exist")
+      }
+    }
+  }
+  stick tasks = m.tasks
+  for key in m.keys() {
+    if not TOP_KEYS.contains(key) {
+      problem("warning", MANIFEST, "unknown key `${key}` at the top; it is ignored")
+    }
+  }
+  stick defaults = m.get("defaults", {})
+  if type_of(defaults) != "map" {
+    problem("error", MANIFEST, "`defaults` must be a map")
+  } else {
+    for key in defaults.keys() {
+      if not DEFAULT_KEYS.contains(key) {
+        problem("warning", "defaults", "unknown key `${key}`; defaults can set ${DEFAULT_KEYS.join(", ")}")
+      }
+    }
+  }
   for name in tasks {
     stick t = tasks[name]
-    stick needs = t.get("needs", [])
-    exhale "  ${name.pad_right(8)} ${t.cmd.pad_right(30)} needs: ${needs.join(", ")}" +
-      (t.has("undo") and "  [undo]" or "") +
-      (t.has("retries") and "  [retries ${t.retries}]" or "")
+    if type_of(t) != "map" {
+      problem("error", name, "a task is a map like {\"cmd\": [...]}, got a ${type_of(t)}")
+      continue
+    }
+    for key in t.keys() {
+      if not TASK_KEYS.contains(key) {
+        problem("warning", name, "unknown key `${key}`, ignored${hint_for(key)}")
+      }
+    }
+    stick cwd = str(t.get("cwd", "."))
+    if t.has("cwd") and not fs.is_dir(cwd) {
+      problem("error", name, "`cwd` ${cwd} is not a directory")
+    }
+    if t.has("cmd") and t.has("shell") {
+      problem("error", name, "has both `cmd` and `shell`; keep one")
+    } else if not t.has("cmd") and not t.has("shell") {
+      problem("error", name, "has nothing to run: give it `cmd` or `shell`")
+    } else if t.has("shell") {
+      if type_of(t.shell) != "string" or t.shell.trim() == "" {
+        problem("error", name, "`shell` must be a command line (a string)")
+      }
+    } else {
+      stick argv = argv_of(t.cmd)
+      if argv == null or argv.is_empty() {
+        problem("error", name, "`cmd` must be a list like [\"bash\", \"scripts/build.sh\"], or a string")
+      } else {
+        if type_of(t.cmd) == "string" and SHELL_CHARS.any(pack(c) => t.cmd.contains(c)) {
+          problem("warning", name, "`cmd` is split on spaces and never reaches a shell, so its quotes, pipes and globs are passed as they are; use `shell` for a command line, or write `cmd` as a list")
+        }
+        check_program(name, argv, cwd)
+      }
+    }
+    if t.has("needs") and type_of(t.needs) != "list" and type_of(t.needs) != "string" {
+      problem("error", name, "`needs` must be a list of task names")
+    }
+    for dep in needs_of(t) {
+      if not tasks.has(dep) {
+        problem("error", name, "needs `${dep}`, which is not a task; ${known(tasks, dep)}")
+      }
+    }
+    if t.has("ok") {
+      stick ok = ok_codes(t)
+      if type_of(ok) != "list" or ok.is_empty() or not ok.all(pack(c) => type_of(c) == "int") {
+        problem("error", name, "`ok` must be exit codes, like [0, 1]")
+      }
+    }
+    for key in ["timeout_ms", "retries", "retry_delay_ms"] {
+      if t.has(key) and (type_of(t[key]) != "int" or t[key] < 0) {
+        problem("error", name, "`${key}` must be a whole number, 0 or more")
+      }
+    }
+    if t.has("env") and type_of(t.env) != "map" {
+      problem("error", name, "`env` must be a map of names to values")
+    }
+    if t.has("undo") and t.has("undo_shell") {
+      problem("error", name, "has both `undo` and `undo_shell`; keep one")
+    } else if t.has("undo") {
+      stick argv = argv_of(t.undo)
+      if argv == null or argv.is_empty() {
+        problem("error", name, "`undo` must be a list like [\"bash\", \"scripts/undeploy.sh\"], or a string")
+      } else {
+        check_program(name, argv, cwd)
+      }
+    }
   }
-} else if command == "plan" {
-  exhale resolve(args.get(1, "deploy")).join(" > ")
-} else if command == "run" {
-  stick target = args.get(1, "deploy")
-  stick order = resolve(target)
+  roll loops = []
+  for name in tasks {
+    try {
+      resolve(tasks, [name], false)
+    } ashtray e {
+      if e.message.starts_with("dependency loop") and not loops.contains(e.message) {
+        loops.push(e.message)
+        problem("error", name, e.message)
+      }
+    }
+  }
+  stick errors = problems.filter(pack(p) => p.level == "error")
+  stick warnings = problems.filter(pack(p) => p.level == "warning")
+  exhale "${MANIFEST}: ${tasks.len()} task(s), ${errors.len()} error(s), ${warnings.len()} warning(s)"
+  for p in errors + warnings {
+    exhale "  ${p.level}: ${p.where}: ${p.message}"
+  }
+  if not errors.is_empty() {
+    exit(1)
+  }
+}
+
+pull do_run(m, wanted) {
+  expect_flags(["--only"])
+  if wanted.is_empty() {
+    fail("run what? `cigo run <task>`; `cigo list` shows the tasks")
+  }
+  stick tasks = m.tasks
+  stick order = resolve_or_fail(tasks, wanted, flags.contains("--only"))
+  stick last = wanted.last()
+  roll cmds = {}
+  for name in order {
+    if type_of(tasks[name]) != "map" {
+      fail("task `${name}` is not a map; `cigo check` says what is wrong with it")
+    }
+    cmds[name] = command_of(name, tasks[name], pick(name == last, extra, []))
+  }
+  stick ctx = {tasks: tasks, cmds: cmds, defaults: m.get("defaults", {})}
   stick started = time.now_ms()
-  log.info("${manifest.project}: ${order.join(" > ")}")
-  # The tasks become the steps of a chain built here, so the run gets the
-  # chain's narration, timing and per-step report for free.
-  stick steps = order.map(pack(name) => pack() => run_task(name))
-  stick report = light(steps, {quiet: true, names: order})
+  exhale "${project_of(m)}: ${order.join(" > ")}"
+  stick steps = order.enumerate().map(pack(pair) => pack() => run_task(ctx, pair[1], pair[0] + 1, order.len()))
+  roll report = null
+  roll failed = null
+  try {
+    report = light(steps, {names: order, quiet: true})
+  } ashtray e {
+    failed = e
+  }
+  if failed != null {
+    stick cause = failed.get("cause", {})
+    exhale ""
+    exhale "stopped at ${failed.get("step", "a task")}; cig puts back what this run changed, newest first"
+    cough {message: cause.get("message", failed.message), task: cause.get("task", failed.get("step", ""))}
+  }
   stick results = report.steps.map(pack(step) => step.result)
   burn {
-    json.save("reports/${time.stamp()}.json", {
-      project: manifest.project, target: target, ok: report.ok, ms: report.ms, tasks: results,
-    })
+    json.save("${STATE}/reports/${time.stamp()}.json", {
+      project: project_of(m),
+      targets: wanted,
+      order: order,
+      ok: true,
+      ms: time.now_ms() - started,
+      tasks: results,
+      finished: time.now_iso(),
+    }, 2)
   }
-  exhale "ok: ${order.len()} task(s) in ${report.ms} ms"
-  for r in results {
-    exhale "  ${r.name.pad_right(8)} exit ${r.code}  ${r.ms} ms" + (r.attempt > 1 and "  (${r.attempt} attempts)" or "")
+  exhale ""
+  if results.any(pack(r) => r.simulated) {
+    exhale "dry run: ${order.len()} task" + pick(order.len() == 1, "", "s") + " planned, none executed; the plan follows"
+  } else {
+    exhale "done: ${order.len()} task" + pick(order.len() == 1, "", "s") + " in ${duration(time.now_ms() - started)}. Output is in ${STATE}/logs; `cig unburn <run>` undoes all of it."
   }
+}
+
+# ----- adopt: find what the project already has -----------------------------
+
+pull first_file(names) {
+  for n in names {
+    if fs.is_file(n) {
+      snuff n
+    }
+  }
+  snuff null
+}
+
+# The first comment in a script, as its description.
+pull describe(lines) {
+  roll start = 0
+  if lines.get(0, "").starts_with("#!") {
+    start = 1
+  }
+  for line in lines.slice(start, start + 12) {
+    stick s = line.trim()
+    if s == "" or s.starts_with("set ") or s.starts_with("# -*-") or s.starts_with("# shellcheck") or s.contains("SPDX-") or s.contains("Copyright") {
+      continue
+    }
+    roll found = null
+    if s.starts_with("#") {
+      found = s.slice(1)
+    } else if s.starts_with("//") {
+      found = s.slice(2)
+    } else if s.starts_with("\"\"\"") or s.starts_with("'''") {
+      found = s.slice(3).replace("\"\"\"", "").replace("'''", "")
+    }
+    if found == null {
+      snuff ""
+    }
+    stick d = tidy(found.replace("#", ""))
+    if d != "" {
+      snuff d
+    }
+  }
+  snuff ""
+}
+
+# A task for one file, or null when it is not a script: the shebang says how
+# to run it, else the extension does.
+pull script_task(p) {
+  stick base = path.base(p)
+  if base.starts_with(".") or not fs.is_file(p) {
+    snuff null
+  }
+  if fs.size(p) > 1000000 {
+    snuff null
+  }
+  roll lines = null
+  try {
+    lines = fs.read_lines(p)
+  } ashtray e {
+    # Not text: a compiled program in bin/ runs as it is.
+    if path.dir(p) == "bin" {
+      snuff {cmd: [p], source: p, desc: "a compiled program"}
+    }
+    snuff null
+  }
+  stick first = lines.get(0, "")
+  stick ext = path.ext(p).lower()
+  roll cmd = null
+  if first.starts_with("#!") {
+    roll parts = first.slice(2).trim().split()
+    if not parts.is_empty() and path.base(parts[0]) == "env" {
+      parts = parts.slice(1).filter(pack(w) => not w.starts_with("-"))
+    }
+    if not parts.is_empty() {
+      cmd = parts + [p]
+    }
+  }
+  if cmd == null and INTERPRETERS.has(ext) {
+    cmd = INTERPRETERS[ext] + [p]
+  }
+  if cmd == null {
+    snuff null
+  }
+  roll t = {cmd: cmd, source: p}
+  stick d = describe(lines)
+  if d != "" {
+    t.desc = d
+  }
+  snuff t
+}
+
+pull package_runner() {
+  if fs.exists("pnpm-lock.yaml") {
+    snuff "pnpm"
+  }
+  if fs.exists("yarn.lock") {
+    snuff "yarn"
+  }
+  if fs.exists("bun.lockb") or fs.exists("bun.lock") {
+    snuff "bun"
+  }
+  snuff "npm"
+}
+
+pull discover() {
+  roll tasks = {}
+  roll notes = []
+  pull add(name, t) {
+    roll n = name
+    roll i = 2
+    while tasks.has(n) {
+      n = "${name}-${i}"
+      i += 1
+    }
+    tasks[n] = t
+  }
+
+  # Script folders, then scripts at the root.
+  for dir in SCRIPT_DIRS {
+    if fs.is_dir(dir) {
+      for p in fs.list(dir).sort() {
+        stick t = script_task(p)
+        if t != null {
+          add(slug(path.stem(p)), t)
+        }
+      }
+    }
+  }
+  for p in fs.list(".").sort() {
+    stick rel = pick(p.starts_with("./"), p.slice(2), p)
+    if ROOT_SCRIPT_EXTS.contains(path.ext(rel).lower()) {
+      stick t = script_task(rel)
+      if t != null {
+        add(slug(path.stem(rel)), t)
+      }
+    }
+  }
+
+  # make: the .PHONY targets when the Makefile declares any, else every plain target.
+  stick makefile = first_file(["GNUmakefile", "makefile", "Makefile"])
+  if makefile != null {
+    stick lines = fs.read_lines(makefile)
+    roll phony = []
+    for line in lines {
+      stick c = text.captures(line, '^\.PHONY[ \t]*:(.*)$')
+      if c != null {
+        phony = phony + c[1].split()
+      }
+    }
+    roll prev = ""
+    for line in lines {
+      stick c = text.captures(line, '^([A-Za-z0-9][A-Za-z0-9_-]*)[ \t]*:([^=].*)?$')
+      if c != null and (phony.is_empty() or phony.contains(c[1])) and not tasks.has("make:${c[1]}") {
+        roll t = {cmd: ["make", c[1]], source: makefile}
+        stick rest = c.get(2, null) ?? ""
+        stick at = rest.find("##")
+        roll d = ""
+        if at >= 0 {
+          d = tidy(rest.slice(at + 2))
+        } else if prev.starts_with("#") {
+          d = tidy(prev.replace("#", ""))
+        }
+        if d != "" {
+          t.desc = d
+        }
+        add("make:${c[1]}", t)
+      }
+      prev = line.trim()
+    }
+  }
+
+  # package.json scripts, through the package manager the lockfile names.
+  if fs.is_file("package.json") {
+    roll pkg = null
+    try {
+      pkg = json.load("package.json")
+    } ashtray e {
+      notes.push("package.json is not valid JSON; its scripts were skipped")
+    }
+    if pkg != null and type_of(pkg) == "map" and type_of(pkg.get("scripts", null)) == "map" {
+      stick runner = package_runner()
+      stick scripts = pkg.scripts
+      for name in scripts {
+        stick hook = (name.starts_with("pre") and scripts.has(name.slice(3))) or (name.starts_with("post") and scripts.has(name.slice(4)))
+        if not hook {
+          add("${runner}:${name}", {cmd: [runner, "run", name], source: "package.json", desc: tidy(str(scripts[name]))})
+        }
+      }
+    }
+  }
+
+  # just recipes; private ones (a leading underscore) stay private.
+  stick justfile = first_file(["justfile", "Justfile", ".justfile"])
+  if justfile != null {
+    roll prev = ""
+    for line in fs.read_lines(justfile) {
+      stick c = text.captures(line, '^@?([A-Za-z_][A-Za-z0-9_-]*)([^:]*):([^=].*)?$')
+      if c != null and not c[1].starts_with("_") and not ["set", "alias", "export", "import", "mod"].contains(c[1]) {
+        roll t = {cmd: ["just", c[1]], source: justfile}
+        roll d = ""
+        if prev.starts_with("#") {
+          d = tidy(prev.replace("#", ""))
+        }
+        stick params = (c.get(2, null) ?? "").trim()
+        if params != "" {
+          d = tidy(d + pick(d == "", "", " ") + "(takes ${params})")
+        }
+        if d != "" {
+          t.desc = d
+        }
+        add("just:${c[1]}", t)
+      }
+      prev = line.trim()
+    }
+  }
+
+  for f in ["Taskfile.yml", "Taskfile.yaml"] {
+    if fs.is_file(f) {
+      notes.push("${f}: go-task files are not read yet; add its tasks as {\"cmd\": [\"task\", \"<name>\"]}")
+    }
+  }
+  if fs.is_file("Rakefile") {
+    notes.push("Rakefile: add rake tasks as {\"cmd\": [\"rake\", \"<task>\"]}")
+  }
+  snuff {tasks: tasks, notes: notes}
+}
+
+pull do_adopt() {
+  expect_flags(["--write", "--force"])
+  expect_no_targets()
+  stick found = discover()
+  stick tasks = found.tasks
+  stick manifest = {project: path.base(fs.cwd()), tasks: tasks}
+  stick body = json.stringify(manifest, 2) + "\n"
+  for note in found.notes {
+    log.info(note)
+  }
+  if tasks.is_empty() {
+    log.warn("found no scripts, make targets, npm scripts or just recipes here; ${MANIFEST} can still be written by hand (the README has the format)")
+  }
+  if not flags.contains("--write") {
+    exhale body.trim_end()
+    log.info("found ${tasks.len()} task(s); `cigo adopt --write` saves this as ${MANIFEST}, then `cigo check`")
+    snuff
+  }
+  if fs.exists(MANIFEST) and not flags.contains("--force") {
+    fail("${MANIFEST} already exists; `cigo adopt` prints what it would write, and `--force` replaces it")
+  }
+  burn {
+    fs.write_text(MANIFEST, body)
+  }
+  exhale "wrote ${MANIFEST}: ${tasks.len()} task(s) from ${tasks.values().map(pack(t) => t.source).unique().len()} source(s)"
+  exhale "next: `cigo check`, then add `needs` to put them in order"
+  exhale "logs and reports go in ${STATE}/; add it to .gitignore"
+}
+
+# ----- dispatch -------------------------------------------------------------
+
+if command == "help" or command == "--help" or command == "-h" {
+  do_help()
+} else if command == "version" or command == "--version" {
+  exhale "cig-orchestrator ${VERSION}"
+} else if command == "adopt" {
+  do_adopt()
+} else if command == "list" {
+  do_list(load())
+} else if command == "check" {
+  do_check(load())
+} else if command == "plan" {
+  do_plan(load(), targets)
+} else if command == "run" {
+  do_run(load(), targets)
 } else {
-  usage()
+  fail("unknown command `${command}`; `cigo help` lists them")
 }

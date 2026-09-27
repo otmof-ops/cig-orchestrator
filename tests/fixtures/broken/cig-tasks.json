@@ -1,0 +1,17 @@
+{
+  "project": "broken",
+  "colour": "blue",
+  "tasks": {
+    "a": {"cmd": ["bash", "a.sh"], "needs": ["b"]},
+    "b": {"cmd": ["bash", "b.sh"], "needs": ["a"]},
+    "missing-program": {"cmd": ["definitely-not-installed-xyz"]},
+    "missing-script": {"cmd": ["bash", "scripts/nope.sh"]},
+    "pipes-in-cmd": {"cmd": "cat log.txt | grep ERROR"},
+    "typo": {"cmd": ["true"], "need": ["a"]},
+    "both": {"cmd": ["true"], "shell": "true"},
+    "neither": {"desc": "nothing to run"},
+    "ghost-need": {"cmd": ["true"], "needs": ["nobody"]},
+    "bad-ok": {"cmd": ["true"], "ok": ["zero"]},
+    "not-a-map": "bash a.sh"
+  }
+}

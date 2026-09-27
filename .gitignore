@@ -1,6 +1,6 @@
-# what a run leaves behind; cig unburn <run> removes it, and so does a failed run
-build/
-dist/
-remote/
-logs/
-reports/
+# what runs leave behind
+.cig-orchestrator/
+.test-work/
+examples/demo-app/build/
+examples/demo-app/dist/
+examples/demo-app/logs/
