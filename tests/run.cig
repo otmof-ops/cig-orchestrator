@@ -820,6 +820,15 @@ test("|sh quotes a value for a shell line, so a value cannot run as a command", 
   never_says(r.out, "\n    INJECTED")
 })
 
+test("with --only, a value from a task that didn't run says why", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  exits(tool_in(dir, ["run", "report"]), 0)
+  stick r = tool_in(dir, ["run", "--only", "report"])
+  exits(r, 1)
+  says(r.err, "no task by that name has produced output in this run")
+  says(r.err, "with --only, the tasks it reads from don't run: name them too, or leave out --only")
+})
+
 test("outputs shows what the last run handed on", pack() {
   stick dir = fresh("tests/fixtures/chain")
   exits(tool_in(dir, ["run", "report"]), 0)

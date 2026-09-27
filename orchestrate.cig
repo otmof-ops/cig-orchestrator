@@ -1813,6 +1813,8 @@ stick TEMPLATE = '\{\{[^{}]*\}\}'
 stick EXPOSED = {}
 stick RAW = {}
 roll DRY = false
+# `cigo run --only`: the tasks a template reads from may not have run.
+roll ONLY = false
 roll PROJECT_NAME = path.base(ROOT)
 
 pull strings_of(t) {
@@ -1900,6 +1902,9 @@ pull lookup(expr, where) {
     if hit == null {
       if DRY {
         snuff "{{" + expr + "}}"
+      }
+      if ONLY {
+        cough "{{${expr}}} in ${where}: no task by that name has produced output in this run; with --only, the tasks it reads from don't run: name them too, or leave out --only"
       }
       cough "{{${expr}}} in ${where}: no task by that name has produced output in this run; give it `capture`, or have it write name=value lines to $CIG_OUTPUT"
     }
@@ -2534,7 +2539,8 @@ pull do_run(g, wanted) {
   }
   FORCE = flags.contains("--force")
   stick tasks = g.tasks
-  stick order = resolve_or_fail(tasks, wanted, flags.contains("--only"))
+  ONLY = flags.contains("--only")
+  stick order = resolve_or_fail(tasks, wanted, ONLY)
   stick names = runnable(tasks, order)
   for n in names {
     if tasks[n].get("bad", false) {

@@ -149,8 +149,9 @@ or pass them through `env` and read `"$NOTES"` in the line.
 ## Skipping work that's already done
 
 A task with `inputs` (files, directories or globs like `src/**/*.ts`) is
-skipped while those inputs, its command, its environment and its stdin are
-the same as at its last success, and what it `produces` is still there. A
+skipped while those inputs (by size and modification time), its command, its
+environment and its stdin are the same as at its last success, and what it
+`produces` is still there. A
 value from an earlier task is part of its command, so when Python's numbers
 change, Node's page is rebuilt even though no Node file changed. The values
 a skipped task handed on last time are handed on again. `--force` runs it

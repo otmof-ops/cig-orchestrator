@@ -40,12 +40,14 @@ cigo run test                  # a stage group: every component's test
 cigo run api:test web:build    # particular tasks
 cigo run ci                    # format-check, lint, check, build and test, everywhere
 cigo run release --force       # run tasks that are up to date as well
-cigo run --only deploy         # just deploy; its dependencies are assumed done
+cigo run --only deploy         # just deploy: its dependencies don't run, so it can't read their values
 cigo run scripts:seed -- --count 50    # arguments after -- go to the last task named
 ```
 
 A failure stops the run and puts back what it changed (see [cig's
-flags](#cigs-own-flags) to keep it instead).
+flags](#cigs-own-flags) to keep it instead). With `--only`, a task that
+reads another's output (`{{site.page}}`) needs that task named too, since
+values come from the tasks in this run.
 
 **`cigo plan`** prints the order a run would take and each command, and runs
 nothing. With no task names, it plans every task.

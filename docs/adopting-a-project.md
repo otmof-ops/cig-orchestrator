@@ -59,8 +59,9 @@ The notes under the component list explain two decisions adopt makes for you:
   so running both would do everything twice. Its targets stay runnable by
   name: `cigo run make:deploy`.
 - **A task runner beside a language's own commands** stays out for the same
-  reason, and when two runners share a directory with no language, only the
-  first joins the groups.
+  reason. When two runners share a directory with no language (and aren't at
+  the root of a project with components below it, where none join), only the
+  first joins the groups, so the same build never runs twice.
 
 Either can be turned around with `"groups": true` on the component. Nothing
 is decided for good: the report is a proposal, and the file it writes is

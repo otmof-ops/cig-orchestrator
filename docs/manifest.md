@@ -148,13 +148,15 @@ has the whole story.
 ## When check says no
 
 `cigo check` reads the manifest against the project before anything runs.
-It exits 1 when it finds an error and prints each problem with what to do:
+It exits 1 when it finds an error, and prints each problem after the name of
+the component or task it's about:
 
 ```
-cig-tasks.json: 3 component(s), 29 task(s), 2 error(s), 1 warning(s)
-  error: odd: toolchain `rustt` is not one this knows; did you mean rust-cargo?
-  error: bad-ref: {{nobody.value}} names no task; tasks here: ...
-  warning: typo: unknown key `need`, ignored; did you mean `needs`?
+cig-tasks.json: 1 component(s), 2 task(s), 3 error(s), 1 warning(s)
+  error: api: toolchain `rustt` is not one this knows; did you mean rust-cargo?
+  error: deploy: `deploy.sh` does not exist
+  error: deploy: {{relase.tag}} names no task; tasks here: build, deploy, ci
+  warning: build: unknown key `need`, ignored; did you mean `needs`?
 ```
 
 It catches unknown keys (with the key you probably meant), unknown

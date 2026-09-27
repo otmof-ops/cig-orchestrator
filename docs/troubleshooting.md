@@ -62,8 +62,9 @@ whole process group. Raise `timeout_ms` on the task or component, or in
 **`` {{stats.total}} in task `site`: no task by that name has produced output in this run ``**
 
 `site` reads a value `stats` never handed on. Give `stats` a `capture`, or
-have it write `total=...` to `$CIG_OUTPUT`. With `--only`, the task that
-hands the value on didn't run.
+have it write `total=...` to `$CIG_OUTPUT`. Under `--only` the message says
+so: the task that hands the value on didn't run, so name it too
+(`cigo run --only stats site`) or leave out `--only`.
 
 **`` the output of `stats` has no `totl`; it is {...} ``**
 

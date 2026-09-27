@@ -68,7 +68,7 @@ Every language in the project, one chain, no glue script.
   toolchains, CI, troubleshooting, how it works, and the roadmap. Also
   CONTRIBUTING, SUPPORT and SECURITY, issue forms for bugs, toolchain,
   quality-of-life and guidance requests, and a pull request template.
-- 55 tests, with a stub toolchain that records what every language would
+- 56 tests, with a stub toolchain that records what every language would
   run and where.
 
 ## 0.1.0 — 2026-09-28
