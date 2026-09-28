@@ -21,7 +21,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "${1:-help}" in
-  adopt|help|version|--help|-h|--version) ;;
+  adopt|help|version|toolchains|--help|-h|--version) ;;
   *)
     dir=$PWD
     while [ "$dir" != "/" ] && [ ! -f "$dir/cig-tasks.json" ]; do

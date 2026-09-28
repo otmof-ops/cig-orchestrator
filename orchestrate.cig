@@ -1,42 +1,94 @@
 #!/usr/bin/env cig
-# cig-orchestrator: keep the scripts you have, run them through CigScript.
+# cig-orchestrator: every language in the project, one chain, no glue script.
 #
-# One file, all CigScript. It reads cig-tasks.json in the project root and runs
-# each task's command (a shell script, a Python script, a make target, an npm
-# script: anything with an exit code) as a hop, in dependency order. cig does
-# the rest: `--dry-run` executes nothing and prints the plan; every file the
-# scripts create inside the project is journaled, so a failed run is rolled
-# back and `cig unburn <run>` undoes a good one; a task's `undo` becomes a
-# compensation for what no journal can see, like a deploy.
+# Most projects are several languages in a row: a Python step that makes
+# data, a Go or Rust service, a TypeScript front end, a Dockerfile, a deploy
+# script. Each language brings its own tool (npm, cargo, uv, gradle, go...),
+# and the chain between them usually ends up in one more language: a
+# Makefile or a bash script whose only job is gluing the others together.
 #
-#   cigo adopt [--write] [--force]    propose cig-tasks.json from the scripts already here
-#   cigo list                         the tasks
-#   cigo check                        the manifest, checked before anything runs
-#   cigo plan [<task>...] [--only]    the order a run would take
-#   cigo run <task>... [--only] [-- <args for the last task named>]
+# This is that glue, done once, in CigScript. It knows the standard workflow
+# of each toolchain (setup, format, lint, check, build, test, package, clean),
+# finds every language in the project, runs one stage across all of them in
+# dependency order, and passes values between them: a task's stdout or named
+# outputs become a later task's arguments, environment or stdin, whatever
+# language either is written in. cig adds a dry run, rollback of what the
+# scripts created, `cig unburn` to undo a run later, and compensations for
+# what no journal can see.
 #
-# cig's own flags go first: `cigo --dry-run run deploy`, `cigo --no-rollback run test`.
-# Without the launcher: cig run path/to/orchestrate.cig -- <command> ...
+#   cigo adopt [--write]          find every language here; propose cig-tasks.json
+#   cigo list [--all]             components, stage groups and tasks
+#   cigo run <task>...            `cigo run test` runs every language's tests
+#   cigo plan | show | check | doctor | outputs | toolchains | help
+#
+# cig's own flags go first: `cigo --dry-run run ci`. Without the launcher:
+# cig run path/to/orchestrate.cig -- <command> ...
 
 pack { "." }
 
-stick VERSION = "0.1.0"
+stick VERSION = "0.2.0"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
+stick ROOT = fs.cwd()
 
-stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell"]
-stick TOP_KEYS = ["project", "defaults", "tasks"]
-stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms"]
-stick NEAR_MISSES = {
-  need: "needs", deps: "needs", depends: "needs", depends_on: "needs", after: "needs", requires: "needs",
-  command: "cmd", commands: "cmd", run: "cmd", script: "cmd", exec: "cmd", argv: "cmd",
-  sh: "shell", bash: "shell",
-  description: "desc", help: "desc", summary: "desc",
-  timeout: "timeout_ms", retry: "retries", attempts: "retries",
-  dir: "cwd", workdir: "cwd", working_dir: "cwd",
-  environment: "env", rollback: "undo", revert: "undo", cleanup: "undo",
+# ----- stages -----------------------------------------------------------------
+
+# The stages every toolchain speaks, in the order a pipeline takes them.
+stick STAGES = ["setup", "format", "format-check", "lint", "check", "build", "test", "package", "run", "clean"]
+# A stage group runs its stage in every component; `run` stays per component.
+stick GROUP_STAGES = ["setup", "format", "format-check", "lint", "check", "build", "test", "package", "clean"]
+stick CI_STAGES = ["format-check", "lint", "check", "build", "test"]
+# Inside one component, a stage waits for these, when the component has them.
+stick STAGE_NEEDS = {
+  setup: [], format: ["setup"], "format-check": ["setup"], lint: ["setup"], check: ["setup"],
+  build: ["setup"], test: ["setup"], package: ["build"], run: ["build"], clean: [],
 }
-stick SHELL_CHARS = ["|", "&", ";", ">", "<", "$", "`", "*", "?", "'", "\"", "~"]
+
+# The names projects give their stage scripts in package.json, composer.json,
+# deno.json, justfiles and Taskfiles; the first one present wins.
+stick SCRIPT_ALIASES = {
+  setup: ["setup", "bootstrap", "deps"],
+  format: ["format", "fmt", "format:fix", "fmt:fix", "prettier", "prettier:write"],
+  "format-check": ["format:check", "format-check", "fmt:check", "fmt-check", "check-format", "check:format", "prettier:check", "lint:format"],
+  lint: ["lint", "lint:all", "eslint"],
+  check: ["typecheck", "type-check", "check-types", "types", "tsc", "check"],
+  build: ["build", "compile"],
+  test: ["test", "tests", "test:unit", "spec"],
+  package: ["package", "pack", "dist"],
+  run: ["run"],
+  clean: ["clean"],
+}
+# make's own conventions: `all` builds, `check` runs the tests, and `install`
+# installs into the system, which is not setup.
+stick MAKE_ALIASES = {
+  setup: ["setup", "bootstrap", "deps", "dependencies"],
+  format: ["format", "fmt"],
+  "format-check": ["format-check", "fmt-check", "check-format"],
+  lint: ["lint"],
+  check: ["typecheck", "vet"],
+  build: ["build", "all", "compile"],
+  test: ["test", "tests", "check"],
+  package: ["package", "dist"],
+  run: ["run"],
+  clean: ["clean"],
+}
+
+# Directories adopt does not look inside for components: dependencies,
+# caches and build outputs. Hidden directories are skipped as well.
+stick WALK_SKIP = ["node_modules", "target", "dist", "build", "out", "vendor", "venv", "bin", "obj", "coverage", "deps", "_build", "zig-out", "Pods", "DerivedData", "tmp", "logs", "__pycache__",
+  # test data: inputs for a test suite, often broken on purpose
+  "fixtures", "__fixtures__", "testdata", "test-data", "corpus", "golden", "__snapshots__"]
+# Inside a language's component, these folders are its own tests, not more components.
+stick TEST_DIRS = ["test", "tests", "__tests__", "spec", "specs", "e2e", "benches"]
+# Directories an inputs fingerprint does not read.
+stick FINGERPRINT_SKIP = [".git", "node_modules", "target", ".venv", "venv", "__pycache__", ".cig-orchestrator", ".gradle", ".terraform"]
+
+# Script folders, and how a script in one runs.
+stick SCRIPT_DIRS = ["script", "scripts", "bin", "tools"]
+stick LOOSE_SCRIPT_EXTS = ["sh", "bash"]
+# package.json lifecycle scripts run on their own around install, publish and
+# pack; they are not tasks.
+stick HOOK_SCRIPTS = ["prepare", "preinstall", "install", "postinstall", "prepublish", "prepublishOnly", "prepack", "postpack", "publish", "postpublish", "preversion", "version", "postversion", "dependencies"]
 stick INTERPRETERS = {
   sh: ["bash"], bash: ["bash"], zsh: ["zsh"],
   py: ["python3"],
@@ -45,10 +97,741 @@ stick INTERPRETERS = {
   ps1: ["pwsh", "-NoProfile", "-File"],
   cig: ["cig", "run"],
 }
-stick SCRIPT_DIRS = ["script", "scripts", "bin", "tools"]
-stick ROOT_SCRIPT_EXTS = ["sh", "bash"]
 
-# ----- the command line -----------------------------------------------------
+# ----- the toolchains ---------------------------------------------------------
+#
+# What each toolchain is called, how to recognize it, and how it runs each
+# stage. Conditions (`detect`, `workspace`, `when`) are checked in the
+# component's directory; a list inside the list means "any of these":
+#   file:X   dir:X   glob:PATTERN   grep:FILE:REGEX   json:FILE:key.path
+#   tool:PROGRAM   not:CONDITION
+# A stage is a list of alternatives and the first that applies wins: an argv
+# list, {when: [...], cmd: [...]} or {when: [...], shell: "..."}. `{name}` in a
+# command is a var; `{component}` and `{dir}` are always set. A project can
+# override any of this, or add its own toolchains, under "toolchains" in
+# cig-tasks.json.
+
+stick PY_RUFF = ["file:ruff.toml", "file:.ruff.toml", 'grep:pyproject.toml:\bruff\b']
+stick PY_BLACK = ['grep:pyproject.toml:\bblack\b', 'grep:requirements*.txt:(?m)^black\b']
+stick PY_FLAKE8 = ["file:.flake8", 'grep:setup.cfg:\[flake8\]', 'grep:tox.ini:\[flake8\]']
+stick PY_MYPY = ["file:mypy.ini", "file:.mypy.ini", 'grep:pyproject.toml:\bmypy\b', 'grep:setup.cfg:\[mypy']
+stick PY_PYRIGHT = ["file:pyrightconfig.json", 'grep:pyproject.toml:\bpyright\b']
+stick PY_PYTEST = ["file:pytest.ini", "file:conftest.py", 'grep:pyproject.toml:\bpytest\b', 'grep:setup.cfg:\[tool:pytest\]', 'grep:tox.ini:\[pytest\]', 'grep:requirements*.txt:(?m)^pytest\b']
+stick PY_TOX = ["file:tox.ini", "file:tox.toml", 'grep:pyproject.toml:(?m)^\[tool\.tox', 'grep:setup.cfg:\[tox:tox\]']
+stick PY_BUILDABLE = ['grep:pyproject.toml:(?m)^\[build-system\]', "file:setup.py"]
+# A `dev` group (PEP 735) or extra, or a `test` or `tests` extra, in pyproject.toml:
+# the header, then lines that do not open another table, then the name.
+stick PY_DEV_GROUP = 'grep:pyproject.toml:(?m)^\[dependency-groups\]\r?\n(?:(?:[^\[\r\n][^\n]*)?\n)*?"?dev"?\s*='
+stick PY_DEV_EXTRA = 'grep:pyproject.toml:(?m)^\[project\.optional-dependencies\]\r?\n(?:(?:[^\[\r\n][^\n]*)?\n)*?"?dev"?\s*='
+stick PY_TEST_EXTRA = 'grep:pyproject.toml:(?m)^\[project\.optional-dependencies\]\r?\n(?:(?:[^\[\r\n][^\n]*)?\n)*?"?test"?\s*='
+stick PY_TESTS_EXTRA = 'grep:pyproject.toml:(?m)^\[project\.optional-dependencies\]\r?\n(?:(?:[^\[\r\n][^\n]*)?\n)*?"?tests"?\s*='
+stick PY_PINS = {python: [".python-version", ".tool-versions:python", "mise.toml:python"]}
+stick NODE_PINS = {node: [".nvmrc", ".node-version", ".tool-versions:nodejs", "mise.toml:node"]}
+stick JAVA_PINS = {java: [".java-version", ".sdkmanrc:java", ".tool-versions:java", "mise.toml:java"]}
+stick JS_PRETTIER = ["glob:.prettierrc*", "glob:prettier.config.*", "json:package.json:prettier"]
+stick JS_ESLINT = ["glob:eslint.config.*", "glob:.eslintrc*", "json:package.json:eslintConfig"]
+stick JS_BIOME = ["file:biome.json", "file:biome.jsonc"]
+stick YARN_BERRY = ["file:.yarnrc.yml", "grep:yarn.lock:__metadata:", 'grep:package.json:"packageManager"\s*:\s*"yarn@[2-9]']
+stick CLANG_FILES = "git ls-files -- '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp' '*.hxx'"
+stick GO_FILES = "find . -name '*.go' -not -path './vendor/*' -not -path '*/testdata/*' -print0"
+
+# The Python stages, for a way of running tools inside the project's
+# environment (`uv run --locked`, `poetry run`, a venv's python -m).
+pull python_stages(tool, py) {
+  snuff {
+    format: [{when: [PY_RUFF], cmd: tool + ["ruff", "format", "."]}, {when: [PY_BLACK], cmd: tool + ["black", "."]}],
+    "format-check": [{when: [PY_RUFF], cmd: tool + ["ruff", "format", "--check", "."]}, {when: [PY_BLACK], cmd: tool + ["black", "--check", "."]}],
+    lint: [{when: [PY_RUFF], cmd: tool + ["ruff", "check", "."]}, {when: [PY_FLAKE8], cmd: tool + ["flake8"]}],
+    check: [{when: [PY_MYPY], cmd: tool + ["mypy", "."]}, {when: [PY_PYRIGHT], cmd: tool + ["pyright"]}],
+    test: [
+      {when: [PY_TOX], cmd: ["tox"]},
+      {when: ["file:noxfile.py"], cmd: ["nox"]},
+      {when: [PY_PYTEST], cmd: tool + ["pytest"]},
+      {when: [["dir:tests", "dir:test"]], cmd: py + ["-m", "unittest", "discover"]},
+    ],
+  }
+}
+
+# One JavaScript package manager. Stages come from package.json scripts first
+# (SCRIPT_ALIASES); the formatter, linter and tsc a project configures are the
+# fallback when it has no script for the stage.
+pull node_manager(detect, run, exec, setup, packer, extra) {
+  snuff {
+    language: "JavaScript / TypeScript", short: "node", family: "node", priority: 30,
+    detect: pick(detect == "file:package.json", ["file:package.json"], ["file:package.json", detect]),
+    workspace: ["file:pnpm-workspace.yaml", "json:package.json:workspaces"],
+    versions: {node: ["node", "--version"]},
+    pins: NODE_PINS,
+    scripts: {file: "package.json", key: "scripts", run: run},
+    note: "dev, start, serve and watch scripts do not end on their own, so none of them is a stage",
+    stages: {
+      setup: setup,
+      format: [{when: [JS_BIOME], cmd: exec + ["biome", "format", "--write", "."]}, {when: [JS_PRETTIER], cmd: exec + ["prettier", "--write", "."]}],
+      "format-check": [{when: [JS_BIOME], cmd: exec + ["biome", "ci", "."]}, {when: [JS_PRETTIER], cmd: exec + ["prettier", "--check", "."]}],
+      lint: [{when: [JS_BIOME], cmd: exec + ["biome", "lint", "."]}, {when: [JS_ESLINT], cmd: exec + ["eslint", "."]}],
+      check: [{when: ["file:tsconfig.json"], cmd: exec + ["tsc", "--noEmit"]}],
+      package: [{when: ["not:json:package.json:private"], cmd: packer}],
+    },
+  }.merge(extra)
+}
+
+stick TOOLCHAINS = {
+  # --- JavaScript and TypeScript -------------------------------------------
+  "node-npm": node_manager("file:package.json", ["npm", "run"], ["npm", "exec", "--no", "--"],
+    [{when: [["file:package-lock.json", "file:npm-shrinkwrap.json"]], cmd: ["npm", "ci"]}, ["npm", "install"]],
+    ["npm", "pack"],
+    {priority: 10, tools: ["node", "npm"], install: "https://nodejs.org/en/download"}),
+  "node-pnpm": node_manager(["file:pnpm-lock.yaml", 'grep:package.json:"packageManager"\s*:\s*"pnpm@'], ["pnpm", "run"], ["pnpm", "exec"],
+    [["pnpm", "install", "--frozen-lockfile"]], ["pnpm", "pack"],
+    {tools: ["node", "pnpm"], versions: {node: ["node", "--version"], pnpm: ["pnpm", "--version"]}, install: "https://pnpm.io/installation"}),
+  "node-yarn": node_manager(["file:yarn.lock", 'grep:package.json:"packageManager"\s*:\s*"yarn@'], ["yarn", "run"], ["yarn", "run"],
+    [{when: [YARN_BERRY], cmd: ["yarn", "install", "--immutable"]}, ["yarn", "install", "--frozen-lockfile", "--non-interactive"]],
+    ["yarn", "pack"],
+    {tools: ["node", "yarn"], versions: {node: ["node", "--version"], yarn: ["yarn", "--version"]}, install: "https://yarnpkg.com/getting-started/install"}),
+  "node-bun": node_manager(["file:bun.lock", "file:bun.lockb", "file:bunfig.toml", 'grep:package.json:"packageManager"\s*:\s*"bun@'], ["bun", "run"], ["bun", "run"],
+    [["bun", "install", "--frozen-lockfile"]], ["bun", "pm", "pack"],
+    {tools: ["bun"], versions: {bun: ["bun", "--version"]}, pins: {bun: [".bun-version", ".tool-versions:bun", "mise.toml:bun"]},
+     install: "https://bun.com/docs/installation"}),
+  deno: {
+    language: "JavaScript / TypeScript", short: "deno", family: "node", priority: 40,
+    detect: [["file:deno.json", "file:deno.jsonc"]], workspace: ["json:deno.json:workspace"],
+    tools: ["deno"], versions: {deno: ["deno", "--version"]}, pins: {deno: [".dvmrc", ".tool-versions:deno", "mise.toml:deno"]},
+    install: "https://docs.deno.com/runtime/getting_started/installation/",
+    scripts: {file: "deno.json", key: "tasks", run: ["deno", "task"]},
+    note: "deno check needs entry files, so there is no check stage unless deno.json has a check task",
+    stages: {
+      setup: [{when: ["file:deno.lock"], cmd: ["deno", "install", "--frozen"]}, ["deno", "install"]],
+      format: [["deno", "fmt"]], "format-check": [["deno", "fmt", "--check"]], lint: [["deno", "lint"]], test: [["deno", "test"]],
+    },
+  },
+
+  # --- Python ---------------------------------------------------------------
+  "python-uv": {
+    language: "Python", short: "python", family: "python", priority: 40,
+    detect: [["file:uv.lock", 'grep:pyproject.toml:(?m)^\[tool\.uv']],
+    workspace: ['grep:pyproject.toml:(?m)^\[tool\.uv\.workspace\]'],
+    tools: ["uv"], versions: {uv: ["uv", "--version"]},
+    install: "https://docs.astral.sh/uv/getting-started/installation/",
+    note: "uv reads .python-version itself, so no Python pin is checked here",
+    vars: {uvrun: [{when: ["file:uv.lock"], value: ["uv", "run", "--locked"]}, {value: ["uv", "run"]}]},
+    stages: python_stages(["{uvrun}"], ["{uvrun}", "python"]).merge({
+      setup: [{when: ["file:uv.lock"], cmd: ["uv", "sync", "--locked"]}, ["uv", "sync"]],
+      package: [{when: [PY_BUILDABLE], cmd: ["uv", "build"]}],
+    }),
+  },
+  "python-poetry": {
+    language: "Python", short: "python", family: "python", priority: 35,
+    detect: [["file:poetry.lock", 'grep:pyproject.toml:(?m)^\[tool\.poetry', 'grep:pyproject.toml:poetry\.core\.masonry']],
+    tools: ["poetry"], versions: {poetry: ["poetry", "--version"], python: ["python3", "--version"]}, pins: PY_PINS,
+    install: "https://python-poetry.org/docs/#installation",
+    stages: python_stages(["poetry", "run"], ["poetry", "run", "python"]).merge({
+      setup: [["poetry", "install", "--no-interaction"]], package: [["poetry", "build", "--no-interaction"]],
+    }),
+  },
+  "python-pdm": {
+    language: "Python", short: "python", family: "python", priority: 35,
+    detect: [["file:pdm.lock", 'grep:pyproject.toml:(?m)^\[tool\.pdm', 'grep:pyproject.toml:pdm\.backend']],
+    tools: ["pdm"], versions: {pdm: ["pdm", "--version"], python: ["python3", "--version"]}, pins: PY_PINS,
+    install: "https://pdm-project.org/latest/#installation",
+    stages: python_stages(["pdm", "run"], ["pdm", "run", "python"]).merge({
+      setup: [{when: ["file:pdm.lock"], cmd: ["pdm", "install", "--check"]}, ["pdm", "install"]], package: [["pdm", "build"]],
+    }),
+  },
+  "python-hatch": {
+    language: "Python", short: "python", family: "python", priority: 30,
+    detect: [["file:hatch.toml", 'grep:pyproject.toml:(?m)^\[tool\.hatch\.envs']],
+    tools: ["hatch"], versions: {hatch: ["hatch", "--version"]},
+    install: "https://hatch.pypa.io/latest/install/",
+    stages: {
+      setup: [["hatch", "env", "create"]],
+      format: [["hatch", "fmt", "--formatter"]], "format-check": [["hatch", "fmt", "--check", "--formatter"]],
+      lint: [["hatch", "fmt", "--check", "--linter"]], test: [["hatch", "test"]],
+      package: [["hatch", "build"]], clean: [["hatch", "clean"]],
+    },
+  },
+  "python-pipenv": {
+    language: "Python", short: "python", family: "python", priority: 30,
+    detect: ["file:Pipfile"],
+    tools: ["pipenv"], versions: {pipenv: ["pipenv", "--version"], python: ["python3", "--version"]}, pins: PY_PINS,
+    install: "https://pipenv.pypa.io/en/latest/installation.html",
+    stages: python_stages(["pipenv", "run"], ["pipenv", "run", "python"]).merge({
+      setup: [{when: ["file:Pipfile.lock"], cmd: ["pipenv", "sync", "--dev"]}, ["pipenv", "install", "--dev"]],
+    }),
+  },
+  "python-pip": {
+    language: "Python", short: "python", family: "python", priority: 10,
+    detect: [["file:requirements.txt", "file:pyproject.toml", "file:setup.py", "file:setup.cfg"]],
+    tools: ["python3"], versions: {python: ["python3", "--version"]}, pins: PY_PINS,
+    install: "https://www.python.org/downloads/",
+    note: "setup makes .venv with the project and its dev requirements (requirements-dev.txt, a dev dependency group, or a dev, test or tests extra); the other stages run inside it",
+    vars: {py: [{when: [["file:requirements.txt", PY_BUILDABLE]], value: ".venv/bin/python"}, {value: "python3"}]},
+    stages: python_stages(["{py}", "-m"], ["{py}"]).merge({
+      setup: [
+        {when: ["file:requirements.txt", "file:requirements-dev.txt"], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt"},
+        {when: ["file:requirements.txt", "file:dev-requirements.txt"], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt -r dev-requirements.txt"},
+        {when: ["file:requirements.txt"], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt"},
+        # --group needs pip 25.1, newer than many system Pythons ship in a venv.
+        {when: [PY_BUILDABLE, PY_DEV_GROUP], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -U pip && .venv/bin/python -m pip install -e . --group dev"},
+        {when: [PY_BUILDABLE, PY_DEV_EXTRA], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -e '.[dev]'"},
+        {when: [PY_BUILDABLE, PY_TEST_EXTRA], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -e '.[test]'"},
+        {when: [PY_BUILDABLE, PY_TESTS_EXTRA], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -e '.[tests]'"},
+        {when: [PY_BUILDABLE], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -e ."},
+      ],
+      package: [{when: [PY_BUILDABLE], cmd: ["{py}", "-m", "build"]}],
+    }),
+  },
+
+  # --- Rust and Go -------------------------------------------------------------
+  "rust-cargo": {
+    language: "Rust", short: "rust", family: "rust", priority: 20,
+    detect: ["file:Cargo.toml"], workspace: ['grep:Cargo.toml:(?m)^\[workspace\]'],
+    tools: ["cargo"], versions: {rustc: ["rustc", "--version"], cargo: ["cargo", "--version"]},
+    pins: {rustc: ["rust-toolchain.toml", "rust-toolchain", ".tool-versions:rust", "mise.toml:rust"]},
+    install: "https://rustup.rs",
+    note: "cig does not watch target/, so build outputs are not rolled back; --locked is used when Cargo.lock exists",
+    vars: {locked: [{when: ["file:Cargo.lock"], value: ["--locked"]}, {value: []}], lockflag: [{when: ["file:Cargo.lock"], value: " --locked"}, {value: ""}]},
+    stages: {
+      setup: [{when: [["file:rust-toolchain.toml", "file:rust-toolchain"]], shell: "rustup toolchain install && cargo fetch{lockflag}"}, ["cargo", "fetch", "{locked}"]],
+      format: [["cargo", "fmt", "--all"]], "format-check": [["cargo", "fmt", "--all", "--check"]],
+      lint: [["cargo", "clippy", "--workspace", "--all-targets", "{locked}", "--", "-D", "warnings"]],
+      check: [["cargo", "check", "--workspace", "--all-targets", "{locked}"]],
+      build: [["cargo", "build", "--workspace", "{locked}"]], test: [["cargo", "test", "--workspace", "{locked}"]],
+      package: [["cargo", "build", "--release", "{locked}"]], run: [["cargo", "run", "{locked}"]], clean: [["cargo", "clean"]],
+    },
+  },
+  go: {
+    language: "Go", short: "go", family: "go", priority: 20,
+    detect: ["file:go.mod"], workspace: ["file:go.work"],
+    tools: ["go"], versions: {go: ["go", "version"]},
+    pins: {go: ["go.mod:go", ".go-version", ".tool-versions:golang", "mise.toml:go"]},
+    install: "https://go.dev/doc/install",
+    stages: {
+      setup: [["go", "mod", "download"]],
+      format: [["go", "fmt", "./..."]],
+      "format-check": [{shell: "out=$(" + GO_FILES + " | xargs -0 -r gofmt -l); if [ -n \"$out\" ]; then echo \"not formatted:\"; echo \"$out\"; exit 1; fi"}],
+      lint: [{when: [["file:.golangci.yml", "file:.golangci.yaml", "file:.golangci.toml", "file:.golangci.json"]], cmd: ["golangci-lint", "run"]}],
+      check: [["go", "vet", "./..."]], build: [["go", "build", "./..."]], test: [["go", "test", "./..."]],
+      run: [{when: ["file:main.go"], cmd: ["go", "run", "."]}], clean: [["go", "clean"]],
+    },
+  },
+
+  # --- JVM ----------------------------------------------------------------------
+  "java-gradle": {
+    language: "Java / Kotlin", short: "gradle", family: "jvm", priority: 20,
+    detect: [["file:build.gradle", "file:build.gradle.kts", "file:settings.gradle", "file:settings.gradle.kts"]],
+    workspace: ["file:settings.gradle", "file:settings.gradle.kts"],
+    tools: ["java"], versions: {java: ["java", "-version"]}, pins: JAVA_PINS,
+    install: "https://docs.gradle.org/current/userguide/installation.html",
+    note: "a root task name runs in every subproject; formatter and linter tasks exist only when their plugin is applied",
+    vars: {gradle: [{when: ["file:gradlew"], value: "./gradlew"}, {value: "gradle"}]},
+    stages: {
+      format: [{when: ["grep:build.gradle*:spotless"], cmd: ["{gradle}", "--console=plain", "spotlessApply"]}, {when: ["grep:build.gradle*:ktlint"], cmd: ["{gradle}", "--console=plain", "ktlintFormat"]}],
+      "format-check": [{when: ["grep:build.gradle*:spotless"], cmd: ["{gradle}", "--console=plain", "spotlessCheck"]}, {when: ["grep:build.gradle*:ktlint"], cmd: ["{gradle}", "--console=plain", "ktlintCheck"]}],
+      lint: [{when: ["grep:build.gradle*:detekt"], cmd: ["{gradle}", "--console=plain", "detekt"]}, {when: ["grep:build.gradle*:(checkstyle|pmd|spotbugs)"], cmd: ["{gradle}", "--console=plain", "check", "-x", "test"]}],
+      check: [["{gradle}", "--console=plain", "classes", "testClasses"]],
+      build: [["{gradle}", "--console=plain", "assemble"]], test: [["{gradle}", "--console=plain", "test"]],
+      package: [{when: ['grep:build.gradle*:(bootJar|org\.springframework\.boot)'], cmd: ["{gradle}", "--console=plain", "bootJar"]}, {when: ['grep:build.gradle*:\bapplication\b'], cmd: ["{gradle}", "--console=plain", "distZip"]}],
+      run: [{when: ['grep:build.gradle*:\bapplication\b'], cmd: ["{gradle}", "--console=plain", "run"]}],
+      clean: [["{gradle}", "--console=plain", "clean"]],
+    },
+  },
+  "android-gradle": {
+    language: "Android (Kotlin / Java)", short: "android", family: "jvm", priority: 25,
+    detect: [["file:app/src/main/AndroidManifest.xml", "file:src/main/AndroidManifest.xml"], ["file:build.gradle", "file:build.gradle.kts", "file:settings.gradle", "file:settings.gradle.kts"]],
+    workspace: ["file:settings.gradle", "file:settings.gradle.kts"],
+    tools: ["java"], versions: {java: ["java", "-version"]}, pins: JAVA_PINS,
+    install: "https://developer.android.com/build/building-cmdline",
+    note: "needs the Android SDK (ANDROID_HOME or local.properties); device tests are left out",
+    vars: {gradle: [{when: ["file:gradlew"], value: "./gradlew"}, {value: "gradle"}]},
+    stages: {
+      lint: [["{gradle}", "--console=plain", "lint"]], check: [["{gradle}", "--console=plain", "compileDebugSources"]],
+      build: [["{gradle}", "--console=plain", "assembleDebug"]], test: [["{gradle}", "--console=plain", "testDebugUnitTest"]],
+      package: [["{gradle}", "--console=plain", "bundleRelease"]], clean: [["{gradle}", "--console=plain", "clean"]],
+    },
+  },
+  "java-maven": {
+    language: "Java / Kotlin", short: "maven", family: "jvm", priority: 20,
+    detect: ["file:pom.xml"], workspace: ["grep:pom.xml:<(modules|subprojects)>"],
+    tools: ["java"], versions: {java: ["java", "-version"]}, pins: JAVA_PINS,
+    install: "https://maven.apache.org/install.html",
+    note: "phases are cumulative (package runs the tests unless skipped); install writes to ~/.m2 and is not setup",
+    vars: {mvn: [{when: ["file:mvnw"], value: "./mvnw"}, {value: "mvn"}]},
+    stages: {
+      setup: [["{mvn}", "-B", "-ntp", "dependency:go-offline"]],
+      format: [{when: ["grep:pom.xml:spotless"], cmd: ["{mvn}", "-B", "-ntp", "spotless:apply"]}],
+      "format-check": [{when: ["grep:pom.xml:spotless"], cmd: ["{mvn}", "-B", "-ntp", "spotless:check"]}],
+      lint: [{when: ["grep:pom.xml:checkstyle"], cmd: ["{mvn}", "-B", "-ntp", "checkstyle:check"]}],
+      check: [["{mvn}", "-B", "-ntp", "test-compile"]], build: [["{mvn}", "-B", "-ntp", "package", "-DskipTests"]],
+      test: [["{mvn}", "-B", "-ntp", "test"]], clean: [["{mvn}", "-B", "-ntp", "clean"]],
+    },
+  },
+  "scala-sbt": {
+    language: "Scala", short: "scala", family: "scala", priority: 20,
+    detect: ["file:build.sbt"], tools: ["sbt"], versions: {java: ["java", "-version"]}, pins: JAVA_PINS,
+    install: "https://www.scala-sbt.org/download/",
+    note: "sbt 2 runs tests incrementally; add a stage override with testFull to run them all",
+    stages: {
+      setup: [["sbt", "--batch", "update"]],
+      format: [{when: ["file:.scalafmt.conf"], cmd: ["sbt", "--batch", "scalafmtAll", "scalafmtSbt"]}],
+      "format-check": [{when: ["file:.scalafmt.conf"], cmd: ["sbt", "--batch", "scalafmtCheckAll", "scalafmtSbtCheck"]}],
+      check: [["sbt", "--batch", "Test/compile"]], build: [["sbt", "--batch", "compile"]], test: [["sbt", "--batch", "test"]],
+      package: [["sbt", "--batch", "package"]], run: [["sbt", "--batch", "run"]], clean: [["sbt", "--batch", "clean"]],
+    },
+  },
+  "scala-mill": {
+    language: "Scala", short: "scala", family: "scala", priority: 15,
+    detect: [["file:build.mill", "file:build.mill.yaml", "file:build.sc"]], tools: [],
+    install: "https://mill-build.org/mill/cli/installation-ide.html",
+    vars: {mill: [{when: ["file:mill"], value: "./mill"}, {value: "mill"}]},
+    stages: {
+      format: [{when: ["file:.scalafmt.conf"], cmd: ["{mill}", "mill.scalalib.scalafmt/"]}],
+      "format-check": [{when: ["file:.scalafmt.conf"], cmd: ["{mill}", "mill.scalalib.scalafmt/checkFormatAll"]}],
+      check: [["{mill}", "__.compile"]], build: [["{mill}", "__.compile"]], test: [["{mill}", "__.test"]],
+      package: [["{mill}", "__.assembly"]], clean: [["{mill}", "clean"]],
+    },
+  },
+  "clojure-lein": {
+    language: "Clojure", short: "clojure", family: "clojure", priority: 20,
+    detect: ["file:project.clj"], tools: ["lein"], install: "https://leiningen.org/",
+    stages: {
+      setup: [["lein", "deps"]], check: [["lein", "check"]], build: [["lein", "compile"]], test: [["lein", "test"]],
+      package: [["lein", "uberjar"]], run: [{when: ["grep:project.clj::main"], cmd: ["lein", "run"]}], clean: [["lein", "clean"]],
+    },
+  },
+  "clojure-cli": {
+    language: "Clojure", short: "clojure", family: "clojure", priority: 15,
+    detect: ["file:deps.edn"], tools: ["clojure"], install: "https://clojure.org/guides/install_clojure",
+    stages: {
+      setup: [["clojure", "-P"]],
+      test: [{when: ["grep:deps.edn::exec-fn"], cmd: ["clojure", "-X:test"]}, {when: ["grep:deps.edn::test"], cmd: ["clojure", "-M:test"]}],
+      package: [{when: ["file:build.clj"], cmd: ["clojure", "-T:build", "uber"]}], clean: [{when: ["file:build.clj"], cmd: ["clojure", "-T:build", "clean"]}],
+    },
+  },
+
+  # --- .NET -------------------------------------------------------------------
+  dotnet: {
+    language: "C# / F# / VB", short: "dotnet", family: "dotnet", priority: 20,
+    detect: [["glob:*.sln", "glob:*.slnx", "glob:*.csproj", "glob:*.fsproj", "glob:*.vbproj"]],
+    workspace: ["glob:*.sln", "glob:*.slnx"],
+    tools: ["dotnet"], versions: {dotnet: ["dotnet", "--version"]}, pins: {dotnet: ["global.json:sdk.version"]},
+    install: "https://learn.microsoft.com/en-us/dotnet/core/install/",
+    note: "a folder with several solution or project files needs a stage override naming one",
+    stages: {
+      setup: [
+        {when: ["file:.config/dotnet-tools.json", "file:packages.lock.json"], shell: "dotnet tool restore && dotnet restore --locked-mode"},
+        {when: ["file:.config/dotnet-tools.json"], shell: "dotnet tool restore && dotnet restore"},
+        {when: ["file:packages.lock.json"], cmd: ["dotnet", "restore", "--locked-mode"]},
+        ["dotnet", "restore"],
+      ],
+      format: [["dotnet", "format"]], "format-check": [["dotnet", "format", "--verify-no-changes"]],
+      build: [["dotnet", "build", "--no-restore"]], test: [["dotnet", "test", "--no-restore"]],
+      package: [["dotnet", "publish", "--configuration", "Release"]], clean: [["dotnet", "clean"]],
+    },
+  },
+
+  # --- C and C++ ----------------------------------------------------------------
+  cmake: {
+    language: "C / C++", short: "cmake", family: "c", priority: 20,
+    detect: ["file:CMakeLists.txt"], tools: ["cmake"], versions: {cmake: ["cmake", "--version"]},
+    install: "https://cmake.org/download/",
+    note: "ctest --test-dir needs CMake 3.20; multi-config generators need a --config override",
+    order: {test: ["build"]},
+    stages: {
+      setup: [["cmake", "-S", ".", "-B", "build", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]], build: [["cmake", "--build", "build", "--parallel"]],
+      test: [{when: ['grep:CMakeLists.txt:(enable_testing|add_test|include\(CTest\))'], cmd: ["ctest", "--test-dir", "build", "--output-on-failure"]}],
+      package: [{when: ['grep:CMakeLists.txt:include\(CPack\)'], cmd: ["cpack", "--config", "build/CPackConfig.cmake"]}],
+      clean: [["cmake", "--build", "build", "--target", "clean"]],
+      format: [{when: [["file:.clang-format", "file:_clang-format"], "tool:git"], shell: CLANG_FILES + " | xargs -r clang-format -i"}],
+      "format-check": [{when: [["file:.clang-format", "file:_clang-format"], "tool:git"], shell: CLANG_FILES + " | xargs -r clang-format --dry-run --Werror"}],
+    },
+  },
+  meson: {
+    language: "C / C++", short: "meson", family: "c", priority: 20,
+    detect: ["file:meson.build"], tools: ["meson"], versions: {meson: ["meson", "--version"]},
+    install: "https://mesonbuild.com/Getting-meson.html",
+    order: {test: ["build"]},
+    stages: {
+      setup: [{shell: "if [ -d builddir ]; then meson setup --reconfigure builddir; else meson setup builddir; fi"}],
+      build: [["meson", "compile", "-C", "builddir"]], test: [["meson", "test", "-C", "builddir", "--print-errorlogs"]],
+      clean: [["meson", "compile", "-C", "builddir", "--clean"]],
+    },
+  },
+  bazel: {
+    language: "any (Bazel)", short: "bazel", family: "bazel", priority: 50, claims_subtree: true,
+    detect: [["file:MODULE.bazel", "file:WORKSPACE", "file:WORKSPACE.bazel"]],
+    tools: [], install: "https://bazel.build/install/bazelisk",
+    vars: {bazel: [{when: ["tool:bazelisk"], value: "bazelisk"}, {value: "bazel"}]},
+    stages: {
+      setup: [["{bazel}", "fetch", "//..."]], check: [["{bazel}", "build", "--nobuild", "//..."]],
+      build: [["{bazel}", "build", "//..."]], test: [["{bazel}", "test", "//..."]], clean: [["{bazel}", "clean"]],
+      format: [{when: ["tool:buildifier"], cmd: ["buildifier", "-r", "."]}], "format-check": [{when: ["tool:buildifier"], cmd: ["buildifier", "-mode=check", "-r", "."]}],
+    },
+  },
+  buck2: {
+    language: "any (Buck2)", short: "buck2", family: "bazel", priority: 45, claims_subtree: true,
+    detect: ["file:.buckconfig"], tools: ["buck2"], install: "https://buck2.build/docs/getting_started/install/",
+    stages: {build: [["buck2", "build", "//..."]], test: [["buck2", "test", "//..."]]},
+  },
+  pants: {
+    language: "any (Pants)", short: "pants", family: "pants", priority: 50, claims_subtree: true,
+    detect: ["file:pants.toml"], tools: ["pants"], install: "https://www.pantsbuild.org/stable/docs/getting-started/installing-pants",
+    stages: {
+      format: [["pants", "fmt", "::"]], "format-check": [["pants", "lint", "::"]], lint: [["pants", "lint", "::"]],
+      check: [["pants", "check", "::"]], test: [["pants", "test", "::"]], package: [["pants", "package", "::"]],
+    },
+  },
+
+  # --- Ruby and PHP ---------------------------------------------------------------
+  "ruby-bundler": {
+    language: "Ruby", short: "ruby", family: "ruby", priority: 20,
+    detect: ["file:Gemfile"], tools: ["ruby", "bundle"], versions: {ruby: ["ruby", "--version"]},
+    pins: {ruby: [".ruby-version", ".tool-versions:ruby", "mise.toml:ruby"]},
+    install: "https://www.ruby-lang.org/en/documentation/installation/",
+    note: "Bundler 4 dropped --frozen; setup sets BUNDLE_FROZEN when Gemfile.lock exists",
+    targets: "rake", targets_run: ["bundle", "exec", "rake"],
+    stages: {
+      setup: [{when: ["file:Gemfile.lock"], cmd: ["bundle", "install"], env: {BUNDLE_FROZEN: "true"}}, ["bundle", "install"]],
+      test: [{when: [["file:.rspec", "dir:spec"]], cmd: ["bundle", "exec", "rspec"]}, {when: ["file:bin/rails"], cmd: ["bin/rails", "test"]}, {when: ["file:Rakefile"], cmd: ["bundle", "exec", "rake", "test"]}],
+      lint: [{when: ["file:.standard.yml"], cmd: ["bundle", "exec", "standardrb"]}, {when: ["file:.rubocop.yml"], cmd: ["bundle", "exec", "rubocop"]}],
+      format: [{when: ["file:.standard.yml"], cmd: ["bundle", "exec", "standardrb", "--fix"]}, {when: ["file:.rubocop.yml"], cmd: ["bundle", "exec", "rubocop", "-a"]}],
+      check: [{when: ["dir:sorbet"], cmd: ["bundle", "exec", "srb", "tc"]}, {when: ["file:Steepfile"], cmd: ["bundle", "exec", "steep", "check"]}],
+      package: [{when: ["glob:*.gemspec"], shell: "gem build *.gemspec"}],
+    },
+  },
+  "php-composer": {
+    language: "PHP", short: "php", family: "php", priority: 20,
+    detect: ["file:composer.json"], tools: ["php", "composer"], versions: {php: ["php", "--version"]},
+    pins: {php: [".php-version", ".tool-versions:php", "mise.toml:php"]},
+    install: "https://getcomposer.org/download/",
+    scripts: {file: "composer.json", key: "scripts", run: ["composer", "run-script"]},
+    stages: {
+      setup: [["composer", "install", "--no-interaction", "--no-progress", "--prefer-dist"]],
+      test: [{when: ["file:tests/Pest.php"], cmd: ["vendor/bin/pest"]}, {when: [["file:phpunit.xml", "file:phpunit.xml.dist", "file:phpunit.dist.xml"]], cmd: ["vendor/bin/phpunit"]}],
+      lint: [{when: [["file:phpcs.xml", "file:phpcs.xml.dist", "file:.phpcs.xml"]], cmd: ["vendor/bin/phpcs"]}],
+      check: [{when: [["file:phpstan.neon", "file:phpstan.neon.dist", "file:phpstan.dist.neon"]], cmd: ["vendor/bin/phpstan", "analyse", "--no-progress"]}, {when: [["file:psalm.xml", "file:psalm.xml.dist"]], cmd: ["vendor/bin/psalm", "--no-progress"]}],
+      format: [{when: [["file:pint.json", "grep:composer.json:laravel/pint"]], cmd: ["vendor/bin/pint"]}, {when: [["file:.php-cs-fixer.php", "file:.php-cs-fixer.dist.php"]], cmd: ["vendor/bin/php-cs-fixer", "fix"]}],
+      "format-check": [{when: [["file:pint.json", "grep:composer.json:laravel/pint"]], cmd: ["vendor/bin/pint", "--test"]}, {when: [["file:.php-cs-fixer.php", "file:.php-cs-fixer.dist.php"]], cmd: ["vendor/bin/php-cs-fixer", "fix", "--dry-run", "--diff"]}],
+    },
+  },
+
+  # --- BEAM -----------------------------------------------------------------------
+  "elixir-mix": {
+    language: "Elixir", short: "elixir", family: "elixir", priority: 20,
+    detect: ["file:mix.exs"], workspace: ["grep:mix.exs:apps_path"],
+    tools: ["mix"], versions: {elixir: ["elixir", "--version"]},
+    pins: {elixir: [".tool-versions:elixir", "mise.toml:elixir"]},
+    install: "https://elixir-lang.org/install.html",
+    stages: {
+      setup: [{shell: "mix local.hex --force --if-missing && mix local.rebar --force --if-missing && mix deps.get"}],
+      format: [["mix", "format"]], "format-check": [["mix", "format", "--check-formatted"]],
+      lint: [{when: ["grep:mix.exs::credo"], cmd: ["mix", "credo", "--strict"]}],
+      check: [["mix", "compile", "--warnings-as-errors"]], build: [["mix", "compile"]], test: [["mix", "test"]],
+      package: [{when: ["grep:mix.exs:releases"], cmd: ["mix", "release"], env: {MIX_ENV: "prod"}}], clean: [["mix", "clean"]],
+    },
+    extras: {dialyzer: [{when: ["grep:mix.exs::dialyxir"], cmd: ["mix", "dialyzer"]}]},
+  },
+  "erlang-rebar3": {
+    language: "Erlang", short: "erlang", family: "erlang", priority: 20,
+    detect: ["file:rebar.config"], tools: ["rebar3"], versions: {rebar3: ["rebar3", "version"]},
+    install: "https://rebar3.org/docs/getting-started/",
+    stages: {
+      setup: [["rebar3", "get-deps"]],
+      format: [{when: ["grep:rebar.config:erlfmt"], cmd: ["rebar3", "fmt", "--write"]}], "format-check": [{when: ["grep:rebar.config:erlfmt"], cmd: ["rebar3", "fmt", "--check"]}],
+      lint: [["rebar3", "xref"]], check: [["rebar3", "dialyzer"]], build: [["rebar3", "compile"]], test: [["rebar3", "eunit"]],
+      package: [{when: ["grep:rebar.config:relx"], cmd: ["rebar3", "as", "prod", "tar"]}], clean: [["rebar3", "clean", "--all"]],
+    },
+    extras: {ct: [{when: ["glob:*_SUITE.erl"], cmd: ["rebar3", "ct"]}]},
+  },
+  gleam: {
+    language: "Gleam", short: "gleam", family: "gleam", priority: 20,
+    detect: ["file:gleam.toml"], tools: ["gleam"], versions: {gleam: ["gleam", "--version"]},
+    install: "https://gleam.run/getting-started/installing/",
+    stages: {
+      setup: [["gleam", "deps", "download"]], format: [["gleam", "format"]], "format-check": [["gleam", "format", "--check"]],
+      check: [["gleam", "check"]], build: [["gleam", "build"]], test: [["gleam", "test"]],
+      package: [["gleam", "export", "erlang-shipment"]], run: [["gleam", "run"]], clean: [["gleam", "clean"]],
+    },
+  },
+
+  # --- Apple, Dart, Zig -------------------------------------------------------------
+  "swift-spm": {
+    language: "Swift", short: "swift", family: "swift", priority: 20,
+    detect: ["file:Package.swift"], tools: ["swift"], versions: {swift: ["swift", "--version"]},
+    pins: {swift: [".swift-version"]}, install: "https://www.swift.org/install/",
+    note: "swift format ships with Swift 6; lint only fails with --strict",
+    stages: {
+      setup: [["swift", "package", "resolve"]],
+      format: [{shell: "swift format --in-place --recursive $(ls -d Sources Tests Package.swift 2>/dev/null)"}],
+      "format-check": [{shell: "swift format lint --strict --recursive $(ls -d Sources Tests Package.swift 2>/dev/null)"}],
+      lint: [{when: ["file:.swiftlint.yml"], cmd: ["swiftlint", "lint", "--strict"]}],
+      check: [["swift", "build", "--build-tests"]], build: [["swift", "build"]], test: [["swift", "test"]],
+      package: [["swift", "build", "-c", "release"]], run: [["swift", "run"]], clean: [["swift", "package", "clean"]],
+    },
+  },
+  xcode: {
+    language: "Swift / Objective-C (Xcode)", short: "xcode", family: "swift", priority: 10,
+    detect: [["glob:*.xcworkspace", "glob:*.xcodeproj"]], tools: ["xcodebuild"],
+    install: "https://developer.apple.com/xcode/",
+    note: "xcodebuild needs a scheme for workspaces and tests: override the stages with -scheme <name> (xcodebuild -list shows them)",
+    stages: {build: [["xcodebuild", "build"]], clean: [["xcodebuild", "clean"]]},
+    extras: {schemes: [["xcodebuild", "-list", "-json"]]},
+  },
+  dart: {
+    language: "Dart", short: "dart", family: "dart", priority: 20,
+    detect: ["file:pubspec.yaml", 'not:grep:pubspec.yaml:(?m)^\s+sdk:\s*flutter'],
+    tools: ["dart"], versions: {dart: ["dart", "--version"]}, install: "https://dart.dev/get-dart",
+    stages: {
+      setup: [{when: ["file:pubspec.lock"], cmd: ["dart", "pub", "get", "--enforce-lockfile"]}, ["dart", "pub", "get"]],
+      format: [["dart", "format", "."]], "format-check": [["dart", "format", "--output=none", "--set-exit-if-changed", "."]],
+      lint: [["dart", "analyze", "--fatal-infos"]], test: [{when: ["dir:test"], cmd: ["dart", "test"]}],
+    },
+  },
+  flutter: {
+    language: "Dart (Flutter)", short: "flutter", family: "dart", priority: 30,
+    detect: ["file:pubspec.yaml", 'grep:pubspec.yaml:(?m)^\s+sdk:\s*flutter'],
+    tools: ["flutter"], versions: {flutter: ["flutter", "--version"]}, pins: {flutter: [".fvmrc"]},
+    install: "https://docs.flutter.dev/get-started/install",
+    note: "builds are per platform (apk, appbundle, ios, web...): add a build stage override for yours",
+    stages: {
+      setup: [{when: ["file:pubspec.lock"], cmd: ["flutter", "pub", "get", "--enforce-lockfile"]}, ["flutter", "pub", "get"]],
+      format: [["dart", "format", "."]], "format-check": [["dart", "format", "--output=none", "--set-exit-if-changed", "."]],
+      lint: [["flutter", "analyze"]], test: [["flutter", "test"]], clean: [["flutter", "clean"]],
+    },
+  },
+  zig: {
+    language: "Zig", short: "zig", family: "zig", priority: 20,
+    detect: ["file:build.zig"], tools: ["zig"], versions: {zig: ["zig", "version"]},
+    pins: {zig: ["build.zig.zon:minimum_zig_version", ".zigversion", ".tool-versions:zig"]},
+    install: "https://ziglang.org/download/",
+    note: "test and run are steps build.zig defines, so they appear only when it does; minimum_zig_version is advisory, doctor checks it",
+    stages: {
+      setup: [{when: ["file:build.zig.zon"], cmd: ["zig", "build", "--fetch"]}],
+      format: [["zig", "fmt", "."]], "format-check": [["zig", "fmt", "--check", "."]],
+      build: [["zig", "build"]],
+      test: [{when: ['grep:build.zig:step\(\s*"test"'], cmd: ["zig", "build", "test"]}],
+      run: [{when: ['grep:build.zig:step\(\s*"run"'], cmd: ["zig", "build", "run"]}],
+      clean: [{shell: "rm -rf zig-out .zig-cache zig-cache"}],
+    },
+  },
+
+  # --- Functional and scientific ----------------------------------------------------
+  "haskell-stack": {
+    language: "Haskell", short: "haskell", family: "haskell", priority: 30,
+    detect: ["file:stack.yaml"], tools: ["stack"], versions: {stack: ["stack", "--version"]},
+    install: "https://docs.haskellstack.org/en/stable/install_and_upgrade/",
+    stages: {
+      setup: [["stack", "--no-terminal", "build", "--only-dependencies", "--test", "--no-run-tests"]],
+      build: [["stack", "--no-terminal", "build"]], test: [["stack", "--no-terminal", "test"]],
+      package: [["stack", "--no-terminal", "sdist"]], clean: [["stack", "--no-terminal", "clean"]],
+    },
+  },
+  "haskell-cabal": {
+    language: "Haskell", short: "haskell", family: "haskell", priority: 20,
+    detect: [["glob:*.cabal", "file:cabal.project"]], tools: ["cabal"], versions: {ghc: ["ghc", "--version"]},
+    install: "https://www.haskell.org/ghcup/",
+    stages: {
+      setup: [{shell: "cabal update && cabal build all --only-dependencies --enable-tests"}],
+      build: [["cabal", "build", "all"]], test: [["cabal", "test", "all"]],
+      package: [["cabal", "sdist", "all"]], clean: [["cabal", "clean"]],
+    },
+  },
+  "ocaml-dune": {
+    language: "OCaml", short: "ocaml", family: "ocaml", priority: 20,
+    detect: ["file:dune-project"], tools: ["dune"], versions: {dune: ["dune", "--version"]}, install: "https://ocaml.org/install",
+    note: "OCaml files are formatted only when .ocamlformat exists",
+    stages: {
+      setup: [{when: ["tool:opam"], cmd: ["opam", "install", ".", "--deps-only", "--with-test", "-y"]}],
+      format: [["dune", "fmt"]], "format-check": [["dune", "build", "@fmt"]], check: [["dune", "build", "@check"]],
+      build: [["dune", "build"]], test: [["dune", "runtest"]], clean: [["dune", "clean"]],
+    },
+  },
+  julia: {
+    language: "Julia", short: "julia", family: "julia", priority: 20,
+    detect: [["file:Project.toml", "file:JuliaProject.toml"]], tools: ["julia"], versions: {julia: ["julia", "--version"]},
+    install: "https://julialang.org/install/",
+    stages: {
+      setup: [["julia", "--project=.", "-e", "using Pkg; Pkg.instantiate()"]],
+      build: [["julia", "--project=.", "-e", "using Pkg; Pkg.precompile()"]],
+      test: [{when: ['grep:Project.toml:(?m)^uuid'], cmd: ["julia", "--project=.", "-e", "using Pkg; Pkg.test()"]}],
+    },
+  },
+  r: {
+    language: "R", short: "r", family: "r", priority: 20,
+    detect: [["file:DESCRIPTION", "file:renv.lock"]], tools: ["Rscript"], versions: {r: ["R", "--version"]},
+    install: "https://cloud.r-project.org/",
+    stages: {
+      setup: [{when: ["file:renv.lock"], cmd: ["Rscript", "-e", "renv::restore(prompt = FALSE)"]}],
+      format: [{when: ["file:air.toml"], cmd: ["air", "format", "."]}], "format-check": [{when: ["file:air.toml"], cmd: ["air", "format", ".", "--check"]}],
+      lint: [{when: ["file:.lintr"], cmd: ["Rscript", "-e", "lintr::lint_package()"]}],
+      test: [{when: ["dir:tests/testthat"], cmd: ["Rscript", "-e", "testthat::test_local()"]}],
+      package: [{when: ["file:DESCRIPTION"], cmd: ["R", "CMD", "build", "."]}],
+    },
+  },
+  "fortran-fpm": {
+    language: "Fortran", short: "fortran", family: "fortran", priority: 20,
+    detect: ["file:fpm.toml"], tools: ["fpm"], install: "https://fpm.fortran-lang.org/install/index.html",
+    note: "plain fpm clean asks before deleting, so clean passes --skip",
+    stages: {build: [["fpm", "build"]], test: [["fpm", "test"]], run: [["fpm", "run"]], clean: [["fpm", "clean", "--skip"]]},
+  },
+
+  # --- More languages -----------------------------------------------------------------
+  "lua-luarocks": {
+    language: "Lua", short: "lua", family: "lua", priority: 20,
+    detect: ["glob:*.rockspec"], tools: ["luarocks"], versions: {luarocks: ["luarocks", "--version"]},
+    install: "https://github.com/luarocks/luarocks/wiki/Download",
+    stages: {
+      setup: [{shell: "luarocks install --only-deps --tree=lua_modules *.rockspec"}],
+      format: [{when: [["file:stylua.toml", "file:.stylua.toml"]], cmd: ["stylua", "."]}],
+      "format-check": [{when: [["file:stylua.toml", "file:.stylua.toml"]], cmd: ["stylua", "--check", "."]}],
+      lint: [{when: ["file:.luacheckrc"], cmd: ["luacheck", "."]}],
+      build: [["luarocks", "make"]], test: [{when: ["file:.busted"], cmd: ["busted"]}],
+      package: [{shell: "luarocks pack *.rockspec"}],
+    },
+  },
+  perl: {
+    language: "Perl", short: "perl", family: "perl", priority: 20,
+    detect: [["file:cpanfile", "file:Makefile.PL", "file:Build.PL"]], tools: ["perl"], versions: {perl: ["perl", "-v"]},
+    pins: {perl: [".perl-version"]}, install: "https://www.perl.org/get.html",
+    stages: {
+      setup: [{when: ["file:cpanfile"], cmd: ["cpanm", "--installdeps", "--notest", "."]}],
+      lint: [{when: ["file:.perlcriticrc"], cmd: ["perlcritic", "lib"]}],
+      build: [{when: ["file:Makefile.PL"], shell: "perl Makefile.PL && make"}],
+      test: [{when: ["dir:t"], cmd: ["prove", "-lr", "t"]}],
+      package: [{when: ["file:Makefile.PL"], cmd: ["make", "dist"]}],
+    },
+  },
+  nim: {
+    language: "Nim", short: "nim", family: "nim", priority: 20,
+    detect: ["glob:*.nimble"], tools: ["nimble"], versions: {nim: ["nim", "-v"]}, install: "https://nim-lang.org/install.html",
+    stages: {setup: [["nimble", "install", "--depsOnly", "-y"]], build: [["nimble", "build", "-y"]], test: [["nimble", "test"]], run: [["nimble", "run"]]},
+  },
+  crystal: {
+    language: "Crystal", short: "crystal", family: "crystal", priority: 20,
+    detect: ["file:shard.yml"], tools: ["shards", "crystal"], versions: {crystal: ["crystal", "--version"]},
+    install: "https://crystal-lang.org/install/",
+    stages: {
+      setup: [{when: ["file:shard.lock"], cmd: ["shards", "install", "--frozen"]}, ["shards", "install"]],
+      format: [["crystal", "tool", "format"]], "format-check": [["crystal", "tool", "format", "--check"]],
+      lint: [{when: ["grep:shard.yml:ameba"], cmd: ["bin/ameba"]}],
+      build: [["shards", "build"]], test: [["crystal", "spec"]], package: [["shards", "build", "--release"]],
+    },
+  },
+  foundry: {
+    language: "Solidity (Foundry)", short: "solidity", family: "solidity", priority: 20,
+    detect: ["file:foundry.toml"], tools: ["forge"], versions: {forge: ["forge", "--version"]},
+    install: "https://getfoundry.sh/introduction/installation",
+    stages: {
+      setup: [["forge", "install"]], format: [["forge", "fmt"]], "format-check": [["forge", "fmt", "--check"]],
+      lint: [["forge", "lint"]], build: [["forge", "build"]], test: [["forge", "test"]], clean: [["forge", "clean"]],
+    },
+  },
+  powershell: {
+    language: "PowerShell", short: "powershell", family: "powershell", priority: 5, auto: false,
+    detect: [], tools: ["pwsh"], versions: {pwsh: ["pwsh", "--version"]},
+    install: "https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell",
+    note: "never detected on its own: add a component with toolchain powershell",
+    stages: {
+      lint: [["pwsh", "-NoProfile", "-NonInteractive", "-Command", "Invoke-ScriptAnalyzer -Path . -Recurse -EnableExit"]],
+      test: [["pwsh", "-NoProfile", "-NonInteractive", "-Command", "Invoke-Pester -CI"]],
+    },
+  },
+  cigscript: {
+    language: "CigScript", short: "cig", family: "cigscript", priority: 15,
+    detect: ["glob:*.cig"], workspace: ["glob:*.cig"], tools: ["cig"], versions: {cig: ["cig", "--version"]},
+    install: "https://github.com/otmof-ops/CigScript",
+    note: "cig check reads one file at a time, so these stages check every .cig file under the component in turn, test data (fixtures, corpus, testdata) left out",
+    stages: {
+      check: [{shell: "find . -name '*.cig' -not -path '*/.cig-orchestrator/*' -not -path '*/.test-work/*' -not -path '*/node_modules/*' -not -path '*/fixtures/*' -not -path '*/corpus/*' -not -path '*/testdata/*' -print0 | xargs -0 -r -n1 cig check"}],
+      lint: [{shell: "find . -name '*.cig' -not -path '*/.cig-orchestrator/*' -not -path '*/.test-work/*' -not -path '*/node_modules/*' -not -path '*/fixtures/*' -not -path '*/corpus/*' -not -path '*/testdata/*' -print0 | xargs -0 -r -n1 cig check --deny-warnings"}],
+    },
+  },
+  shell: {
+    language: "Shell", short: "shell", family: "shell", priority: 5, auto: false,
+    detect: [], tools: ["shellcheck"], install: "https://github.com/koalaman/shellcheck#installing",
+    note: "never detected on its own: add a component with toolchain shell",
+    stages: {
+      # Tracked .sh and .bash files, and extensionless scripts whose shebang
+      # names a shell (bin/deploy); symlinks are the files they point at.
+      lint: [{when: ["tool:git"], shell: "git ls-files | while IFS= read -r f; do [ -L \"$f\" ] && continue; case \"\${f##*/}\" in *.sh|*.bash) printf '%s\\0' \"$f\" ;; *.*) ;; *) head -n1 -- \"$f\" 2>/dev/null | grep -qE '^#!.*[/ ](ba|da|k)?sh( |$)' && printf '%s\\0' \"$f\" ;; esac; done | xargs -0 -r shellcheck"}],
+      format: [["shfmt", "-w", "."]], "format-check": [["shfmt", "-d", "."]],
+    },
+  },
+
+  # --- Infrastructure -------------------------------------------------------------------
+  terraform: {
+    language: "Terraform / OpenTofu", short: "terraform", family: "terraform", priority: 12,
+    detect: [["glob:*.tf", "glob:*.tofu", "glob:*.tf.json"]], tools: [],
+    versions: {terraform: ["{tf}", "version"]}, pins: {terraform: [".terraform-version", ".tool-versions:terraform", "mise.toml:terraform"]},
+    install: "https://developer.hashicorp.com/terraform/install",
+    note: "setup initializes without the backend so no credentials are needed; plan is a task of its own and apply is never run",
+    vars: {tf: [{when: ["tool:terraform"], value: "terraform"}, {when: ["tool:tofu"], value: "tofu"}, {value: "terraform"}]},
+    stages: {
+      setup: [{when: ["file:.terraform.lock.hcl"], cmd: ["{tf}", "init", "-input=false", "-backend=false", "-lockfile=readonly"]}, ["{tf}", "init", "-input=false", "-backend=false"]],
+      format: [["{tf}", "fmt", "-recursive"]], "format-check": [["{tf}", "fmt", "-check", "-recursive", "-diff"]],
+      check: [["{tf}", "validate"]], lint: [{when: ["file:.tflint.hcl"], cmd: ["tflint", "--recursive"]}],
+      test: [{when: ["glob:*.tftest.hcl"], cmd: ["{tf}", "test"]}],
+    },
+    extras: {plan: [{shell: "{tf} init -input=false && {tf} plan -input=false"}]},
+  },
+  docker: {
+    language: "Container image", short: "docker", family: "container", priority: 8,
+    detect: [["file:Dockerfile", "file:Containerfile"]], tools: ["docker"], versions: {docker: ["docker", "--version"]},
+    install: "https://docs.docker.com/engine/install/",
+    note: "lint uses docker build --check (Buildx 0.15 and later)",
+    stages: {lint: [["docker", "build", "--check", "."]], package: [["docker", "build", "-t", "{component}:dev", "."]]},
+  },
+  compose: {
+    language: "Docker Compose", short: "compose", family: "compose", priority: 8,
+    detect: [["file:compose.yaml", "file:compose.yml", "file:docker-compose.yml", "file:docker-compose.yaml"]],
+    tools: ["docker"], install: "https://docs.docker.com/compose/install/",
+    stages: {check: [["docker", "compose", "config", "--quiet"]], build: [["docker", "compose", "build"]]},
+  },
+  helm: {
+    language: "Helm chart", short: "helm", family: "helm", priority: 8,
+    detect: ["file:Chart.yaml"], tools: ["helm"], versions: {helm: ["helm", "version", "--short"]},
+    install: "https://helm.sh/docs/intro/install/",
+    stages: {
+      setup: [{when: [["file:Chart.lock", "grep:Chart.yaml:dependencies"]], cmd: ["helm", "dependency", "build", "."]}],
+      lint: [["helm", "lint", ".", "--strict"]], check: [["helm", "template", "."]],
+      package: [["helm", "package", ".", "--destination", "dist"]],
+    },
+  },
+
+  # --- Task runners and script folders --------------------------------------------------
+  make: {
+    language: "Makefile", short: "make", kind: "runner", priority: 5,
+    detect: [["file:GNUmakefile", "file:makefile", "file:Makefile"]], tools: ["make"],
+    install: "https://www.gnu.org/software/make/", targets: "make", targets_run: ["make"],
+  },
+  just: {
+    language: "justfile", short: "just", kind: "runner", priority: 5,
+    detect: [["file:justfile", "file:Justfile", "file:.justfile"]], tools: ["just"],
+    install: "https://just.systems/man/en/packages.html", targets: "just", targets_run: ["just"],
+  },
+  task: {
+    language: "Taskfile (go-task)", short: "task", kind: "runner", priority: 5,
+    detect: [["file:Taskfile.yml", "file:Taskfile.yaml", "file:taskfile.yml", "file:taskfile.yaml", "file:Taskfile.dist.yml", "file:taskfile.dist.yml"]],
+    tools: ["task"], install: "https://taskfile.dev/installation/", targets: "taskfile", targets_run: ["task"],
+  },
+  rake: {
+    language: "Rakefile", short: "rake", kind: "runner", priority: 4,
+    detect: [["file:Rakefile", "file:rakefile", "file:Rakefile.rb", "file:rakefile.rb"], "not:file:Gemfile"], tools: ["rake"],
+    install: "https://ruby.github.io/rake/", targets: "rake", targets_run: ["rake"],
+  },
+  earthly: {
+    language: "Earthfile", short: "earthly", kind: "runner", priority: 5,
+    detect: ["file:Earthfile"], tools: ["earthly"],
+    install: "https://www.earthbuild.dev/", targets: "earthly", targets_run: ["earthly", "+{target}"],
+    note: "Earthly upstream takes critical fixes only since 2025; EarthBuild is the community fork",
+  },
+  scripts: {
+    language: "Script folder", short: "scripts", family: "scripts", kind: "runner", priority: 5,
+    detect: [["dir:script", "dir:scripts", "dir:bin", "dir:tools", "glob:*.sh", "glob:*.bash"]], tools: [],
+    targets: "scripts",
+  },
+}
+
+# ----- the command line -------------------------------------------------------
 
 stick command = args.get(0, "help")
 roll words = []
@@ -66,7 +849,7 @@ for a in args.slice(1) {
 stick flags = words.filter(pack(w) => w.starts_with("--"))
 stick targets = words.filter(pack(w) => not w.starts_with("--"))
 
-# ----- small helpers --------------------------------------------------------
+# ----- small helpers ----------------------------------------------------------
 
 pull fail(message) {
   log.error(message)
@@ -80,9 +863,19 @@ pull pick(condition, yes, no) {
   snuff no
 }
 
+pull flag_value(name, fallback) {
+  for f in flags {
+    if f.starts_with(name + "=") {
+      snuff f.slice(name.len() + 1)
+    }
+  }
+  snuff fallback
+}
+
 pull expect_flags(allowed) {
   for f in flags {
-    if not allowed.contains(f) {
+    stick bare = pick(f.contains("="), f.slice(0, f.find("=")), f)
+    if not allowed.contains(bare) {
       if allowed.is_empty() {
         fail("`${command}` takes no flags; got `${f}`")
       }
@@ -105,7 +898,7 @@ pull duration(ms) {
 }
 
 pull tidy(textv) {
-  roll t = textv.trim()
+  roll t = str(textv).trim()
   if t.len() > 100 {
     t = t.slice(0, 97) + "..."
   }
@@ -114,62 +907,40 @@ pull tidy(textv) {
 
 # A word as a shell would need it to read it back as one word.
 pull quote(word) {
-  if word != "" and text.matches(word, '^[A-Za-z0-9_./=:,+@%-]+$') {
+  if word != "" and text.matches(word, '^[A-Za-z0-9_./=:,+@%{}-]+$') {
+    snuff word
+  }
+  snuff "'" + word.replace("'", "'\\''") + "'"
+}
+
+# A word any POSIX shell reads back as exactly this text: `|sh` in a template.
+# Stricter than `quote`, which is for showing commands: no braces, no commas.
+pull sh_quote(word) {
+  if word != "" and text.matches(word, '^[A-Za-z0-9_./=:+@%-]+$') {
     snuff word
   }
   snuff "'" + word.replace("'", "'\\''") + "'"
 }
 
 pull slug(name) {
-  roll s = text.replace(name.lower(), '[^a-z0-9]+', "-")
+  roll s = text.replace(str(name).lower(), '[^a-z0-9]+', "-")
   while s.starts_with("-") {
     s = s.slice(1)
   }
   while s.ends_with("-") {
     s = s.slice(0, s.len() - 1)
   }
-  snuff pick(s == "", "task", s)
+  snuff pick(s == "", "x", s)
 }
 
-# ----- the manifest ---------------------------------------------------------
-
-pull load() {
-  if not fs.is_file(MANIFEST) {
-    fail("no ${MANIFEST} in ${fs.cwd()}; `cigo adopt` proposes one from the scripts this project already has")
-  }
-  roll m = null
-  try {
-    m = json.load(MANIFEST)
-  } ashtray e {
-    fail("${MANIFEST} is not valid JSON: ${e.message}")
-  }
-  if type_of(m) != "map" or type_of(m.get("tasks", null)) != "map" {
-    fail("${MANIFEST} needs a `tasks` map, like {\"tasks\": {\"build\": {\"cmd\": [\"bash\", \"scripts/build.sh\"]}}}")
-  }
-  snuff m
-}
-
-pull project_of(m) {
-  snuff str(m.get("project", path.base(fs.cwd())))
-}
-
-pull needs_of(t) {
-  stick n = t.get("needs", [])
-  if type_of(n) == "string" {
-    snuff [n]
-  }
-  if type_of(n) != "list" {
+pull as_list(v) {
+  if v == null {
     snuff []
   }
-  snuff n.map(pack(x) => str(x))
-}
-
-pull ok_codes(t) {
-  stick ok = t.get("ok", [0])
-  if type_of(ok) == "int" {
-    snuff [ok]
+  if type_of(v) == "list" {
+    snuff v
   }
-  snuff ok
+  snuff [v]
 }
 
 # `cmd` as a list is the argv; as a string it is split on whitespace. Neither
@@ -184,487 +955,279 @@ pull argv_of(value) {
   snuff null
 }
 
-pull label_of(t) {
-  if t.has("shell") {
-    snuff str(t.shell)
-  }
-  stick argv = argv_of(t.get("cmd", null))
-  if argv == null or argv.is_empty() {
-    snuff "(nothing to run)"
-  }
-  snuff argv.map(quote).join(" ")
-}
-
-# What a task runs, with the extra arguments from the command line appended.
-pull command_of(name, t, more) {
-  if t.has("shell") {
-    roll line = str(t.shell)
-    for w in more {
-      line = line + " " + quote(w)
+pull dig(value, keys) {
+  roll v = value
+  for k in keys {
+    if type_of(v) == "map" and v.has(k) {
+      v = v[k]
+    } else if type_of(v) == "list" and text.matches(k, '^[0-9]+$') and int(k) < v.len() {
+      v = v[int(k)]
+    } else {
+      snuff null
     }
-    snuff {shell: line, label: line}
   }
-  stick argv = argv_of(t.get("cmd", null))
-  if argv == null or argv.is_empty() {
-    fail("task `${name}` has nothing to run: give it `cmd` (a list like [\"bash\", \"scripts/build.sh\"]) or `shell` (a string); `cigo check` looks over the whole file")
-  }
-  stick full = argv + more
-  snuff {argv: full, label: full.map(quote).join(" ")}
+  snuff v
 }
 
-pull undo_of(t) {
-  if t.has("undo_shell") {
-    snuff {shell: str(t.undo_shell), label: str(t.undo_shell)}
+pull to_text(v) {
+  if v == null {
+    snuff ""
   }
-  if t.has("undo") {
-    stick argv = argv_of(t.undo)
-    if argv != null and not argv.is_empty() {
-      snuff {argv: argv, label: argv.map(quote).join(" ")}
+  if type_of(v) == "string" {
+    snuff v
+  }
+  if type_of(v) == "list" or type_of(v) == "map" {
+    snuff json.stringify(v)
+  }
+  snuff str(v)
+}
+
+# The edits that turn one name into the other, a swap of two neighboring
+# letters counting as one ("biuld" is one edit from "build"): the optimal
+# string alignment distance.
+pull distance(a, b) {
+  stick xs = a.chars()
+  stick ys = b.chars()
+  roll before = []
+  roll prev = range(ys.len() + 1)
+  for i in range(xs.len()) {
+    roll row = [i + 1]
+    for j in range(ys.len()) {
+      roll d = math.min(prev[j + 1] + 1, row[j] + 1, prev[j] + pick(xs[i] == ys[j], 0, 1))
+      if i > 0 and j > 0 and xs[i] == ys[j - 1] and xs[i - 1] == ys[j] {
+        d = math.min(d, before[j - 1] + 1)
+      }
+      row.push(d)
+    }
+    before = prev
+    prev = row
+  }
+  snuff prev.last()
+}
+
+# The names `wanted` was probably meant to be, closest first: a name, one of
+# its parts (`rust` in rust-cargo, `build` in api:build) or an alias within a
+# third of its length in edits, or a name that contains it.
+pull similar(names, wanted, aliases) {
+  stick w = wanted.lower()
+  stick allowed = math.max(1, math.floor(w.len() / 3))
+  roll scored = []
+  for name in names {
+    stick lower = name.lower()
+    stick forms = [lower] + text.split(lower, "[-:_./]") + as_list(aliases.get(name, [])).map(pack(a) => str(a).lower())
+    roll best = forms.filter(pack(f) => not f.is_empty()).map(pack(f) => distance(w, f)).min()
+    if w.len() >= 3 and lower.contains(w) {
+      best = 0
+    }
+    if best <= allowed {
+      scored.push([best, name])
+    }
+  }
+  snuff scored.sort_by(pack(pair) => pair[0]).map(pack(pair) => pair[1]).slice(0, 4)
+}
+
+# ----- looking at a directory ---------------------------------------------------
+
+stick PROBE = {}
+
+pull cached(key, compute) {
+  if PROBE.has(key) {
+    snuff PROBE[key]
+  }
+  stick v = compute()
+  PROBE[key] = v
+  snuff v
+}
+
+pull entries_of(dir) {
+  snuff cached("ls:" + dir, pack() {
+    if not fs.is_dir(dir) {
+      snuff []
+    }
+    snuff fs.list(dir).map(pack(p) => path.base(p))
+  })
+}
+
+# `*` wildcards in a file name; nothing else is special.
+pull wild(pattern, name) {
+  if not pattern.contains("*") {
+    snuff pattern == name
+  }
+  stick parts = pattern.split("*")
+  if not name.starts_with(parts.first()) or not name.ends_with(parts.last()) {
+    snuff false
+  }
+  roll at = parts.first().len()
+  stick stop = name.len() - parts.last().len()
+  if stop < at {
+    snuff false
+  }
+  for part in parts.slice(1, parts.len() - 1) {
+    stick i = name.slice(at, stop).find(part)
+    if i < 0 {
+      snuff false
+    }
+    at = at + i + part.len()
+  }
+  snuff true
+}
+
+pull text_of(dir, file) {
+  snuff cached("txt:" + dir + "/" + file, pack() {
+    stick p = path.join(dir, file)
+    if not fs.is_file(p) or fs.size(p) > 2000000 {
+      snuff null
+    }
+    roll t = null
+    try {
+      t = fs.read_text(p)
+    } ashtray e {
+      t = null
+    }
+    snuff t
+  })
+}
+
+pull json_of(dir, file) {
+  snuff cached("json:" + dir + "/" + file, pack() {
+    stick t = text_of(dir, file)
+    if t == null {
+      snuff null
+    }
+    roll v = null
+    try {
+      v = json.parse(t)
+    } ashtray e {
+      v = null
+    }
+    snuff v
+  })
+}
+
+pull which(program) {
+  snuff cached("which:" + program, pack() => proc.which(program))
+}
+
+# One condition, in `dir`. A list is "any of these".
+pull holds(dir, cond) {
+  if type_of(cond) == "list" {
+    snuff cond.any(pack(c) => holds(dir, c))
+  }
+  stick c = str(cond)
+  if c.starts_with("not:") {
+    snuff not holds(dir, c.slice(4))
+  }
+  stick at = c.find(":")
+  if at < 0 {
+    snuff false
+  }
+  stick kind = c.slice(0, at)
+  stick arg = c.slice(at + 1)
+  if kind == "file" {
+    snuff fs.exists(path.join(dir, arg))
+  }
+  if kind == "dir" {
+    snuff fs.is_dir(path.join(dir, arg))
+  }
+  if kind == "glob" {
+    snuff entries_of(dir).any(pack(n) => wild(arg, n))
+  }
+  if kind == "tool" {
+    snuff which(arg) != null
+  }
+  if kind == "grep" or kind == "json" {
+    stick sep = arg.find(":")
+    if sep < 0 {
+      snuff false
+    }
+    stick file = arg.slice(0, sep)
+    stick rest = arg.slice(sep + 1)
+    if kind == "json" {
+      snuff dig(json_of(dir, file), rest.split(".")) != null
+    }
+    stick files = pick(file.contains("/"), [file], entries_of(dir).filter(pack(n) => wild(file, n)))
+    for name in files {
+      stick t = text_of(dir, name)
+      if t != null and not text.find_all(t, rest).is_empty() {
+        snuff true
+      }
+    }
+    snuff false
+  }
+  snuff false
+}
+
+pull holds_all(dir, conds) {
+  snuff as_list(conds).all(pack(c) => holds(dir, c))
+}
+
+# The first alternative that applies in `dir`.
+pull choose(dir, alternatives) {
+  for alt in as_list(alternatives) {
+    if type_of(alt) == "list" {
+      snuff {cmd: alt}
+    }
+    if type_of(alt) == "map" and holds_all(dir, alt.get("when", [])) {
+      snuff alt
     }
   }
   snuff null
 }
 
-pull known(tasks, wanted) {
-  stick names = tasks.keys()
-  stick close = names.filter(pack(n) => n.len() > 2 and wanted.len() > 2 and (n.contains(wanted) or wanted.contains(n) or wanted.starts_with(n.slice(0, 3))))
-  if not close.is_empty() {
-    snuff "did you mean ${close.slice(0, 3).join(" or ")}?"
+pull vars_for(dir, tc, component) {
+  roll v = {component: component, dir: dir}
+  stick defs = tc.get("vars", {})
+  for name in defs {
+    stick alt = choose(dir, defs[name])
+    if alt != null {
+      v[name] = alt.get("value", "")
+    }
   }
-  if names.is_empty() {
-    snuff "there are no tasks yet"
-  }
-  snuff "tasks here: ${names.slice(0, 8).join(", ")}" + pick(names.len() > 8, ", ...", "")
+  snuff v
 }
 
-# The tasks to run for `wanted`, dependencies first, each once.
-pull resolve(tasks, wanted, only) {
-  for name in wanted {
-    if not tasks.has(name) {
-      cough "no task named `${name}`; ${known(tasks, name)}"
+pull fill_text(s, vars) {
+  roll t = str(s)
+  for k in vars {
+    if type_of(vars[k]) != "list" {
+      t = t.replace("{" + k + "}", str(vars[k]))
     }
   }
-  if only {
-    snuff wanted.unique()
-  }
-  roll order = []
-  roll done = {}
-  pull visit(name, trail) {
-    if done.has(name) {
-      snuff
-    }
-    if trail.contains(name) {
-      cough "dependency loop: ${(trail + [name]).join(" > ")}"
-    }
-    if not tasks.has(name) {
-      cough "`${trail.last()}` needs `${name}`, and there is no task by that name"
-    }
-    stick t = tasks[name]
-    if type_of(t) == "map" {
-      for dep in needs_of(t) {
-        visit(dep, trail + [name])
-      }
-    }
-    done[name] = true
-    order.push(name)
-  }
-  for name in wanted {
-    visit(name, [])
-  }
-  snuff order
+  snuff t
 }
 
-pull resolve_or_fail(tasks, wanted, only) {
-  roll order = null
-  try {
-    order = resolve(tasks, wanted, only)
-  } ashtray e {
-    fail(e.message)
-  }
-  snuff order
-}
-
-# ----- running one task -----------------------------------------------------
-
-pull hop_options(name, t, defaults) {
-  roll env = {CIG_TASK: name}
-  stick given = t.get("env", {})
-  if type_of(given) == "map" {
-    for k in given {
-      env[k] = str(given[k])
-    }
-  }
-  roll o = {
-    timeout_ms: int(t.get("timeout_ms", defaults.get("timeout_ms", 600000))),
-    env: env,
-  }
-  if t.has("cwd") {
-    o.cwd = str(t.cwd)
-  }
-  snuff o
-}
-
-# One attempt: the hop, its log, its output shown, its verdict. A command that
-# cannot start, or runs out of time, is a failed attempt like any other, so
-# retries apply to it too.
-pull attempt(name, t, cmd, opts, n) {
-  stick started = time.now_ms()
-  roll r = null
-  burn {
-    try {
-      if cmd.has("shell") {
-        r = proc.shell(cmd.shell, opts)
-      } else {
-        r = proc.run(cmd.argv.first(), cmd.argv.slice(1), opts)
-      }
-    } ashtray e {
-      r = {code: -1, out: "", err: e.message + "\n", duration_ms: time.now_ms() - started}
-    }
-    fs.append_text("${STATE}/logs/${name}.log",
-      "== ${time.now_iso()} attempt ${n}: ${cmd.label}\n" + r.out + r.err +
-      "== exit ${r.code} in ${r.duration_ms} ms\n\n")
-  }
-  for line in r.out.trim_end().lines() {
-    exhale "    " + line
-  }
-  for line in r.err.trim_end().lines() {
-    exhale "    " + line
-  }
-  snuff {code: r.code, ok: ok_codes(t).contains(r.code), ms: time.now_ms() - started, simulated: r.get("simulated", false)}
-}
-
-pull failure(name, cmd, result, n) {
-  snuff {
-    message: "task `${name}` failed: ${cmd.label} exited ${result.code}" + pick(n > 1, " after ${n} attempts", ""),
-    task: name,
-    exit_code: result.code,
-  }
-}
-
-pull run_task(ctx, name, index, total) {
-  stick t = ctx.tasks[name]
-  stick cmd = ctx.cmds[name]
-  stick d = ctx.defaults
-  stick tries = int(t.get("retries", d.get("retries", 0))) + 1
-  stick delay = int(t.get("retry_delay_ms", d.get("retry_delay_ms", 0)))
-  stick opts = hop_options(name, t, d)
-  exhale "[${index}/${total}] ${name}: ${cmd.label}"
-  roll result = null
-  roll n = 0
-  pull attempts() {
-    while n < tries and (result == null or not result.ok) {
-      n += 1
-      if n > 1 and delay > 0 {
-        time.sleep_ms(delay)
-      }
-      result = attempt(name, t, cmd, opts, n)
-      if not result.ok and n < tries {
-        exhale "    exit ${result.code}; trying again (${n + 1} of ${tries})"
-      }
-    }
-  }
-  stick undo = undo_of(t)
-  if undo == null {
-    attempts()
-    if not result.ok {
-      cough failure(name, cmd, result, n)
-    }
-  } else {
-    # The undo is journaled as a compensation once the task succeeds: a later
-    # failure in this run, or `cig unburn` weeks from now, runs it with this
-    # state. A task that failed has nothing to undo, so none is recorded.
-    burn (s) {
-      s.task = name
-      s.undo = undo
-      s.cwd = opts.get("cwd", ".")
-      s.env = opts.env
-      s.timeout_ms = opts.timeout_ms
-      attempts()
-      if not result.ok {
-        cough failure(name, cmd, result, n)
-      }
-    } unburn {
-      log.warn("undoing ${s.task}: ${s.undo.label}")
-      stick how = {cwd: s.cwd, env: s.env, timeout_ms: s.timeout_ms, check: true}
-      roll done = null
-      if s.undo.has("shell") {
-        done = proc.shell(s.undo.shell, how)
-      } else {
-        done = proc.run(s.undo.argv.first(), s.undo.argv.slice(1), how)
-      }
-      for line in (done.out + done.err).trim_end().lines() {
-        exhale "    " + line
-      }
-    }
-  }
-  exhale "    ok, ${duration(result.ms)}" + pick(n > 1, " (attempt ${n})", "")
-  snuff {task: name, exit_code: result.code, ms: result.ms, attempts: n, simulated: result.simulated}
-}
-
-# ----- commands -------------------------------------------------------------
-
-pull do_help() {
-  exhale "cig-orchestrator ${VERSION}: keep the scripts you have, run them through CigScript."
-  exhale ""
-  exhale "  cigo adopt [--write] [--force]   find the scripts, make targets, npm scripts and just"
-  exhale "                                   recipes this project already has; propose ${MANIFEST}"
-  exhale "  cigo list                        the tasks, what they run, what they need"
-  exhale "  cigo check                       the manifest, checked before anything runs"
-  exhale "  cigo plan [<task>...] [--only]   the order a run would take"
-  exhale "  cigo run <task>... [--only]      run them, dependencies first; arguments after"
-  exhale "                  [-- <args>]      `--` go to the last task named"
-  exhale "  cigo help | version"
-  exhale ""
-  exhale "cig's own flags go before the command:"
-  exhale "  cigo --dry-run run deploy        the plan, nothing executed"
-  exhale "  cigo --no-rollback run deploy    keep what finished tasks made when a later one fails"
-  exhale "Afterwards: `cig runs` lists every run, `cig unburn <run>` undoes one."
-}
-
-pull do_list(m) {
-  expect_flags([])
-  expect_no_targets()
-  stick tasks = m.tasks
-  stick names = tasks.keys()
-  if names.is_empty() {
-    exhale "${project_of(m)}: no tasks in ${MANIFEST}"
-    snuff
-  }
-  stick width = names.map(pack(x) => x.len()).max()
-  exhale "${project_of(m)}: ${names.len()} task" + pick(names.len() == 1, "", "s") + " in ${MANIFEST}"
-  for name in names {
-    stick t = tasks[name]
-    if type_of(t) != "map" {
-      exhale "  ${name.pad_right(width)}  (not a task; `cigo check` says why)"
-      continue
-    }
-    roll line = "  ${name.pad_right(width)}  ${label_of(t)}"
-    stick needs = needs_of(t)
-    if not needs.is_empty() {
-      line = line + "   needs ${needs.join(", ")}"
-    }
-    if t.has("undo") or t.has("undo_shell") {
-      line = line + "  [undo]"
-    }
-    if t.has("retries") {
-      line = line + "  [retries ${t.retries}]"
-    }
-    exhale line
-    if t.has("desc") {
-      exhale "  ${" ".repeat(width)}  # ${t.desc}"
-    }
-  }
-}
-
-pull do_plan(m, wanted) {
-  expect_flags(["--only"])
-  stick tasks = m.tasks
-  stick order = resolve_or_fail(tasks, pick(wanted.is_empty(), tasks.keys(), wanted), flags.contains("--only"))
-  if order.is_empty() {
-    exhale "nothing to run"
-    snuff
-  }
-  stick width = order.map(pack(x) => x.len()).max()
-  exhale "${order.len()} task" + pick(order.len() == 1, "", "s") + ", in this order:"
-  for pair in order.enumerate() {
-    exhale "  ${str(pair[0] + 1).pad_left(2)}. ${pair[1].pad_right(width)}  ${label_of(tasks[pair[1]])}"
-  }
-}
-
-pull do_check(m) {
-  expect_flags([])
-  expect_no_targets()
-  roll problems = []
-  pull problem(level, where, message) {
-    problems.push({level: level, where: where, message: message})
-  }
-  pull hint_for(key) {
-    if NEAR_MISSES.has(key) {
-      snuff "; did you mean `${NEAR_MISSES[key]}`?"
-    }
-    snuff ""
-  }
-  pull check_program(name, argv, cwd) {
-    stick prog = argv.first()
-    if prog.contains("/") {
-      if not fs.exists(path.join(cwd, prog)) {
-        problem("error", name, "`${prog}` does not exist")
-      }
-    } else if proc.which(prog) == null {
-      problem("error", name, "`${prog}` is not on PATH")
-    }
-    for w in argv.slice(1) {
-      if not w.starts_with("-") and INTERPRETERS.has(path.ext(w).lower()) and not fs.exists(path.join(cwd, w)) {
-        problem("error", name, "`${w}` does not exist")
-      }
-    }
-  }
-  stick tasks = m.tasks
-  for key in m.keys() {
-    if not TOP_KEYS.contains(key) {
-      problem("warning", MANIFEST, "unknown key `${key}` at the top; it is ignored")
-    }
-  }
-  stick defaults = m.get("defaults", {})
-  if type_of(defaults) != "map" {
-    problem("error", MANIFEST, "`defaults` must be a map")
-  } else {
-    for key in defaults.keys() {
-      if not DEFAULT_KEYS.contains(key) {
-        problem("warning", "defaults", "unknown key `${key}`; defaults can set ${DEFAULT_KEYS.join(", ")}")
-      }
-    }
-  }
-  for name in tasks {
-    stick t = tasks[name]
-    if type_of(t) != "map" {
-      problem("error", name, "a task is a map like {\"cmd\": [...]}, got a ${type_of(t)}")
-      continue
-    }
-    for key in t.keys() {
-      if not TASK_KEYS.contains(key) {
-        problem("warning", name, "unknown key `${key}`, ignored${hint_for(key)}")
-      }
-    }
-    stick cwd = str(t.get("cwd", "."))
-    if t.has("cwd") and not fs.is_dir(cwd) {
-      problem("error", name, "`cwd` ${cwd} is not a directory")
-    }
-    if t.has("cmd") and t.has("shell") {
-      problem("error", name, "has both `cmd` and `shell`; keep one")
-    } else if not t.has("cmd") and not t.has("shell") {
-      problem("error", name, "has nothing to run: give it `cmd` or `shell`")
-    } else if t.has("shell") {
-      if type_of(t.shell) != "string" or t.shell.trim() == "" {
-        problem("error", name, "`shell` must be a command line (a string)")
-      }
+# `{name}` in a toolchain command; a word that is only a list var splices it.
+pull fill(words, vars) {
+  roll out = []
+  for w in words {
+    stick s = str(w)
+    stick inner = pick(s.starts_with("{") and s.ends_with("}") and not s.starts_with("{{"), s.slice(1, s.len() - 1), "")
+    if inner != "" and vars.has(inner) and type_of(vars[inner]) == "list" {
+      out = out + vars[inner].map(pack(x) => str(x))
     } else {
-      stick argv = argv_of(t.cmd)
-      if argv == null or argv.is_empty() {
-        problem("error", name, "`cmd` must be a list like [\"bash\", \"scripts/build.sh\"], or a string")
-      } else {
-        if type_of(t.cmd) == "string" and SHELL_CHARS.any(pack(c) => t.cmd.contains(c)) {
-          problem("warning", name, "`cmd` is split on spaces and never reaches a shell, so its quotes, pipes and globs are passed as they are; use `shell` for a command line, or write `cmd` as a list")
-        }
-        check_program(name, argv, cwd)
-      }
-    }
-    if t.has("needs") and type_of(t.needs) != "list" and type_of(t.needs) != "string" {
-      problem("error", name, "`needs` must be a list of task names")
-    }
-    for dep in needs_of(t) {
-      if not tasks.has(dep) {
-        problem("error", name, "needs `${dep}`, which is not a task; ${known(tasks, dep)}")
-      }
-    }
-    if t.has("ok") {
-      stick ok = ok_codes(t)
-      if type_of(ok) != "list" or ok.is_empty() or not ok.all(pack(c) => type_of(c) == "int") {
-        problem("error", name, "`ok` must be exit codes, like [0, 1]")
-      }
-    }
-    for key in ["timeout_ms", "retries", "retry_delay_ms"] {
-      if t.has(key) and (type_of(t[key]) != "int" or t[key] < 0) {
-        problem("error", name, "`${key}` must be a whole number, 0 or more")
-      }
-    }
-    if t.has("env") and type_of(t.env) != "map" {
-      problem("error", name, "`env` must be a map of names to values")
-    }
-    if t.has("undo") and t.has("undo_shell") {
-      problem("error", name, "has both `undo` and `undo_shell`; keep one")
-    } else if t.has("undo") {
-      stick argv = argv_of(t.undo)
-      if argv == null or argv.is_empty() {
-        problem("error", name, "`undo` must be a list like [\"bash\", \"scripts/undeploy.sh\"], or a string")
-      } else {
-        check_program(name, argv, cwd)
-      }
+      out.push(fill_text(s, vars))
     }
   }
-  roll loops = []
-  for name in tasks {
-    try {
-      resolve(tasks, [name], false)
-    } ashtray e {
-      if e.message.starts_with("dependency loop") and not loops.contains(e.message) {
-        loops.push(e.message)
-        problem("error", name, e.message)
-      }
-    }
-  }
-  stick errors = problems.filter(pack(p) => p.level == "error")
-  stick warnings = problems.filter(pack(p) => p.level == "warning")
-  exhale "${MANIFEST}: ${tasks.len()} task(s), ${errors.len()} error(s), ${warnings.len()} warning(s)"
-  for p in errors + warnings {
-    exhale "  ${p.level}: ${p.where}: ${p.message}"
-  }
-  if not errors.is_empty() {
-    exit(1)
-  }
+  snuff out
 }
 
-pull do_run(m, wanted) {
-  expect_flags(["--only"])
-  if wanted.is_empty() {
-    fail("run what? `cigo run <task>`; `cigo list` shows the tasks")
-  }
-  stick tasks = m.tasks
-  stick order = resolve_or_fail(tasks, wanted, flags.contains("--only"))
-  stick last = wanted.last()
-  roll cmds = {}
-  for name in order {
-    if type_of(tasks[name]) != "map" {
-      fail("task `${name}` is not a map; `cigo check` says what is wrong with it")
-    }
-    cmds[name] = command_of(name, tasks[name], pick(name == last, extra, []))
-  }
-  stick ctx = {tasks: tasks, cmds: cmds, defaults: m.get("defaults", {})}
-  stick started = time.now_ms()
-  exhale "${project_of(m)}: ${order.join(" > ")}"
-  stick steps = order.enumerate().map(pack(pair) => pack() => run_task(ctx, pair[1], pair[0] + 1, order.len()))
-  roll report = null
-  roll failed = null
-  try {
-    report = light(steps, {names: order, quiet: true})
-  } ashtray e {
-    failed = e
-  }
-  if failed != null {
-    stick cause = failed.get("cause", {})
-    exhale ""
-    exhale "stopped at ${failed.get("step", "a task")}; cig puts back what this run changed, newest first"
-    cough {message: cause.get("message", failed.message), task: cause.get("task", failed.get("step", ""))}
-  }
-  stick results = report.steps.map(pack(step) => step.result)
-  burn {
-    json.save("${STATE}/reports/${time.stamp()}.json", {
-      project: project_of(m),
-      targets: wanted,
-      order: order,
-      ok: true,
-      ms: time.now_ms() - started,
-      tasks: results,
-      finished: time.now_iso(),
-    }, 2)
-  }
-  exhale ""
-  if results.any(pack(r) => r.simulated) {
-    exhale "dry run: ${order.len()} task" + pick(order.len() == 1, "", "s") + " planned, none executed; the plan follows"
-  } else {
-    exhale "done: ${order.len()} task" + pick(order.len() == 1, "", "s") + " in ${duration(time.now_ms() - started)}. Output is in ${STATE}/logs; `cig unburn <run>` undoes all of it."
-  }
-}
+# ----- task runners and script folders --------------------------------------------
 
-# ----- adopt: find what the project already has -----------------------------
-
-pull first_file(names) {
+pull first_existing(dir, names) {
   for n in names {
-    if fs.is_file(n) {
+    if fs.is_file(path.join(dir, n)) {
       snuff n
     }
   }
   snuff null
+}
+
+pull comment_of(line) {
+  stick s = line.trim()
+  if s.starts_with("#") {
+    snuff tidy(s.replace("#", ""))
+  }
+  snuff ""
 }
 
 # The first comment in a script, as its description.
@@ -697,28 +1260,29 @@ pull describe(lines) {
   snuff ""
 }
 
-# A task for one file, or null when it is not a script: the shebang says how
-# to run it, else the extension does.
-pull script_task(p) {
-  stick base = path.base(p)
-  if base.starts_with(".") or not fs.is_file(p) {
-    snuff null
-  }
-  if fs.size(p) > 1000000 {
+# One file in a script folder: how to run it (its shebang, else its
+# extension), or null when it is not a script.
+pull script_target(dir, rel) {
+  stick p = path.join(dir, rel)
+  stick base = path.base(rel)
+  if base.starts_with(".") or not fs.is_file(p) or fs.size(p) > 1000000 {
     snuff null
   }
   roll lines = null
   try {
     lines = fs.read_lines(p)
   } ashtray e {
+    lines = null
+  }
+  if lines == null {
     # Not text: a compiled program in bin/ runs as it is.
-    if path.dir(p) == "bin" {
-      snuff {cmd: [p], source: p, desc: "a compiled program"}
+    if path.dir(rel) == "bin" {
+      snuff {name: slug(path.stem(rel)), cmd: [rel], desc: "a compiled program"}
     }
     snuff null
   }
   stick first = lines.get(0, "")
-  stick ext = path.ext(p).lower()
+  stick ext = path.ext(rel).lower()
   roll cmd = null
   if first.starts_with("#!") {
     roll parts = first.slice(2).trim().split()
@@ -726,74 +1290,55 @@ pull script_task(p) {
       parts = parts.slice(1).filter(pack(w) => not w.starts_with("-"))
     }
     if not parts.is_empty() {
-      cmd = parts + [p]
+      cmd = parts + [rel]
     }
   }
   if cmd == null and INTERPRETERS.has(ext) {
-    cmd = INTERPRETERS[ext] + [p]
+    cmd = INTERPRETERS[ext] + [rel]
   }
   if cmd == null {
     snuff null
   }
-  roll t = {cmd: cmd, source: p}
-  stick d = describe(lines)
-  if d != "" {
-    t.desc = d
-  }
-  snuff t
+  snuff {name: slug(path.stem(rel)), cmd: cmd, desc: describe(lines)}
 }
 
-pull package_runner() {
-  if fs.exists("pnpm-lock.yaml") {
-    snuff "pnpm"
-  }
-  if fs.exists("yarn.lock") {
-    snuff "yarn"
-  }
-  if fs.exists("bun.lockb") or fs.exists("bun.lock") {
-    snuff "bun"
-  }
-  snuff "npm"
-}
-
-pull discover() {
-  roll tasks = {}
-  roll notes = []
-  pull add(name, t) {
-    roll n = name
-    roll i = 2
-    while tasks.has(n) {
-      n = "${name}-${i}"
-      i += 1
+# The targets a runner file declares: [{name, desc, cmd?}].
+pull read_targets(dir, kind) {
+  roll found = []
+  roll seen = {}
+  pull add(name, desc, cmd) {
+    if not seen.has(name) {
+      seen[name] = true
+      found.push({name: name, desc: desc, cmd: cmd})
     }
-    tasks[n] = t
   }
-
-  # Script folders, then scripts at the root.
-  for dir in SCRIPT_DIRS {
-    if fs.is_dir(dir) {
-      for p in fs.list(dir).sort() {
-        stick t = script_task(p)
+  if kind == "scripts" {
+    for entry in entries_of(dir).sort() {
+      if LOOSE_SCRIPT_EXTS.contains(path.ext(entry).lower()) {
+        stick t = script_target(dir, entry)
         if t != null {
-          add(slug(path.stem(p)), t)
+          add(t.name, t.desc, t.cmd)
         }
       }
     }
-  }
-  for p in fs.list(".").sort() {
-    stick rel = pick(p.starts_with("./"), p.slice(2), p)
-    if ROOT_SCRIPT_EXTS.contains(path.ext(rel).lower()) {
-      stick t = script_task(rel)
-      if t != null {
-        add(slug(path.stem(rel)), t)
+    for folder in SCRIPT_DIRS {
+      if fs.is_dir(path.join(dir, folder)) {
+        for entry in entries_of(path.join(dir, folder)).sort() {
+          stick t = script_target(dir, folder + "/" + entry)
+          if t != null {
+            add(t.name, t.desc, t.cmd)
+          }
+        }
       }
     }
+    snuff found
   }
-
-  # make: the .PHONY targets when the Makefile declares any, else every plain target.
-  stick makefile = first_file(["GNUmakefile", "makefile", "Makefile"])
-  if makefile != null {
-    stick lines = fs.read_lines(makefile)
+  if kind == "make" {
+    stick file = first_existing(dir, ["GNUmakefile", "makefile", "Makefile"])
+    if file == null {
+      snuff found
+    }
+    stick lines = fs.read_lines(path.join(dir, file))
     roll phony = []
     for line in lines {
       stick c = text.captures(line, '^\.PHONY[ \t]*:(.*)$')
@@ -803,127 +1348,2348 @@ pull discover() {
     }
     roll prev = ""
     for line in lines {
-      stick c = text.captures(line, '^([A-Za-z0-9][A-Za-z0-9_-]*)[ \t]*:([^=].*)?$')
-      if c != null and (phony.is_empty() or phony.contains(c[1])) and not tasks.has("make:${c[1]}") {
-        roll t = {cmd: ["make", c[1]], source: makefile}
+      # `build test: deps` is a rule for two targets.
+      stick c = text.captures(line, '^([A-Za-z0-9][A-Za-z0-9_-]*(?:[ \t]+[A-Za-z0-9][A-Za-z0-9_-]*)*)[ \t]*:([^=].*)?$')
+      if c != null {
         stick rest = c.get(2, null) ?? ""
         stick at = rest.find("##")
-        roll d = ""
-        if at >= 0 {
-          d = tidy(rest.slice(at + 2))
-        } else if prev.starts_with("#") {
-          d = tidy(prev.replace("#", ""))
-        }
-        if d != "" {
-          t.desc = d
-        }
-        add("make:${c[1]}", t)
-      }
-      prev = line.trim()
-    }
-  }
-
-  # package.json scripts, through the package manager the lockfile names.
-  if fs.is_file("package.json") {
-    roll pkg = null
-    try {
-      pkg = json.load("package.json")
-    } ashtray e {
-      notes.push("package.json is not valid JSON; its scripts were skipped")
-    }
-    if pkg != null and type_of(pkg) == "map" and type_of(pkg.get("scripts", null)) == "map" {
-      stick runner = package_runner()
-      stick scripts = pkg.scripts
-      for name in scripts {
-        stick hook = (name.starts_with("pre") and scripts.has(name.slice(3))) or (name.starts_with("post") and scripts.has(name.slice(4)))
-        if not hook {
-          add("${runner}:${name}", {cmd: [runner, "run", name], source: "package.json", desc: tidy(str(scripts[name]))})
+        stick d = pick(at >= 0, tidy(rest.slice(at + 2)), comment_of(prev))
+        for target in c[1].split() {
+          if phony.is_empty() or phony.contains(target) {
+            add(target, d, null)
+          }
         }
       }
+      prev = line
     }
+    snuff found
   }
-
-  # just recipes; private ones (a leading underscore) stay private.
-  stick justfile = first_file(["justfile", "Justfile", ".justfile"])
-  if justfile != null {
+  if kind == "just" {
+    stick file = first_existing(dir, ["justfile", "Justfile", ".justfile"])
+    if file == null {
+      snuff found
+    }
     roll prev = ""
-    for line in fs.read_lines(justfile) {
+    for line in fs.read_lines(path.join(dir, file)) {
       stick c = text.captures(line, '^@?([A-Za-z_][A-Za-z0-9_-]*)([^:]*):([^=].*)?$')
       if c != null and not c[1].starts_with("_") and not ["set", "alias", "export", "import", "mod"].contains(c[1]) {
-        roll t = {cmd: ["just", c[1]], source: justfile}
-        roll d = ""
-        if prev.starts_with("#") {
-          d = tidy(prev.replace("#", ""))
-        }
         stick params = (c.get(2, null) ?? "").trim()
+        roll d = comment_of(prev)
         if params != "" {
           d = tidy(d + pick(d == "", "", " ") + "(takes ${params})")
         }
-        if d != "" {
-          t.desc = d
-        }
-        add("just:${c[1]}", t)
+        add(c[1], d, null)
       }
-      prev = line.trim()
+      prev = line
     }
+    snuff found
   }
+  if kind == "taskfile" {
+    stick file = first_existing(dir, ["Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml"])
+    if file == null {
+      snuff found
+    }
+    roll inside = false
+    roll current = null
+    for line in fs.read_lines(path.join(dir, file)) {
+      if text.matches(line, '^tasks:\s*$') {
+        inside = true
+        continue
+      }
+      if inside and text.matches(line, '^\S') {
+        inside = false
+      }
+      if not inside {
+        continue
+      }
+      stick c = text.captures(line, '^  ([A-Za-z0-9_.:-]+):\s*$')
+      if c != null {
+        current = c[1]
+        add(current, "", null)
+        continue
+      }
+      stick d = text.captures(line, '^    desc:\s*(.+)$')
+      if d != null and current != null {
+        found = found.map(pack(t) => pick(t.name == current, {name: t.name, desc: tidy(d[1].replace("\"", "")), cmd: null}, t))
+      }
+    }
+    snuff found
+  }
+  if kind == "rake" {
+    stick file = first_existing(dir, ["Rakefile", "rakefile"])
+    if file == null {
+      snuff found
+    }
+    roll desc = ""
+    for line in fs.read_lines(path.join(dir, file)) {
+      stick d = text.captures(line, '^\s*desc\s+["\x27](.+)["\x27]')
+      if d != null {
+        desc = tidy(d[1])
+        continue
+      }
+      stick c = text.captures(line, '^\s*task\s+:?"?([A-Za-z0-9_]+)')
+      if c != null {
+        add(c[1], desc, null)
+        desc = ""
+      }
+    }
+    snuff found
+  }
+  if kind == "earthly" {
+    stick t = text_of(dir, "Earthfile")
+    if t != null {
+      for line in t.lines() {
+        stick c = text.captures(line, '^([a-z][A-Za-z0-9_-]*):\s*$')
+        if c != null {
+          add(c[1], "", null)
+        }
+      }
+    }
+    snuff found
+  }
+  snuff found
+}
 
-  for f in ["Taskfile.yml", "Taskfile.yaml"] {
-    if fs.is_file(f) {
-      notes.push("${f}: go-task files are not read yet; add its tasks as {\"cmd\": [\"task\", \"<name>\"]}")
+pull targets_of(dir, kind) {
+  snuff cached("targets:" + kind + ":" + dir, pack() => read_targets(dir, kind))
+}
+
+# Which stage each alias table maps to, from the names that are present.
+pull map_names(names, aliases) {
+  roll mapped = {}
+  for stage in STAGES {
+    for alias in aliases.get(stage, []) {
+      if names.contains(alias) and not mapped.has(stage) {
+        mapped[stage] = alias
+      }
     }
   }
-  if fs.is_file("Rakefile") {
-    notes.push("Rakefile: add rake tasks as {\"cmd\": [\"rake\", \"<task>\"]}")
+  snuff mapped
+}
+
+# ----- the toolchains a project uses ------------------------------------------------
+
+# The built-in table, with the project's own additions and overrides:
+# {"toolchains": {"python-uv": {"stages": {...}}, "my-tool": {"extends": "go", ...}}}.
+pull toolchains_for(m) {
+  roll kb = {}
+  for id in TOOLCHAINS {
+    kb[id] = TOOLCHAINS[id]
   }
-  snuff {tasks: tasks, notes: notes}
+  stick given = m.get("toolchains", {})
+  if type_of(given) != "map" {
+    snuff kb
+  }
+  for id in given {
+    stick own = given[id]
+    if type_of(own) != "map" {
+      continue
+    }
+    stick base = kb.get(own.get("extends", id), {})
+    roll merged = base.merge(own)
+    merged.stages = base.get("stages", {}).merge(own.get("stages", {}))
+    merged.vars = base.get("vars", {}).merge(own.get("vars", {}))
+    kb[id] = merged
+  }
+  snuff kb
+}
+
+# The toolchains found in one directory: the best of each family.
+pull detect_here(dir, kb) {
+  roll best = {}
+  for id in kb {
+    stick tc = kb[id]
+    if tc.get("auto", true) and not as_list(tc.get("detect", [])).is_empty() and holds_all(dir, tc.detect) {
+      stick fam = tc.get("family", id)
+      if not best.has(fam) or tc.get("priority", 10) > kb[best[fam]].get("priority", 10) {
+        best[fam] = id
+      }
+    }
+  }
+  snuff best.values()
+}
+
+# ----- one component ------------------------------------------------------------------
+
+pull spec_of(alt, vars, source) {
+  roll spec = {source: source}
+  if alt.has("shell") {
+    spec.shell = fill_text(alt.shell, vars)
+  } else {
+    spec.cmd = fill(alt.cmd, vars)
+  }
+  if alt.has("env") {
+    spec.env = alt.env
+  }
+  snuff spec
+}
+
+# Everything a component can run: its stages, and its other targets.
+pull resolve_component(name, comp, kb) {
+  stick dir = str(comp.get("path", "."))
+  stick tc_id = comp.get("toolchain", null)
+  if tc_id == null or not kb.has(tc_id) {
+    snuff {dir: dir, toolchain: tc_id, stages: {}, extras: {}, order: STAGE_NEEDS, error: pick(tc_id == null, "has no toolchain", "names an unknown toolchain `${tc_id}`")}
+  }
+  stick tc = kb[tc_id]
+  stick vars = vars_for(dir, tc, name)
+  roll stages = {}
+  roll extras = {}
+  # 1. The toolchain's own commands.
+  stick defs = tc.get("stages", {})
+  for stage in defs {
+    stick alt = choose(dir, defs[stage])
+    if alt != null {
+      stages[stage] = spec_of(alt, vars, tc_id)
+    }
+  }
+  stick ex = tc.get("extras", {})
+  for x in ex {
+    stick alt = choose(dir, ex[x])
+    if alt != null {
+      extras[x] = spec_of(alt, vars, tc_id)
+    }
+  }
+  # 2. Its script table: package.json scripts, composer scripts, deno tasks.
+  stick sc = tc.get("scripts", null)
+  if sc != null {
+    stick table = dig(json_of(dir, sc.file), [sc.key])
+    if type_of(table) == "map" {
+      stick run = fill(sc.run, vars)
+      stick mapped = map_names(table.keys(), SCRIPT_ALIASES)
+      for stage in mapped {
+        stages[stage] = {cmd: run + [mapped[stage]], source: "${sc.file} \"${mapped[stage]}\""}
+      }
+      pull hook(script) {
+        snuff HOOK_SCRIPTS.contains(script) or (script.starts_with("pre") and table.has(script.slice(3))) or (script.starts_with("post") and table.has(script.slice(4)))
+      }
+      for script in table {
+        if not STAGES.contains(script) and not hook(script) {
+          extras[script] = {cmd: run + [script], source: "${sc.file} \"${script}\"", desc: tidy(to_text(table[script]))}
+        }
+      }
+    }
+  }
+  # 3. Its targets: make, just, Taskfile, rake, Earthfile, script folders.
+  stick tk = tc.get("targets", null)
+  if tk != null {
+    stick found = targets_of(dir, tk)
+    stick mapped = map_names(found.map(pack(t) => t.name), pick(tk == "make", MAKE_ALIASES, SCRIPT_ALIASES))
+    stick run = tc.get("targets_run", [])
+    pull command_for(t) {
+      if t.cmd != null {
+        snuff t.cmd
+      }
+      if run.any(pack(w) => w.contains("{target}")) {
+        snuff fill(run, vars.merge({target: t.name}))
+      }
+      snuff fill(run, vars) + [t.name]
+    }
+    for t in found {
+      roll spec = {cmd: command_for(t), source: "${tk} target \"${t.name}\""}
+      if t.desc != "" {
+        spec.desc = t.desc
+      }
+      for stage in mapped {
+        if mapped[stage] == t.name {
+          stages[stage] = spec
+        }
+      }
+      if not STAGES.contains(t.name) {
+        extras[t.name] = spec
+      }
+    }
+  }
+  # 4. What the project says, which always wins. Its commands take the same
+  # vars as the toolchain's ({component}, {py}, {locked}...).
+  roll problems = []
+  stick given = comp.get("stages", {})
+  for stage in given {
+    stick ov = given[stage]
+    stick home = pick(STAGES.contains(stage), stages, extras)
+    if ov == false or ov == null {
+      home.remove(stage)
+    } else if type_of(ov) == "list" or type_of(ov) == "string" {
+      home[stage] = {cmd: fill(argv_of(ov) ?? [], vars), source: MANIFEST}
+    } else if type_of(ov) == "map" {
+      if ov.has("shell") {
+        home[stage] = ov.merge({source: MANIFEST, shell: fill_text(ov.shell, vars)})
+      } else if ov.has("cmd") {
+        home[stage] = ov.merge({source: MANIFEST, cmd: fill(argv_of(ov.cmd) ?? [], vars)})
+      } else if home.has(stage) {
+        home[stage] = home[stage].merge(ov)
+      } else {
+        problems.push("stages.${stage} adds options, but ${tc_id} has no " + pick(STAGES.contains(stage), "${stage} stage", "`${stage}` target") + " here; give it `cmd` or `shell`")
+      }
+    }
+  }
+  # A var none of whose alternatives applies has no value here, and would
+  # reach the command as the literal text {name}.
+  stick declared = tc.get("vars", {}).keys()
+  for table in [stages, extras] {
+    for s in table {
+      stick spec = table[s]
+      stick words = as_list(spec.get("cmd", [])).map(pack(w) => str(w)) + pick(spec.has("shell"), [str(spec.get("shell", ""))], [])
+      for v in declared {
+        if words.any(pack(w) => w.contains("{" + v + "}")) and not spec.has("unresolved") {
+          spec.unresolved = "{${v}} has no value in ${dir}: none of its alternatives apply here, so give the var one without `when`"
+          problems.push("${s}: ${spec.unresolved}")
+        }
+      }
+    }
+  }
+  snuff {dir: dir, toolchain: tc_id, stages: stages, extras: extras, order: STAGE_NEEDS.merge(tc.get("order", {})), note: tc.get("note", ""), problems: problems}
+}
+
+# The stages `stage` waits for inside its component, skipping the ones the
+# component does not have.
+pull stage_deps(present, stage, order) {
+  roll out = []
+  roll seen = {}
+  pull walk(s) {
+    for dep in order.get(s, []) {
+      if not seen.has(dep) {
+        seen[dep] = true
+        if present.has(dep) {
+          out.push(dep)
+        } else {
+          walk(dep)
+        }
+      }
+    }
+  }
+  walk(stage)
+  snuff out
+}
+
+# ----- the manifest ---------------------------------------------------------------
+
+stick TOP_KEYS = ["project", "defaults", "components", "toolchains", "tasks"]
+stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms"]
+stick COMPONENT_KEYS = ["path", "toolchain", "after", "stages", "env", "env_file", "groups", "timeout_ms", "retries", "retry_delay_ms", "desc"]
+stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces"]
+stick CAPTURES = ["text", "json", "lines", "kv"]
+stick TOOLCHAIN_KEYS = ["language", "short", "extends", "detect", "family", "priority", "auto", "kind", "workspace", "claims_subtree",
+  "stages", "extras", "order", "vars", "scripts", "targets", "targets_run", "tools", "versions", "pins", "install", "note"]
+stick CONDITION_KINDS = ["file", "dir", "glob", "grep", "json", "tool", "not"]
+
+# The first condition in `c` (a condition, or a list of them, nested for
+# "any of") that is not one cigo knows how to check, or null.
+pull bad_condition(c) {
+  if type_of(c) == "list" {
+    for x in c {
+      stick b = bad_condition(x)
+      if b != null {
+        snuff b
+      }
+    }
+    snuff null
+  }
+  stick s = str(c)
+  stick at = s.find(":")
+  if at <= 0 {
+    snuff s
+  }
+  stick kind = s.slice(0, at)
+  if kind == "not" {
+    snuff pick(bad_condition(s.slice(at + 1)) == null, null, s)
+  }
+  if not CONDITION_KINDS.contains(kind) or s.slice(at + 1) == "" {
+    snuff s
+  }
+  if (kind == "grep" or kind == "json") and s.slice(at + 1).find(":") <= 0 {
+    snuff s
+  }
+  snuff null
+}
+stick NEAR_MISSES = {
+  need: "needs", deps: "needs", depends: "needs", depends_on: "needs", requires: "needs", dependencies: "needs",
+  command: "cmd", commands: "cmd", run: "cmd", script: "cmd", exec: "cmd", argv: "cmd",
+  sh: "shell", bash: "shell",
+  description: "desc", help: "desc", summary: "desc",
+  timeout: "timeout_ms", retry: "retries", attempts: "retries",
+  dir: "cwd", workdir: "cwd", working_dir: "cwd", directory: "path",
+  environment: "env", envfile: "env_file", dotenv: "env_file",
+  rollback: "undo", revert: "undo", cleanup: "undo",
+  output: "capture", outputs: "produces", artifacts: "produces", artifact: "produces", sources: "inputs", input: "inputs",
+  lang: "toolchain", language: "toolchain", tool: "toolchain", tooling: "toolchain",
+}
+
+pull load() {
+  if not fs.is_file(MANIFEST) {
+    fail("no ${MANIFEST} in ${ROOT}; `cigo adopt` finds the languages and scripts this project already has and proposes one")
+  }
+  roll m = null
+  try {
+    m = json.load(MANIFEST)
+  } ashtray e {
+    fail("${MANIFEST} is not valid JSON: ${e.message}")
+  }
+  if type_of(m) != "map" or (type_of(m.get("tasks", null)) != "map" and type_of(m.get("components", null)) != "map") {
+    fail("${MANIFEST} needs `components` or `tasks`, like {\"components\": {\"api\": {\"path\": \"api\", \"toolchain\": \"go\"}}}")
+  }
+  snuff m
+}
+
+pull project_of(m) {
+  snuff str(m.get("project", path.base(ROOT)))
+}
+
+pull needs_of(t) {
+  stick n = t.get("needs", [])
+  if type_of(n) == "string" {
+    snuff [n]
+  }
+  if type_of(n) != "list" {
+    snuff []
+  }
+  snuff n.map(pack(x) => str(x))
+}
+
+pull ok_codes(t) {
+  stick ok = t.get("ok", [0])
+  if type_of(ok) == "int" {
+    snuff [ok]
+  }
+  snuff ok
+}
+
+pull component_task(comp_name, r, stage, spec, needs) {
+  stick c = r.spec
+  roll t = {}
+  if spec.has("shell") {
+    t.shell = str(spec.shell)
+  } else {
+    t.cmd = argv_of(spec.get("cmd", null)) ?? []
+  }
+  t.cwd = r.dir
+  t.env = c.get("env", {}).merge(spec.get("env", {}))
+  t.env_files = as_list(c.get("env_file", null)).map(pack(f) => path.join(r.dir, str(f))) + as_list(spec.get("env_file", null)).map(pack(f) => path.join(r.dir, str(f)))
+  t.needs = needs + needs_of(spec)
+  for key in ["timeout_ms", "retries", "retry_delay_ms"] {
+    if spec.has(key) {
+      t[key] = spec[key]
+    } else if c.has(key) {
+      t[key] = c[key]
+    }
+  }
+  for key in ["ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces", "desc", "unresolved"] {
+    if spec.has(key) {
+      t[key] = spec[key]
+    }
+  }
+  t.component = comp_name
+  t.stage = stage
+  t.origin = "component ${comp_name} (${r.toolchain}): ${spec.get("source", "")}"
+  snuff t
+}
+
+pull manifest_task(t) {
+  roll out = {}
+  for key in t {
+    out[key] = t[key]
+  }
+  out.cwd = str(t.get("cwd", "."))
+  out.env_files = as_list(t.get("env_file", null)).map(pack(f) => path.join(out.cwd, str(f)))
+  out.needs = needs_of(t)
+  if not t.has("cmd") and not t.has("shell") and not out.needs.is_empty() {
+    out.group = true
+  }
+  out.origin = MANIFEST
+  snuff out
+}
+
+# ----- templates: values between tasks, across languages ------------------------------
+#
+#   {{version}}             the output of task `version`: its captured stdout,
+#                           or the name=value lines it wrote to $CIG_OUTPUT
+#   {{schema.tables.0}}     a path into that output
+#   {{version|json}}        the value as JSON text
+#   {{notes|sh}}            the value quoted for a `shell` line (a list: each item)
+#   {{env.HOME}}  {{root}}  {{project}}
+# A task that uses another task's output waits for it: the reference is a need.
+
+stick TEMPLATE = '\{\{[^{}]*\}\}'
+stick EXPOSED = {}
+stick RAW = {}
+roll DRY = false
+# `cigo run --only`: the tasks a template reads from may not have run.
+roll ONLY = false
+roll PROJECT_NAME = path.base(ROOT)
+
+pull strings_of(t) {
+  roll out = []
+  for w in as_list(t.get("cmd", null)) {
+    out.push(str(w))
+  }
+  for key in ["shell", "stdin", "cwd", "undo_shell"] {
+    if t.has(key) and type_of(t[key]) == "string" {
+      out.push(t[key])
+    }
+  }
+  if type_of(t.get("env", null)) == "map" {
+    for k in t.env {
+      out.push(str(t.env[k]))
+    }
+  }
+  if type_of(t.get("undo", null)) == "list" {
+    for w in t.undo {
+      out.push(str(w))
+    }
+  }
+  snuff out
+}
+
+pull template_exprs(s) {
+  snuff text.find_all(str(s), TEMPLATE).map(pack(m) => m.slice(2, m.len() - 2).trim())
+}
+
+pull expr_base(expr) {
+  stick bar = expr.find("|")
+  snuff pick(bar < 0, expr, expr.slice(0, bar)).trim()
+}
+
+pull is_builtin_ref(base) {
+  snuff base == "root" or base == "project" or base.starts_with("env.")
+}
+
+# Which task a template path names: the longest leading part that is a task.
+pull task_named(base, table) {
+  stick parts = base.split(".")
+  roll n = parts.len()
+  while n > 0 {
+    stick cand = parts.slice(0, n).join(".")
+    if table.has(cand) {
+      snuff {task: cand, rest: parts.slice(n)}
+    }
+    n -= 1
+  }
+  snuff null
+}
+
+pull refs_of(t, tasks) {
+  roll out = []
+  if t.has("stdin_from") {
+    out.push(str(t.stdin_from))
+  }
+  for s in strings_of(t) {
+    for expr in template_exprs(s) {
+      stick base = expr_base(expr)
+      if not is_builtin_ref(base) {
+        stick hit = task_named(base, tasks)
+        if hit != null and not out.contains(hit.task) {
+          out.push(hit.task)
+        }
+      }
+    }
+  }
+  snuff out
+}
+
+pull lookup(expr, where) {
+  stick bar = expr.find("|")
+  stick base = expr_base(expr)
+  stick filter = pick(bar < 0, "", expr.slice(bar + 1).trim())
+  roll value = null
+  if base == "root" {
+    value = ROOT
+  } else if base == "project" {
+    value = PROJECT_NAME
+  } else if base.starts_with("env.") {
+    value = env.get(base.slice(4), "")
+  } else {
+    stick hit = task_named(base, EXPOSED)
+    if hit == null {
+      if DRY {
+        snuff "{{" + expr + "}}"
+      }
+      if ONLY {
+        cough "{{${expr}}} in ${where}: no task by that name has produced output in this run; with --only, the tasks it reads from don't run: name them too, or leave out --only"
+      }
+      cough "{{${expr}}} in ${where}: no task by that name has produced output in this run; give it `capture`, or have it write name=value lines to $CIG_OUTPUT"
+    }
+    value = dig(EXPOSED[hit.task], hit.rest)
+    if value == null and not hit.rest.is_empty() {
+      if DRY {
+        snuff "{{" + expr + "}}"
+      }
+      cough "{{${expr}}} in ${where}: the output of `${hit.task}` has no `${hit.rest.join(".")}`; it is ${tidy(to_text(EXPOSED[hit.task]))}"
+    }
+  }
+  if filter == "" {
+    snuff value
+  }
+  if filter == "json" {
+    snuff json.stringify(value)
+  }
+  if filter == "sh" {
+    if type_of(value) == "list" {
+      snuff value.map(pack(x) => sh_quote(to_text(x))).join(" ")
+    }
+    snuff sh_quote(to_text(value))
+  }
+  cough "{{${expr}}} in ${where}: unknown filter `|${filter}`; the filters are |json and |sh"
+}
+
+pull render(s, where) {
+  stick src = str(s)
+  if not src.contains("{{") {
+    snuff src
+  }
+  roll out = ""
+  roll rest = src
+  while true {
+    stick i = rest.find("{{")
+    if i < 0 {
+      break
+    }
+    stick j = rest.slice(i + 2).find("}}")
+    if j < 0 {
+      break
+    }
+    stick expr = rest.slice(i + 2, i + 2 + j).trim()
+    out = out + rest.slice(0, i) + to_text(lookup(expr, where))
+    rest = rest.slice(i + 2 + j + 2)
+  }
+  snuff out + rest
+}
+
+# An argv word that is one whole template and names a list becomes that many words.
+pull render_argv(words, where) {
+  roll out = []
+  for w in words {
+    stick s = str(w)
+    stick whole = text.captures(s, '^\{\{([^{}]*)\}\}$')
+    if whole != null {
+      stick v = lookup(whole[1].trim(), where)
+      if type_of(v) == "list" {
+        out = out + v.map(pack(x) => to_text(x))
+      } else {
+        out.push(to_text(v))
+      }
+    } else {
+      out.push(render(s, where))
+    }
+  }
+  snuff out
+}
+
+# ----- the task graph ---------------------------------------------------------------
+
+pull build_graph(m) {
+  stick kb = toolchains_for(m)
+  PROJECT_NAME = project_of(m)
+  roll tasks = {}
+  roll comps = {}
+  stick defined = m.get("components", {})
+  if type_of(defined) == "map" {
+    for name in defined {
+      stick c = defined[name]
+      if type_of(c) == "map" {
+        comps[name] = resolve_component(name, c, kb).merge({name: name, spec: c})
+      }
+    }
+  }
+  for name in comps {
+    stick r = comps[name]
+    stick after = as_list(r.spec.get("after", [])).map(pack(x) => str(x))
+    for stage in r.stages {
+      roll needs = stage_deps(r.stages, stage, r.order).map(pack(d) => "${name}:${d}")
+      for other in after {
+        if comps.has(other) and comps[other].stages.has(stage) {
+          needs.push("${other}:${stage}")
+        }
+      }
+      tasks["${name}:${stage}"] = component_task(name, r, stage, r.stages[stage], needs)
+    }
+    for x in r.extras {
+      stick needs = pick(r.stages.has("setup"), ["${name}:setup"], [])
+      tasks["${name}:${x}"] = component_task(name, r, x, r.extras[x], needs).merge({extra: true})
+    }
+  }
+  for stage in GROUP_STAGES {
+    stick members = comps.keys().filter(pack(n) => comps[n].spec.get("groups", true) != false and comps[n].stages.has(stage)).map(pack(n) => "${n}:${stage}")
+    if not members.is_empty() {
+      tasks[stage] = {group: true, needs: members, desc: "${stage}, in every component that has it", origin: "stage group"}
+    }
+  }
+  stick own = m.get("tasks", {})
+  if type_of(own) == "map" {
+    for name in own {
+      stick t = own[name]
+      if type_of(t) == "map" {
+        tasks[name] = manifest_task(t)
+      } else {
+        tasks[name] = {bad: true, needs: [], origin: MANIFEST, value: t}
+      }
+    }
+  }
+  # `ci` is every CI stage there is, a stage group or a task of the same name
+  # written by hand; a `ci` of the project's own wins.
+  stick ci = CI_STAGES.filter(pack(s) => tasks.has(s) and not tasks[s].get("bad", false))
+  if not ci.is_empty() and not tasks.has("ci") {
+    tasks["ci"] = {group: true, needs: ci, desc: "format-check, lint, check, build and test, everywhere", origin: "stage group"}
+  }
+  for name in tasks {
+    stick t = tasks[name]
+    for ref in refs_of(t, tasks) {
+      if ref != name and not t.needs.contains(ref) {
+        t.needs.push(ref)
+      }
+    }
+  }
+  snuff {tasks: tasks, components: comps, kb: kb, manifest: m}
+}
+
+pull known(tasks, wanted) {
+  stick names = tasks.keys()
+  stick close = similar(names, wanted, {})
+  if not close.is_empty() {
+    snuff "did you mean ${close.slice(0, 3).join(" or ")}?"
+  }
+  if names.is_empty() {
+    snuff "there are no tasks yet"
+  }
+  snuff "tasks here: ${names.slice(0, 8).join(", ")}" + pick(names.len() > 8, ", ...", "")
+}
+
+# The tasks to run for `wanted`, dependencies first, each once. Groups are in
+# the order too, as markers; they run nothing.
+pull resolve(tasks, wanted, only) {
+  for name in wanted {
+    if not tasks.has(name) {
+      cough "no task named `${name}`; ${known(tasks, name)}"
+    }
+  }
+  if only {
+    roll flat = []
+    pull expand(name) {
+      stick t = tasks[name]
+      if t.get("group", false) {
+        for n in t.needs {
+          if tasks.has(n) {
+            expand(n)
+          }
+        }
+      } else if not flat.contains(name) {
+        flat.push(name)
+      }
+    }
+    for name in wanted {
+      expand(name)
+    }
+    snuff flat
+  }
+  roll order = []
+  roll done = {}
+  pull visit(name, trail) {
+    if done.has(name) {
+      snuff
+    }
+    if trail.contains(name) {
+      cough "dependency loop: ${(trail + [name]).join(" > ")}"
+    }
+    if not tasks.has(name) {
+      cough "`${trail.last()}` needs `${name}`, and there is no task by that name; ${known(tasks, name)}"
+    }
+    for dep in tasks[name].get("needs", []) {
+      visit(dep, trail + [name])
+    }
+    done[name] = true
+    order.push(name)
+  }
+  for name in wanted {
+    visit(name, [])
+  }
+  snuff order
+}
+
+pull resolve_or_fail(tasks, wanted, only) {
+  roll order = null
+  try {
+    order = resolve(tasks, wanted, only)
+  } ashtray e {
+    fail(e.message)
+  }
+  snuff order
+}
+
+pull runnable(tasks, order) {
+  snuff order.filter(pack(n) => not tasks[n].get("group", false))
+}
+
+pull label_of(t) {
+  if t.get("group", false) {
+    snuff "(group: " + t.needs.join(", ") + ")"
+  }
+  if t.has("shell") {
+    snuff str(t.shell)
+  }
+  stick argv = argv_of(t.get("cmd", null))
+  if argv == null or argv.is_empty() {
+    snuff "(nothing to run)"
+  }
+  snuff argv.map(quote).join(" ")
+}
+
+# ----- running one task ---------------------------------------------------------------
+
+stick RUN_DIR = path.join(STATE, "run")
+stick OUTPUTS_FILE = path.join(ROOT, STATE, "run", "outputs.json")
+roll FORCE = false
+
+# name=value lines, and name<<DELIM ... DELIM blocks, as a task wrote them to
+# the file named by $CIG_OUTPUT (the format GitHub Actions uses for steps).
+pull read_named(file) {
+  roll out = {}
+  if not fs.is_file(file) {
+    snuff out
+  }
+  stick lines = fs.read_lines(file)
+  roll i = 0
+  while i < lines.len() {
+    stick line = lines[i]
+    stick block = text.captures(line, '^([A-Za-z_][A-Za-z0-9_-]*)<<(.+)$')
+    if block != null {
+      roll body = []
+      i += 1
+      while i < lines.len() and lines[i] != block[2] {
+        body.push(lines[i])
+        i += 1
+      }
+      out[block[1]] = body.join("\n")
+    } else {
+      stick kv = text.captures(line, '^([A-Za-z_][A-Za-z0-9_-]*)=(.*)$')
+      if kv != null {
+        out[kv[1]] = kv[2]
+      }
+    }
+    i += 1
+  }
+  snuff out
+}
+
+# KEY=value lines from an env file (.env style).
+pull read_env_file(file) {
+  roll out = {}
+  if not fs.is_file(file) {
+    snuff out
+  }
+  for line in fs.read_lines(file) {
+    roll s = line.trim()
+    if s == "" or s.starts_with("#") {
+      continue
+    }
+    if s.starts_with("export ") {
+      s = s.slice(7).trim()
+    }
+    stick eq = s.find("=")
+    if eq <= 0 {
+      continue
+    }
+    roll v = s.slice(eq + 1).trim()
+    if v.len() >= 2 and ((v.starts_with("\"") and v.ends_with("\"")) or (v.starts_with("'") and v.ends_with("'"))) {
+      v = v.slice(1, v.len() - 1)
+    }
+    out[s.slice(0, eq).trim()] = v
+  }
+  snuff out
+}
+
+pull hop_options(name, t, cwd, defaults, where) {
+  roll e = {}
+  for f in as_list(t.get("env_files", [])) {
+    stick vals = read_env_file(f)
+    for k in vals {
+      e[k] = vals[k]
+    }
+  }
+  stick given = t.get("env", {})
+  if type_of(given) == "map" {
+    for k in given {
+      e[k] = render(to_text(given[k]), where)
+    }
+  }
+  e.CIG_TASK = name
+  e.CIG_PROJECT_ROOT = ROOT
+  e.CIG_OUTPUT = path.join(ROOT, RUN_DIR, slug(name) + ".out")
+  e.CIG_OUTPUTS = OUTPUTS_FILE
+  if t.has("component") {
+    e.CIG_COMPONENT = t.component
+  }
+  roll o = {timeout_ms: int(t.get("timeout_ms", defaults.get("timeout_ms", 600000))), env: e}
+  if cwd != "." {
+    o.cwd = cwd
+  }
+  snuff o
+}
+
+pull captured(kind, out, name) {
+  if kind == "text" {
+    snuff out.trim()
+  }
+  if kind == "lines" {
+    snuff out.lines().filter(pack(l) => l.trim() != "")
+  }
+  if kind == "kv" {
+    roll m = {}
+    for line in out.lines() {
+      stick c = text.captures(line.trim(), '^(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.*)$')
+      if c != null {
+        m[c[1]] = c[2]
+      }
+    }
+    snuff m
+  }
+  if kind == "json" {
+    roll v = null
+    try {
+      v = json.parse(out)
+    } ashtray e {
+      cough {message: "task `${name}` captures json, and its stdout is not JSON: ${tidy(out)}", task: name, exit_code: 0}
+    }
+    snuff v
+  }
+  cough {message: "task `${name}`: capture must be one of ${CAPTURES.join(", ")}", task: name, exit_code: 0}
+}
+
+pull exposure(value, named) {
+  if named.is_empty() {
+    snuff value
+  }
+  if value == null {
+    snuff named
+  }
+  snuff named.merge({value: value})
+}
+
+pull remember(name, value, named, raw) {
+  RAW[name] = raw
+  if value != null or not named.is_empty() {
+    EXPOSED[name] = exposure(value, named)
+  }
+}
+
+# Files matching a glob under `cwd`. (cig 1.1.1 matches nothing for a pattern
+# that starts with `./`, and can list "" among the matches.)
+pull glob_under(cwd, pattern) {
+  stick p = path.join(cwd, pattern)
+  snuff fs.glob(pick(p.starts_with("./"), p.slice(2), p)).filter(pack(x) => x != "").sort()
+}
+
+# What a task's last success depended on: the command as rendered (so a value
+# from an earlier task that changed runs it again), its environment and stdin,
+# and every input file's size and time. Inputs can be files, directories or
+# globs (`src/**/*.ts`).
+pull fingerprint(cwd, inputs, salt) {
+  roll parts = [salt]
+  roll count = 0
+  pull walk(p, rel) {
+    if count > 20000 {
+      snuff
+    }
+    if fs.is_dir(p) {
+      for child in fs.list(p).sort() {
+        stick b = path.base(child)
+        if not FINGERPRINT_SKIP.contains(b) {
+          walk(child, rel + "/" + b)
+        }
+      }
+    } else if fs.is_file(p) {
+      count += 1
+      parts.push("${rel}\t${fs.size(p)}\t${fs.modified_ms(p)}")
+    } else {
+      parts.push("${rel}\tabsent")
+    }
+  }
+  for i in inputs {
+    stick pattern = str(i)
+    if pattern.contains("*") or pattern.contains("?") or pattern.contains("[") {
+      stick matches = glob_under(cwd, pattern)
+      if matches.is_empty() {
+        parts.push("${pattern}\tno match")
+      }
+      for m in matches {
+        walk(m, m)
+      }
+    } else {
+      walk(path.join(cwd, pattern), pattern)
+    }
+  }
+  if count > 20000 {
+    snuff null
+  }
+  snuff hash.sha256(parts.join("\n"))
+}
+
+pull state_file(name) {
+  snuff path.join(STATE, "state", slug(name) + ".json")
+}
+
+pull state_of(name) {
+  stick f = state_file(name)
+  if not fs.is_file(f) {
+    snuff null
+  }
+  roll st = null
+  try {
+    st = json.load(f)
+  } ashtray e {
+    st = null
+  }
+  snuff st
+}
+
+# Is `p` (a path or a glob, like dist/*.whl) there after the task?
+pull made(cwd, p) {
+  if p.contains("*") or p.contains("?") or p.contains("[") {
+    snuff not glob_under(cwd, p).is_empty()
+  }
+  snuff fs.exists(path.join(cwd, p))
+}
+
+pull produced(cwd, t) {
+  snuff as_list(t.get("produces", [])).all(pack(p) => made(cwd, str(p)))
+}
+
+pull undo_of(t, where) {
+  if t.has("undo_shell") {
+    stick line = render(str(t.undo_shell), where)
+    snuff {shell: line, label: line}
+  }
+  if t.has("undo") {
+    stick argv = render_argv(argv_of(t.undo) ?? [], where)
+    if not argv.is_empty() {
+      snuff {argv: argv, label: argv.map(quote).join(" ")}
+    }
+  }
+  snuff null
+}
+
+# One attempt: the hop, its log, its output shown, its verdict. A command that
+# cannot start, or runs out of time, is a failed attempt like any other.
+pull attempt(name, t, cmd, opts, n) {
+  stick started = time.now_ms()
+  roll r = null
+  burn {
+    if fs.exists(opts.env.CIG_OUTPUT) {
+      fs.rm(opts.env.CIG_OUTPUT)
+    }
+    try {
+      if cmd.has("shell") {
+        r = proc.shell(cmd.shell, opts)
+      } else {
+        r = proc.run(cmd.argv.first(), cmd.argv.slice(1), opts)
+      }
+    } ashtray e {
+      r = {code: -1, out: "", err: e.message + "\n", duration_ms: time.now_ms() - started}
+    }
+    fs.append_text("${STATE}/logs/${slug(name)}.log",
+      "== ${time.now_iso()} attempt ${n}: ${cmd.label}\n" + r.out + r.err +
+      "== exit ${r.code} in ${r.duration_ms} ms\n\n")
+  }
+  stick simulated = r.get("simulated", false)
+  if simulated {
+    DRY = true
+  }
+  for line in r.out.trim_end().lines() {
+    exhale "    " + line
+  }
+  for line in r.err.trim_end().lines() {
+    exhale "    " + line
+  }
+  snuff {code: r.code, ok: ok_codes(t).contains(r.code), ms: time.now_ms() - started, out: r.out, simulated: simulated}
+}
+
+pull failure(name, cmd, result, n) {
+  snuff {
+    message: "task `${name}` failed: ${clip(cmd.label, 100)} exited ${result.code}" + pick(n > 1, " after ${n} attempts", ""),
+    task: name,
+    exit_code: result.code,
+  }
+}
+
+pull run_task(ctx, name, index, total) {
+  stick t = ctx.tasks[name]
+  stick where = "task `${name}`"
+  stick d = ctx.defaults
+  stick cwd = render(str(t.get("cwd", ".")), where)
+  stick more = pick(name == ctx.last, extra, [])
+  roll cmd = null
+  if t.has("shell") {
+    roll line = render(str(t.shell), where)
+    for w in more {
+      line = line + " " + quote(w)
+    }
+    cmd = {shell: line, label: line}
+  } else {
+    stick argv = render_argv(argv_of(t.get("cmd", null)) ?? [], where) + more
+    if argv.is_empty() {
+      cough {message: "task `${name}` has nothing to run; `cigo check` looks it over", task: name, exit_code: -1}
+    }
+    cmd = {argv: argv, label: argv.map(quote).join(" ")}
+  }
+  stick opts = hop_options(name, t, cwd, d, where)
+  if t.has("stdin_from") {
+    opts.stdin = RAW.get(str(t.stdin_from), "")
+  } else if t.has("stdin") {
+    opts.stdin = render(str(t.stdin), where)
+  }
+  exhale "[${index}/${total}] ${name}: ${cmd.label}" + pick(cwd == ".", "", "   (in ${cwd})")
+  # Up to date: its inputs are as they were after its last success, and what
+  # it produces is still there.
+  roll before = null
+  stick salt = json.stringify({cmd: cmd.label, env: opts.env, stdin: opts.get("stdin", null)})
+  if t.has("inputs") {
+    before = fingerprint(cwd, as_list(t.inputs), salt)
+    stick st = state_of(name)
+    if not FORCE and before != null and st != null and st.get("fingerprint", "") == before and produced(cwd, t) {
+      remember(name, st.get("value", null), st.get("named", {}), st.get("raw", ""))
+      exhale "    up to date; `--force` runs it anyway"
+      snuff {task: name, exit_code: 0, ms: 0, attempts: 0, skipped: true, simulated: false}
+    }
+  }
+  stick tries = int(t.get("retries", d.get("retries", 0))) + 1
+  stick delay = int(t.get("retry_delay_ms", d.get("retry_delay_ms", 0)))
+  roll result = null
+  roll n = 0
+  pull attempts() {
+    while n < tries and (result == null or not result.ok) {
+      n += 1
+      if n > 1 and delay > 0 {
+        time.sleep_ms(delay)
+      }
+      result = attempt(name, t, cmd, opts, n)
+      if not result.ok and n < tries {
+        exhale "    exit ${result.code}; trying again (${n + 1} of ${tries})"
+      }
+    }
+  }
+  stick undo = undo_of(t, where)
+  if undo == null {
+    attempts()
+    if not result.ok {
+      cough failure(name, cmd, result, n)
+    }
+  } else {
+    # The undo is journaled as a compensation once the task succeeds: a later
+    # failure in this run, or `cig unburn` weeks from now, runs it with this
+    # state. A task that failed has nothing to undo, so none is recorded.
+    burn (s) {
+      s.task = name
+      s.undo = undo
+      s.cwd = cwd
+      s.env = opts.env
+      s.timeout_ms = opts.timeout_ms
+      attempts()
+      if not result.ok {
+        cough failure(name, cmd, result, n)
+      }
+    } unburn {
+      log.warn("undoing ${s.task}: ${s.undo.label}")
+      stick how = {cwd: s.cwd, env: s.env, timeout_ms: s.timeout_ms, check: true}
+      roll done = null
+      if s.undo.has("shell") {
+        done = proc.shell(s.undo.shell, how)
+      } else {
+        done = proc.run(s.undo.argv.first(), s.undo.argv.slice(1), how)
+      }
+      for line in (done.out + done.err).trim_end().lines() {
+        exhale "    " + line
+      }
+    }
+  }
+  # What it made, and what it said.
+  if not result.simulated {
+    stick missing = as_list(t.get("produces", [])).map(pack(p) => str(p)).filter(pack(p) => not made(cwd, p))
+    if not missing.is_empty() {
+      cough {message: "task `${name}` exited ${result.code} but did not produce ${missing.join(", ")}", task: name, exit_code: result.code}
+    }
+  }
+  roll value = null
+  if t.has("capture") and not result.simulated {
+    value = captured(str(t.capture), result.out, name)
+  }
+  stick named = pick(result.simulated, {}, read_named(opts.env.CIG_OUTPUT))
+  remember(name, value, named, result.out)
+  roll after = null
+  if before != null and not result.simulated {
+    after = fingerprint(cwd, as_list(t.inputs), salt)
+  }
+  if EXPOSED.has(name) or after != null {
+    burn {
+      json.save(OUTPUTS_FILE, EXPOSED, 2)
+      if after != null {
+        json.save(state_file(name), {fingerprint: after, value: value, named: named, raw: pick(result.out.len() <= 1000000, result.out, "")}, 2)
+      }
+    }
+  }
+  roll said = ""
+  if EXPOSED.has(name) {
+    said = "; output: " + tidy(to_text(EXPOSED[name])).slice(0, 60)
+  }
+  exhale "    ok, ${duration(result.ms)}" + pick(n > 1, " (attempt ${n})", "") + said
+  snuff {task: name, exit_code: result.code, ms: result.ms, attempts: n, skipped: false, simulated: result.simulated}
+}
+
+pull do_run(g, wanted) {
+  expect_flags(["--only", "--force"])
+  if wanted.is_empty() {
+    fail("run what? `cigo run <task>`, or one stage everywhere: `cigo run test`; `cigo list` shows them")
+  }
+  FORCE = flags.contains("--force")
+  stick tasks = g.tasks
+  ONLY = flags.contains("--only")
+  stick order = resolve_or_fail(tasks, wanted, ONLY)
+  stick names = runnable(tasks, order)
+  for n in names {
+    if tasks[n].get("bad", false) {
+      fail("task `${n}` is not a map; `cigo check` says what is wrong with it")
+    }
+  }
+  if names.is_empty() {
+    exhale "nothing to run: no component here has ${wanted.join(", ")}"
+    snuff
+  }
+  stick last = wanted.last()
+  if not extra.is_empty() and tasks[last].get("group", false) {
+    fail("arguments after `--` go to one task, and `${last}` is a group; name one of ${tasks[last].needs.join(", ")}")
+  }
+  for n in names {
+    if tasks[n].has("unresolved") {
+      fail("task `${n}` cannot run: ${tasks[n].unresolved}; `cigo check` lists every problem")
+    }
+  }
+  stick ctx = {tasks: tasks, defaults: g.manifest.get("defaults", {}), last: last}
+  burn {
+    fs.mkdir(RUN_DIR)
+    json.save(OUTPUTS_FILE, {}, 2)
+  }
+  exhale "${PROJECT_NAME}: ${names.join(" > ")}"
+  stick started = time.now_ms()
+  stick steps = names.enumerate().map(pack(pair) => pack() => run_task(ctx, pair[1], pair[0] + 1, names.len()))
+  roll report = null
+  roll failed = null
+  try {
+    report = light(steps, {names: names, quiet: true})
+  } ashtray e {
+    failed = e
+  }
+  if failed != null {
+    stick cause = failed.get("cause", {})
+    exhale ""
+    exhale "stopped at ${failed.get("step", "a task")}; cig puts back what this run changed, newest first"
+    # Coughing is what makes cig roll the run back, and its report quotes this
+    # line, so the line says what happened.
+    stick the_run_failed = {message: cause.get("message", failed.message), task: cause.get("task", failed.get("step", ""))}
+    cough the_run_failed
+  }
+  stick results = report.steps.map(pack(step) => step.result)
+  stick skipped = results.filter(pack(r) => r.skipped).len()
+  burn {
+    json.save("${STATE}/reports/${time.stamp()}.json", {
+      project: PROJECT_NAME, targets: wanted, order: names, ok: true,
+      ms: time.now_ms() - started, tasks: results, outputs: EXPOSED, finished: time.now_iso(),
+    }, 2)
+  }
+  exhale ""
+  if DRY {
+    exhale "dry run: ${names.len()} task" + pick(names.len() == 1, "", "s") + " planned, none executed; the plan follows"
+  } else {
+    exhale "done: ${names.len()} task" + pick(names.len() == 1, "", "s") + pick(skipped > 0, " (${skipped} up to date)", "") + " in ${duration(time.now_ms() - started)}. Output is in ${STATE}/logs; `cig unburn <run>` undoes all of it."
+  }
+}
+
+# ----- adopt: find every language in the project -----------------------------------
+
+stick INFRA_FAMILIES = ["container", "compose", "helm", "terraform"]
+stick SHELL_CHARS = ["|", "&", ";", ">", "<", "$", "`", "*", "?", "'", "\"", "~"]
+
+pull discover(kb, depth_limit) {
+  roll comps = {}
+  roll notes = []
+  pull add(name, spec) {
+    roll n = name
+    roll i = 2
+    while comps.has(n) {
+      n = "${name}-${i}"
+      i += 1
+    }
+    comps[n] = spec
+    snuff n
+  }
+  pull visit(dir, depth, inherited) {
+    stick found = detect_here(dir, kb)
+    roll ws = inherited.copy()
+    roll natives = []
+    roll runners = []
+    roll claimed = null
+    for id in found {
+      stick tc = kb[id]
+      stick fam = tc.get("family", id)
+      if inherited.has(fam) {
+        continue
+      }
+      if tc.get("kind", "native") == "runner" {
+        # A script folder's scripts belong to the directory above it.
+        if tc.get("targets", "") == "scripts" and (targets_of(dir, "scripts").is_empty() or SCRIPT_DIRS.contains(path.base(dir))) {
+          continue
+        }
+        runners.push(id)
+      } else {
+        natives.push(id)
+        if tc.get("claims_subtree", false) {
+          claimed = id
+        }
+      }
+      if holds(dir, as_list(tc.get("workspace", []))) {
+        ws[fam] = dir
+      }
+    }
+    # A folder of scripts is the project's (at the root) or a language's (beside
+    # its manifest); elsewhere it is somebody's tooling, not a component.
+    if dir != "." and natives.is_empty() {
+      runners = runners.filter(pack(id) => kb[id].get("targets", "") != "scripts")
+    }
+    # Languages first, then images, charts and infrastructure.
+    stick ordered = natives.filter(pack(id) => not INFRA_FAMILIES.contains(kb[id].get("family", ""))) + natives.filter(pack(id) => INFRA_FAMILIES.contains(kb[id].get("family", "")))
+    stick base = slug(pick(dir == ".", PROJECT_NAME, path.base(dir)))
+    for pair in ordered.enumerate() {
+      stick short = kb[pair[1]].get("short", pair[1])
+      add(pick(dir == ".", short, pick(pair[0] == 0, base, base + "-" + short)), {path: dir, toolchain: pair[1]})
+    }
+    # Only one runner per directory joins the stage groups, so a build that a
+    # Makefile and a justfile both define does not run twice.
+    roll grouped = null
+    for id in runners {
+      stick short = kb[id].get("short", id)
+      roll spec = {path: dir, toolchain: id}
+      if not natives.is_empty() or grouped != null {
+        spec.groups = false
+      }
+      stick label = add(pick(dir == ".", short, base + "-" + short), spec)
+      if not natives.is_empty() {
+        notes.push({about: [label], text: "${label}: its targets are tasks (${label}:<target>), kept out of the stage groups because ${kb[ordered.first()].get("short", "")} commands already cover ${pick(dir == ".", "the project root", dir)}; set \"groups\": true to use them instead"})
+      } else if grouped != null {
+        notes.push({about: [label], text: "${label}: its targets are tasks (${label}:<target>), kept out of the stage groups because ${grouped} already runs the stages in ${pick(dir == ".", "the project root", dir)}; set \"groups\": true to run both"})
+      } else {
+        grouped = label
+      }
+    }
+    if claimed != null {
+      notes.push({about: [], text: "${pick(dir == ".", "the project", dir)} is built by ${kb[claimed].get("short", claimed)}; nothing below it was looked at"})
+      snuff
+    }
+    if depth < depth_limit {
+      for child in entries_of(dir).sort() {
+        stick p = pick(dir == ".", child, dir + "/" + child)
+        if not child.starts_with(".") and not WALK_SKIP.contains(child) and not (not natives.is_empty() and TEST_DIRS.contains(child)) and fs.is_dir(p) {
+          visit(p, depth + 1, ws)
+        }
+      }
+    }
+  }
+  visit(".", 0, {})
+  # A task runner at the root of a project with components below it usually
+  # chains them: the stage groups do that now, so its targets stay out of them.
+  stick deeper = comps.values().any(pack(c) => c.path != ".")
+  roll at_root = []
+  if deeper {
+    for name in comps {
+      stick c = comps[name]
+      if c.path == "." and kb[c.toolchain].get("kind", "native") == "runner" {
+        c.groups = false
+        at_root.push(name)
+      }
+    }
+  }
+  if at_root.is_empty() {
+    snuff {components: comps, notes: notes}
+  }
+  # One reason covers them all, so it replaces what was said about each.
+  roll kept = notes.filter(pack(n) => not n.about.any(pack(k) => at_root.contains(k)))
+  kept.push({about: at_root, text: "${at_root.join(", ")}: at the root of a project with components below it, these usually chain the others, which the stage groups now do; their targets stay available as <name>:<target>"})
+  snuff {components: comps, notes: kept}
+}
+
+pull soft_manifest() {
+  roll m = {}
+  if fs.is_file(MANIFEST) {
+    try {
+      m = json.load(MANIFEST)
+    } ashtray e {
+      m = {}
+    }
+  }
+  snuff pick(type_of(m) == "map", m, {})
+}
+
+# Does the toolchain a manifest names still fit `dir` at least as well as the
+# one adopt would choose now? A project that moved from npm to pnpm, or from
+# pip to uv, no longer does; a toolchain of the project's own always does.
+pull fits_as_well(kb, old_id, new_id, dir) {
+  stick old = kb.get(old_id, {})
+  snuff holds_all(dir, as_list(old.get("detect", []))) and old.get("priority", 10) >= kb.get(new_id, {}).get("priority", 10)
+}
+
+# Adopting again finds the project again and keeps what the manifest already
+# says: a component found again (same directory, same kind of toolchain) keeps
+# its name and settings, and one written by hand stays while its directory does.
+pull merge_components(found, before, kb) {
+  pull family_of(id) {
+    snuff pick(kb.has(id), kb.get(id, {}).get("family", id), id)
+  }
+  roll out = {}
+  roll used = []
+  roll matched = []
+  roll notes = []
+  for name in found {
+    stick c = found[name]
+    roll hit = null
+    for oldname in before {
+      stick was = before[oldname]
+      if not used.contains(oldname) and type_of(was) == "map" and str(was.get("path", ".")) == c.path and family_of(str(was.get("toolchain", ""))) == family_of(c.toolchain) {
+        hit = oldname
+        break
+      }
+    }
+    if hit != null {
+      used.push(hit)
+      matched.push(name)
+      stick was = before[hit]
+      stick old_id = str(was.get("toolchain", ""))
+      if old_id != c.toolchain and TOOLCHAINS.has(old_id) and not fits_as_well(kb, old_id, c.toolchain, c.path) {
+        out[hit] = was.merge({toolchain: c.toolchain})
+        notes.push({about: [], text: "${hit}: ${old_id} no longer fits ${c.path}, so it is ${c.toolchain} now; if ${old_id} was on purpose, set it back in ${MANIFEST}"})
+      } else {
+        out[hit] = was
+      }
+    } else {
+      roll n = name
+      roll i = 2
+      while out.has(n) or before.has(n) {
+        n = "${name}-${i}"
+        i += 1
+      }
+      out[n] = c
+      if not before.is_empty() {
+        notes.push({about: [], text: "${n}: new since the manifest was written"})
+      }
+    }
+  }
+  for oldname in before {
+    stick was = before[oldname]
+    if used.contains(oldname) or type_of(was) != "map" {
+      continue
+    }
+    if fs.is_dir(str(was.get("path", "."))) {
+      out[oldname] = was
+      notes.push({about: [], text: "${oldname}: kept as the manifest has it; adopt would not have found it"})
+    } else {
+      notes.push({about: [], text: "${oldname}: dropped, because ${was.get("path", ".")} is no longer a directory"})
+    }
+  }
+  snuff {components: out, matched: matched, notes: notes}
 }
 
 pull do_adopt() {
-  expect_flags(["--write", "--force"])
+  expect_flags(["--write", "--force", "--depth"])
   expect_no_targets()
-  stick found = discover()
-  stick tasks = found.tasks
-  stick manifest = {project: path.base(fs.cwd()), tasks: tasks}
-  stick body = json.stringify(manifest, 2) + "\n"
-  for note in found.notes {
-    log.info(note)
+  stick depth = int(flag_value("--depth", "3"))
+  stick old = soft_manifest()
+  stick kb = toolchains_for(old)
+  stick found = discover(kb, depth)
+  stick before = old.get("components", {})
+  stick merged = merge_components(found.components, pick(type_of(before) == "map", before, {}), kb)
+  stick comps = merged.components
+  # Advice about components the manifest already describes is not repeated.
+  stick notes = (found.notes.filter(pack(n) => n.about.is_empty() or not n.about.all(pack(k) => merged.matched.contains(k))) + merged.notes).map(pack(n) => n.text)
+  roll manifest = {project: PROJECT_NAME, components: comps}
+  for key in ["defaults", "toolchains", "tasks"] {
+    if old.has(key) {
+      manifest[key] = old[key]
+    }
   }
-  if tasks.is_empty() {
-    log.warn("found no scripts, make targets, npm scripts or just recipes here; ${MANIFEST} can still be written by hand (the README has the format)")
+  stick body = json.stringify(manifest, 2) + "\n"
+  if comps.is_empty() {
+    log.warn("found no toolchain, task runner or script folder here; ${MANIFEST} can still be written by hand (the README has the format)")
+  } else {
+    stick width = comps.keys().map(pack(k) => k.len()).max()
+    log.info("found ${comps.len()} component" + pick(comps.len() == 1, "", "s") + ":")
+    for name in comps {
+      stick r = resolve_component(name, comps[name], kb)
+      stick stages = STAGES.filter(pack(s) => r.stages.has(s))
+      log.info("  ${name.pad_right(width)}  ${str(comps[name].toolchain).pad_right(14)}  ${comps[name].path.pad_right(16)}  ${pick(stages.is_empty(), "no stages", stages.join(" "))}" + pick(r.extras.is_empty(), "", " +${r.extras.len()} more"))
+    }
+  }
+  for note in notes {
+    log.info(note)
   }
   if not flags.contains("--write") {
     exhale body.trim_end()
-    log.info("found ${tasks.len()} task(s); `cigo adopt --write` saves this as ${MANIFEST}, then `cigo check`")
+    log.info("`cigo adopt --write` saves this as ${MANIFEST}; then `cigo check`, and `after` puts components in order")
     snuff
   }
   if fs.exists(MANIFEST) and not flags.contains("--force") {
-    fail("${MANIFEST} already exists; `cigo adopt` prints what it would write, and `--force` replaces it")
+    fail("${MANIFEST} already exists; `cigo adopt` prints what it would write, and `--force` writes it: components found again keep their names and settings, and its tasks, toolchains and defaults are kept")
   }
   burn {
     fs.write_text(MANIFEST, body)
   }
-  exhale "wrote ${MANIFEST}: ${tasks.len()} task(s) from ${tasks.values().map(pack(t) => t.source).unique().len()} source(s)"
-  exhale "next: `cigo check`, then add `needs` to put them in order"
-  exhale "logs and reports go in ${STATE}/; add it to .gitignore"
+  exhale "wrote ${MANIFEST}: ${comps.len()} component" + pick(comps.len() == 1, "", "s")
+  exhale "next: `cigo check`, `cigo list`, then `cigo run ci` or any stage everywhere"
+  exhale "logs, reports and outputs go in ${STATE}/; add it to .gitignore"
 }
 
-# ----- dispatch -------------------------------------------------------------
+# ----- looking at the graph ------------------------------------------------------------
+
+pull do_help() {
+  exhale "cig-orchestrator ${VERSION}: every language in the project, one chain, no glue script."
+  exhale ""
+  exhale "  cigo adopt [--write] [--force] [--depth=N]"
+  exhale "                              find every language, task runner and script folder here;"
+  exhale "                              propose ${MANIFEST}"
+  exhale "  cigo list [--all]           components, stage groups and tasks"
+  exhale "  cigo run <task>... [--only] [--force] [-- <args for the last task named>]"
+  exhale "                              `cigo run test` tests every language, `cigo run ci` does"
+  exhale "                              format-check, lint, check, build and test everywhere"
+  exhale "  cigo plan [<task>...] [--only]"
+  exhale "                              the order a run would take"
+  exhale "  cigo show <task>            where a task comes from and everything it will do"
+  exhale "  cigo check                  the manifest, checked before anything runs"
+  exhale "  cigo doctor                 each toolchain: installed, which version, against the project's pins"
+  exhale "  cigo outputs [<task>...]    what the last run's tasks handed on"
+  exhale "  cigo toolchains [<name>] [--markdown]"
+  exhale "                              the toolchains this knows"
+  exhale ""
+  exhale "Stages: ${STAGES.join(", ")}."
+  exhale "cig's own flags go before the command: `cigo --dry-run run ci`, `cigo --no-rollback run build`."
+  exhale "Afterwards: `cig runs` lists every run, `cig unburn <run>` undoes one."
+}
+
+# Tasks as a person reads them: each component's in stage order with its other
+# targets after, components in manifest order, then the manifest's own tasks.
+pull list_order(tasks, comps, names) {
+  stick comp_names = comps.keys()
+  roll keyed = []
+  for pair in names.enumerate() {
+    stick name = pair[1]
+    stick t = tasks[name]
+    stick ci = comp_names.index_of(str(t.get("component", name.split(":").first())))
+    stick si = STAGES.index_of(str(t.get("stage", name.split(":").last())))
+    stick c_rank = pick(ci < 0, comp_names.len(), ci)
+    stick s_rank = pick(si < 0 or t.get("extra", false), STAGES.len(), si)
+    keyed.push([c_rank * 1000000000 + s_rank * 1000000 + pair[0], name])
+  }
+  snuff keyed.sort_by(pack(k) => k[0]).map(pack(k) => k[1])
+}
+
+# One line per task in a listing; `cigo show <task>` prints the whole command.
+pull clip(line, n) {
+  if line.len() <= n {
+    snuff line
+  }
+  snuff line.slice(0, n - 3) + "..."
+}
+
+pull do_list(g) {
+  expect_flags(["--all"])
+  expect_no_targets()
+  stick all = flags.contains("--all")
+  stick tasks = g.tasks
+  stick comps = g.components
+  stick shown = list_order(tasks, comps, tasks.keys().filter(pack(n) => not tasks[n].get("group", false) or tasks[n].origin == MANIFEST).filter(pack(n) => all or not tasks[n].get("extra", false)))
+  stick hidden = tasks.keys().filter(pack(n) => tasks[n].get("extra", false)).len()
+  if comps.is_empty() {
+    exhale "${PROJECT_NAME}: ${shown.len()} task" + pick(shown.len() == 1, "", "s") + " in ${MANIFEST}"
+  } else {
+    stick runnable_count = tasks.keys().filter(pack(n) => not tasks[n].get("group", false)).len()
+    exhale "${PROJECT_NAME}: ${comps.len()} component" + pick(comps.len() == 1, "", "s") + ", ${runnable_count} tasks in ${MANIFEST}"
+    exhale ""
+    exhale "components"
+    stick cw = comps.keys().map(pack(k) => k.len()).max()
+    for name in comps {
+      stick r = comps[name]
+      roll line = "  ${name.pad_right(cw)}  ${str(r.toolchain).pad_right(14)}  ${r.dir}"
+      stick after = as_list(r.spec.get("after", []))
+      if not after.is_empty() {
+        line = line + "   after ${after.join(", ")}"
+      }
+      if r.spec.get("groups", true) == false {
+        line = line + "   (not in the stage groups)"
+      }
+      if r.has("error") {
+        line = line + "   " + r.error
+      }
+      exhale line
+      if r.spec.get("desc", "") != "" {
+        exhale "  ${" ".repeat(cw)}  # ${r.spec.desc}"
+      }
+    }
+    exhale ""
+    exhale "stage groups: `cigo run <stage>` runs it in every component"
+    for stage in GROUP_STAGES + ["ci"] {
+      if tasks.has(stage) and tasks[stage].get("group", false) and tasks[stage].origin != MANIFEST {
+        stick who = pick(stage == "ci", tasks[stage].needs, tasks[stage].needs.map(pack(n) => n.split(":").first()))
+        exhale "  ${stage.pad_right(12)}  ${who.join(", ")}"
+      }
+    }
+    exhale ""
+    exhale "tasks"
+  }
+  if shown.is_empty() {
+    exhale "  (none)"
+    snuff
+  }
+  stick width = shown.map(pack(x) => x.len()).max()
+  for name in shown {
+    stick t = tasks[name]
+    if t.get("bad", false) {
+      exhale "  ${name.pad_right(width)}  (not a task; `cigo check` says why)"
+      continue
+    }
+    roll line = "  ${name.pad_right(width)}  ${clip(label_of(t), 72)}"
+    if t.get("cwd", ".") != "." {
+      line = line + "   (in ${t.cwd})"
+    }
+    if t.origin == MANIFEST {
+      stick needs = needs_of(t)
+      if not needs.is_empty() and not t.get("group", false) {
+        line = line + "   needs ${needs.join(", ")}"
+      }
+    }
+    if t.has("undo") or t.has("undo_shell") {
+      line = line + "  [undo]"
+    }
+    if t.has("retries") {
+      line = line + "  [retries ${t.retries}]"
+    }
+    if t.has("capture") {
+      line = line + "  [captures ${t.capture}]"
+    }
+    exhale line
+    if t.has("desc") and t.desc != "" {
+      exhale "  ${" ".repeat(width)}  # ${t.desc}"
+    }
+  }
+  if not all and hidden > 0 {
+    exhale "  ... and ${hidden} more from scripts and task runners; `cigo list --all` shows them"
+  }
+}
+
+pull do_show(g) {
+  expect_flags([])
+  if targets.len() != 1 {
+    fail("show which task? `cigo show <task>`")
+  }
+  stick name = targets.first()
+  stick tasks = g.tasks
+  if not tasks.has(name) {
+    fail("no task named `${name}`; ${known(tasks, name)}")
+  }
+  stick t = tasks[name]
+  exhale name
+  exhale "  from       ${t.get("origin", "")}"
+  if t.has("desc") and t.desc != "" {
+    exhale "  about      ${t.desc}"
+  }
+  if t.get("group", false) {
+    exhale "  runs       every one of: ${t.needs.join(", ")}"
+    snuff
+  }
+  exhale "  runs       ${label_of(t)}"
+  exhale "  in         ${t.get("cwd", ".")}"
+  stick uses = refs_of(t, tasks)
+  stick needs = t.get("needs", [])
+  exhale "  needs      ${pick(needs.is_empty(), "nothing", needs.join(", "))}"
+  if not uses.is_empty() {
+    exhale "  uses       the output of ${uses.join(", ")}"
+  }
+  for key in ["capture", "stdin", "stdin_from", "inputs", "produces", "ok", "timeout_ms", "retries", "retry_delay_ms"] {
+    if t.has(key) {
+      exhale "  ${key.pad_right(10)} ${to_text(t[key])}"
+    }
+  }
+  if type_of(t.get("env", null)) == "map" and not t.env.is_empty() {
+    exhale "  env        ${t.env.keys().join(", ")}"
+  }
+  if not as_list(t.get("env_files", [])).is_empty() {
+    exhale "  env files  ${t.env_files.join(", ")}"
+  }
+  if t.has("undo") or t.has("undo_shell") {
+    exhale "  undo       ${to_text(t.get("undo_shell", null) ?? argv_of(t.undo).join(" "))}"
+  }
+}
+
+pull do_plan(g, wanted) {
+  expect_flags(["--only"])
+  stick tasks = g.tasks
+  stick want = pick(wanted.is_empty(), tasks.keys().filter(pack(n) => not tasks[n].get("group", false) and not tasks[n].get("extra", false)), wanted)
+  stick order = runnable(tasks, resolve_or_fail(tasks, want, flags.contains("--only")))
+  if order.is_empty() {
+    exhale "nothing to run"
+    snuff
+  }
+  stick width = order.map(pack(x) => x.len()).max()
+  exhale "${order.len()} task" + pick(order.len() == 1, "", "s") + ", in this order:"
+  for pair in order.enumerate() {
+    stick t = tasks[pair[1]]
+    exhale "  ${str(pair[0] + 1).pad_left(2)}. ${pair[1].pad_right(width)}  ${label_of(t)}" + pick(t.get("cwd", ".") == ".", "", "   (in ${t.cwd})")
+  }
+}
+
+pull close_toolchains(kb, id) {
+  roll aliases = {}
+  for k in kb {
+    aliases[k] = [str(kb[k].get("short", k))]
+  }
+  stick close = similar(kb.keys(), str(id), aliases)
+  if not close.is_empty() {
+    snuff "did you mean ${close.slice(0, 4).join(" or ")}?"
+  }
+  snuff "`cigo toolchains` lists them"
+}
+
+pull do_check(g) {
+  expect_flags([])
+  expect_no_targets()
+  stick m = g.manifest
+  stick tasks = g.tasks
+  roll problems = []
+  pull problem(level, where, message) {
+    problems.push({level: level, where: where, message: message})
+  }
+  pull hint_for(key) {
+    if NEAR_MISSES.has(key) {
+      snuff "; did you mean `${NEAR_MISSES[key]}`?"
+    }
+    snuff ""
+  }
+  stick CONDITIONS_ARE = "conditions are file:, dir:, glob:, grep:FILE:REGEX, json:FILE:key, tool: and not:"
+  pull check_conditions(where, key, conds) {
+    stick b = bad_condition(as_list(conds))
+    if b != null {
+      problem("error", where, "`${key}`: `${b}` is not a condition; ${CONDITIONS_ARE}")
+    }
+  }
+  pull check_toolchain(where, tc) {
+    for key in tc.keys() {
+      if not TOOLCHAIN_KEYS.contains(key) {
+        stick near = similar(TOOLCHAIN_KEYS, key, {})
+        if near.is_empty() {
+          problem("warning", where, "unknown key `${key}`, ignored")
+        } else {
+          problem("warning", where, "unknown key `${key}`, ignored; did you mean `${near.first()}`?")
+        }
+      }
+    }
+    for key in ["detect", "workspace"] {
+      if tc.has(key) {
+        check_conditions(where, key, tc[key])
+      }
+    }
+    for table in ["stages", "extras"] {
+      stick defs = tc.get(table, {})
+      if type_of(defs) != "map" {
+        problem("error", where, "`${table}` must be a map of names to lists of alternatives")
+        continue
+      }
+      for name in defs {
+        if table == "stages" and not STAGES.contains(name) {
+          stick near = similar(STAGES, name, {})
+          if near.is_empty() {
+            problem("warning", where, "`stages.${name}` is not a stage; a task that isn't a stage goes under `extras`")
+          } else {
+            problem("warning", where, "`stages.${name}` is not a stage; did you mean `${near.first()}`? (a task that isn't a stage goes under `extras`)")
+          }
+        }
+        stick alts = defs[name]
+        if type_of(alts) != "list" {
+          problem("error", where, "`${table}.${name}` must be a list of alternatives, like [[\"make\", \"${name}\"]]")
+          continue
+        }
+        for alt in alts {
+          if type_of(alt) == "map" {
+            if not alt.has("cmd") and not alt.has("shell") {
+              problem("error", where, "`${table}.${name}`: an alternative needs `cmd` or `shell`")
+            }
+            if alt.has("when") {
+              check_conditions(where, "${table}.${name}", alt.when)
+            }
+          } else if type_of(alt) != "list" {
+            problem("error", where, "`${table}.${name}`: an alternative is a command list or a map with `cmd` or `shell`")
+          }
+        }
+      }
+    }
+    stick vars = tc.get("vars", {})
+    if type_of(vars) != "map" {
+      problem("error", where, "`vars` must be a map of names to lists of alternatives")
+    } else {
+      for v in vars {
+        stick alts = vars[v]
+        if type_of(alts) != "list" {
+          problem("error", where, "`vars.${v}` must be a list of alternatives, like [{\"when\": [\"file:Cargo.lock\"], \"value\": [\"--locked\"]}, {\"value\": []}]")
+          continue
+        }
+        if not alts.all(pack(a) => type_of(a) == "map" and a.has("value")) {
+          problem("error", where, "`vars.${v}`: each alternative needs a `value`")
+        }
+        for a in alts {
+          if type_of(a) == "map" and a.has("when") {
+            check_conditions(where, "vars.${v}", a.when)
+          }
+        }
+      }
+    }
+  }
+  pull check_program(name, argv, cwd, level) {
+    stick prog = argv.first()
+    if prog.contains("{{") {
+      snuff
+    }
+    if prog.contains("/") {
+      if not fs.exists(path.join(cwd, prog)) {
+        problem(level, name, "`${prog}` does not exist")
+      }
+    } else if which(prog) == null {
+      problem(level, name, "`${prog}` is not on PATH")
+    }
+    for w in argv.slice(1) {
+      if not w.starts_with("-") and not w.contains("{{") and INTERPRETERS.has(path.ext(w).lower()) and not fs.exists(path.join(cwd, w)) {
+        problem("error", name, "`${w}` does not exist")
+      }
+    }
+  }
+  for key in m.keys() {
+    if not TOP_KEYS.contains(key) {
+      problem("warning", MANIFEST, "unknown key `${key}` at the top; it is ignored")
+    }
+  }
+  stick defaults = m.get("defaults", {})
+  if type_of(defaults) != "map" {
+    problem("error", MANIFEST, "`defaults` must be a map")
+  } else {
+    for key in defaults.keys() {
+      if not DEFAULT_KEYS.contains(key) {
+        problem("warning", "defaults", "unknown key `${key}`; defaults can set ${DEFAULT_KEYS.join(", ")}")
+      }
+    }
+  }
+  stick own_tc = m.get("toolchains", {})
+  if type_of(own_tc) != "map" {
+    problem("error", MANIFEST, "`toolchains` must be a map of names to definitions")
+  } else {
+    for id in own_tc {
+      stick tc = own_tc[id]
+      if type_of(tc) != "map" {
+        problem("error", "toolchain ${id}", "must be a map")
+        continue
+      }
+      if tc.has("extends") and not TOOLCHAINS.has(str(tc.extends)) and not own_tc.has(str(tc.extends)) {
+        problem("error", "toolchain ${id}", "extends `${tc.extends}`, which is not a toolchain; ${close_toolchains(g.kb, str(tc.extends))}")
+      }
+      check_toolchain("toolchain ${id}", tc)
+    }
+  }
+  stick defined = m.get("components", {})
+  if type_of(defined) != "map" {
+    problem("error", MANIFEST, "`components` must be a map")
+  } else {
+    roll told = {}
+    for name in defined {
+      stick c = defined[name]
+      if type_of(c) != "map" {
+        problem("error", name, "a component is a map like {\"path\": \"api\", \"toolchain\": \"go\"}, got a ${type_of(c)}")
+        continue
+      }
+      for key in c.keys() {
+        if not COMPONENT_KEYS.contains(key) {
+          problem("warning", name, "unknown key `${key}`, ignored${hint_for(key)}")
+        }
+      }
+      stick dir = str(c.get("path", "."))
+      if not fs.is_dir(dir) {
+        problem("error", name, "path `${dir}` is not a directory")
+      }
+      stick tc_id = c.get("toolchain", null)
+      if tc_id == null {
+        problem("error", name, "has no toolchain; `cigo toolchains` lists them")
+      } else if not g.kb.has(str(tc_id)) {
+        problem("error", name, "toolchain `${tc_id}` is not one this knows; ${close_toolchains(g.kb, str(tc_id))}")
+      } else {
+        stick tc = g.kb[str(tc_id)]
+        for tool in as_list(tc.get("tools", [])) {
+          stick key = "${tc_id}:${tool}"
+          if which(str(tool)) == null and not told.has(key) {
+            told[key] = true
+            problem("warning", name, "`${tool}` is not on PATH, so ${tc_id} tasks cannot run here" + pick(tc.has("install"), "; install: ${tc.get("install", "")}", ""))
+          }
+        }
+      }
+      for other in as_list(c.get("after", [])) {
+        if not defined.has(str(other)) {
+          problem("error", name, "is after `${other}`, which is not a component")
+        }
+      }
+      if c.has("stages") and type_of(c.stages) != "map" {
+        problem("error", name, "`stages` must be a map of stage names to commands")
+      }
+      if g.components.has(name) {
+        for trouble in as_list(g.components[name].get("problems", [])) {
+          problem("error", name, trouble)
+        }
+      }
+      if c.has("groups") and type_of(c.groups) != "bool" {
+        problem("error", name, "`groups` is true or false")
+      }
+      for f in as_list(c.get("env_file", null)) {
+        if not fs.is_file(path.join(dir, str(f))) {
+          problem("warning", name, "env_file `${f}` does not exist")
+        }
+      }
+    }
+  }
+  for name in tasks {
+    stick t = tasks[name]
+    if t.get("bad", false) {
+      problem("error", name, "a task is a map like {\"cmd\": [...]}, got a ${type_of(t.value)}")
+      continue
+    }
+    stick own = t.origin == MANIFEST
+    if t.get("group", false) and not own {
+      continue
+    }
+    if own {
+      for key in t.keys() {
+        if not TASK_KEYS.contains(key) and not ["env_files", "origin", "group"].contains(key) {
+          problem("warning", name, "unknown key `${key}`, ignored${hint_for(key)}")
+        }
+      }
+      if t.has("cmd") and t.has("shell") {
+        problem("error", name, "has both `cmd` and `shell`; keep one")
+      } else if not t.has("cmd") and not t.has("shell") and needs_of(t).is_empty() {
+        problem("error", name, "has nothing to run: give it `cmd` or `shell`, or `needs` to make it a group")
+      } else if t.has("shell") {
+        if type_of(t.shell) != "string" or t.shell.trim() == "" {
+          problem("error", name, "`shell` must be a command line (a string)")
+        }
+      } else if t.has("cmd") {
+        stick argv = argv_of(t.cmd)
+        if argv == null or argv.is_empty() {
+          problem("error", name, "`cmd` must be a list like [\"bash\", \"scripts/build.sh\"], or a string")
+        } else if type_of(t.cmd) == "string" and SHELL_CHARS.any(pack(c) => t.cmd.contains(c)) {
+          problem("warning", name, "`cmd` is split on spaces and never reaches a shell, so its quotes, pipes and globs are passed as they are; use `shell` for a command line, or write `cmd` as a list")
+        }
+      }
+      stick would_group = pick(name == "ci", CI_STAGES.any(pack(x) => x != name and g.tasks.has(x)), GROUP_STAGES.contains(name) and g.components.values().any(pack(c) => c.spec.get("groups", true) != false and c.stages.has(name)))
+      if would_group {
+        problem("warning", name, "replaces the stage group `${name}`; the components' own ${name} tasks still run when named")
+      }
+      if t.has("needs") and type_of(t.needs) != "list" and type_of(t.needs) != "string" {
+        problem("error", name, "`needs` must be a list of task names")
+      }
+      if t.has("ok") {
+        stick ok = ok_codes(t)
+        if type_of(ok) != "list" or ok.is_empty() or not ok.all(pack(c) => type_of(c) == "int") {
+          problem("error", name, "`ok` must be exit codes, like [0, 1]")
+        }
+      }
+      for key in ["timeout_ms", "retries", "retry_delay_ms"] {
+        if t.has(key) and (type_of(t[key]) != "int" or t[key] < 0) {
+          problem("error", name, "`${key}` must be a whole number, 0 or more")
+        }
+      }
+      if t.has("env") and type_of(t.env) != "map" {
+        problem("error", name, "`env` must be a map of names to values")
+      }
+      if t.has("capture") and not CAPTURES.contains(to_text(t.capture)) {
+        problem("error", name, "`capture` is one of ${CAPTURES.join(", ")}")
+      }
+      for key in ["inputs", "produces"] {
+        if t.has(key) and not as_list(t[key]).all(pack(x) => type_of(x) == "string") {
+          problem("error", name, "`${key}` is a list of paths")
+        }
+      }
+      if t.has("cwd") and not t.cwd.contains("{{") and not fs.is_dir(t.cwd) {
+        problem("error", name, "`cwd` ${t.cwd} is not a directory")
+      }
+      for f in as_list(t.get("env_files", [])) {
+        if not fs.is_file(f) {
+          problem("warning", name, "env_file `${f}` does not exist")
+        }
+      }
+      if t.has("undo") and t.has("undo_shell") {
+        problem("error", name, "has both `undo` and `undo_shell`; keep one")
+      } else if t.has("undo") {
+        stick argv = argv_of(t.undo)
+        if argv == null or argv.is_empty() {
+          problem("error", name, "`undo` must be a list like [\"bash\", \"scripts/undeploy.sh\"], or a string")
+        } else {
+          check_program(name, argv, t.cwd, "error")
+        }
+      }
+    }
+    if not t.get("group", false) {
+      stick argv = argv_of(t.get("cmd", null))
+      if argv != null and not argv.is_empty() {
+        check_program(name, argv, str(t.get("cwd", ".")), pick(own, "error", "warning"))
+      } else if not own and not t.has("shell") and not t.get("bad", false) {
+        problem("error", name, "has nothing to run: its stage or target gives it no `cmd` or `shell`")
+      }
+    }
+    for s in strings_of(t) {
+      for expr in template_exprs(s) {
+        stick base = expr_base(expr)
+        stick bar = expr.find("|")
+        if bar >= 0 and not ["json", "sh"].contains(expr.slice(bar + 1).trim()) {
+          problem("error", name, "{{${expr}}}: unknown filter; the filters are |json and |sh")
+        }
+        if not is_builtin_ref(base) and task_named(base, tasks) == null {
+          problem("error", name, "{{${expr}}} names no task; ${known(tasks, base.split(".").first())}")
+        }
+      }
+    }
+    if t.has("stdin_from") {
+      if not tasks.has(str(t.stdin_from)) {
+        problem("error", name, "stdin_from `${t.stdin_from}` is not a task")
+      }
+      if t.has("stdin") {
+        problem("error", name, "has both `stdin` and `stdin_from`; keep one")
+      }
+    }
+    for dep in needs_of(t) {
+      if not tasks.has(dep) {
+        problem("error", name, "needs `${dep}`, which is not a task; ${known(tasks, dep)}")
+      }
+    }
+  }
+  roll loops = []
+  for name in tasks {
+    try {
+      resolve(tasks, [name], false)
+    } ashtray e {
+      if e.message.starts_with("dependency loop") and not loops.contains(e.message) {
+        loops.push(e.message)
+        problem("error", name, e.message)
+      }
+    }
+  }
+  stick errors = problems.filter(pack(p) => p.level == "error")
+  stick warnings = problems.filter(pack(p) => p.level == "warning")
+  stick count = tasks.keys().filter(pack(n) => not tasks[n].get("group", false) or tasks[n].origin == MANIFEST).len()
+  exhale "${MANIFEST}: " + pick(g.components.is_empty(), "", "${g.components.len()} component(s), ") + "${count} task(s), ${errors.len()} error(s), ${warnings.len()} warning(s)"
+  for p in errors + warnings {
+    exhale "  ${p.level}: ${p.where}: ${p.message}"
+  }
+  if not errors.is_empty() {
+    exit(1)
+  }
+}
+
+# ----- doctor: the toolchains themselves -----------------------------------------------
+
+pull version_in(textv) {
+  stick c = text.captures(str(textv), '(\d+(?:\.\d+)+)')
+  if c == null {
+    snuff null
+  }
+  snuff c[1]
+}
+
+pull read_pin(dir, source) {
+  stick at = source.find(":")
+  stick file = pick(at < 0, source, source.slice(0, at))
+  stick key = pick(at < 0, "", source.slice(at + 1))
+  stick t = text_of(dir, file)
+  if t == null {
+    snuff null
+  }
+  roll v = null
+  if file == ".tool-versions" {
+    for line in t.lines() {
+      stick parts = line.trim().split()
+      if parts.len() >= 2 and parts[0] == key {
+        v = parts[1]
+      }
+    }
+  } else if file == "mise.toml" {
+    stick c = text.captures(t, '(?m)^\s*"?' + key + '"?\s*=\s*"([^"]+)"')
+    if c != null {
+      v = c[1]
+    }
+  } else if file == "go.mod" {
+    stick c = text.captures(t, '(?m)^go\s+(\S+)')
+    if c != null {
+      v = c[1]
+    }
+  } else if file == "build.zig.zon" {
+    stick c = text.captures(t, '\.minimum_zig_version\s*=\s*"([^"]+)"')
+    if c != null {
+      v = c[1]
+    }
+  } else if file == "global.json" {
+    v = dig(json_of(dir, file), key.split("."))
+  } else if file == ".sdkmanrc" {
+    stick c = text.captures(t, '(?m)^' + key + '=(\S+)')
+    if c != null {
+      v = c[1]
+    }
+  } else if file == "rust-toolchain.toml" {
+    stick c = text.captures(t, 'channel\s*=\s*"([^"]+)"')
+    if c != null {
+      v = c[1]
+    }
+  } else {
+    v = t.lines().filter(pack(l) => l.trim() != "" and not l.trim().starts_with("#")).first()
+  }
+  if v == null {
+    snuff null
+  }
+  roll s = to_text(v).trim()
+  if s.starts_with("v") {
+    s = s.slice(1)
+  }
+  # go.mod's go line and Zig's minimum_zig_version are floors, not pins.
+  stick minimum = file == "go.mod" or file == "build.zig.zon"
+  snuff {value: s, from: pick(dir == ".", file, dir + "/" + file), minimum: minimum}
+}
+
+# Does an installed version satisfy a pin? null when the pin is not a number
+# (lts/*, stable, system) and cannot be compared.
+pull pin_matches(pin, actual, minimum) {
+  stick p = text.captures(pin, '^(\d+(?:\.\d+)*)')
+  if p == null or actual == null {
+    snuff null
+  }
+  stick want = p[1].split(".").map(pack(x) => int(x))
+  stick have = actual.split(".").map(pack(x) => int(x))
+  for pair in want.enumerate() {
+    stick h = have.get(pair[0], 0)
+    if h != pair[1] {
+      snuff minimum and h > pair[1]
+    }
+  }
+  snuff true
+}
+
+pull do_doctor(g) {
+  expect_flags([])
+  expect_no_targets()
+  stick comps = g.components
+  if comps.is_empty() {
+    exhale "no components in ${MANIFEST}, so no toolchains to look at; `cigo check` looks over the tasks"
+    snuff
+  }
+  roll by_tc = {}
+  for name in comps {
+    stick id = to_text(comps[name].toolchain)
+    if not by_tc.has(id) {
+      by_tc[id] = []
+    }
+    by_tc[id].push(name)
+  }
+  roll missing = 0
+  roll mismatched = 0
+  for id in by_tc {
+    if not g.kb.has(id) {
+      exhale "${id}: not a toolchain this knows (${by_tc[id].join(", ")})"
+      missing += 1
+      continue
+    }
+    stick tc = g.kb[id]
+    stick first = comps[by_tc[id].first()]
+    exhale "${id} (${tc.get("language", "")}): ${by_tc[id].join(", ")}"
+    for tool in as_list(tc.get("tools", [])) {
+      stick at = which(str(tool))
+      if at == null {
+        missing += 1
+        exhale "    missing  ${tool}" + pick(tc.has("install"), "   install: ${tc.get("install", "")}", "")
+      } else {
+        exhale "    found    ${tool}  ${at}"
+      }
+    }
+    stick vars = vars_for(first.dir, tc, first.name)
+    stick versions = tc.get("versions", {})
+    for vname in versions {
+      stick argv = fill(versions[vname], vars)
+      roll said = ""
+      if which(argv.first()) != null {
+        burn {
+          try {
+            stick r = proc.run(argv.first(), argv.slice(1), {timeout_ms: 30000})
+            said = r.out + r.err
+          } ashtray e {
+            said = ""
+          }
+        }
+      }
+      stick v = version_in(said)
+      exhale "    version  ${vname} ${v ?? "unknown"}"
+      for cname in by_tc[id] {
+        stick dir = comps[cname].dir
+        roll pin = null
+        for source in as_list(tc.get("pins", {}).get(vname, [])) {
+          if pin == null {
+            pin = read_pin(dir, source) ?? read_pin(".", source)
+          }
+        }
+        if pin != null {
+          stick ok = pin_matches(pin.value, v, pin.minimum)
+          if ok == false {
+            mismatched += 1
+          }
+          stick what = pick(pin.minimum, "needs at least", "pinned")
+          exhale "    pin      ${vname} ${what} ${pin.value} (${pin.from})" + pick(ok == null, ": not a version number, not compared", pick(ok, ": satisfied by ${v}", ": does not match ${v ?? "unknown"}"))
+        }
+      }
+    }
+    if tc.has("note") {
+      exhale "    note     ${tc.note}"
+    }
+  }
+  exhale ""
+  exhale "${missing} missing tool(s), ${mismatched} version mismatch(es)"
+  if missing > 0 {
+    exit(1)
+  }
+}
+
+pull do_outputs() {
+  expect_flags([])
+  if not fs.is_file(OUTPUTS_FILE) {
+    exhale "no outputs yet: tasks with `capture`, or that write name=value lines to $CIG_OUTPUT, leave theirs here after `cigo run`"
+    snuff
+  }
+  stick all = json.load(OUTPUTS_FILE)
+  if targets.is_empty() {
+    exhale json.stringify(all, 2)
+    snuff
+  }
+  for name in targets {
+    if not all.has(name) {
+      fail("no output from `${name}` in the last run; ${pick(all.is_empty(), "nothing handed anything on", "outputs from: " + all.keys().join(", "))}")
+    }
+    exhale json.stringify(all[name], 2)
+  }
+}
+
+# ----- the toolchains, listed -------------------------------------------------------------
+
+pull cond_text(c) {
+  if type_of(c) == "list" {
+    snuff c.map(pack(x) => cond_text(x)).join(" or ")
+  }
+  stick s = str(c)
+  if s.starts_with("not:") {
+    snuff "no " + cond_text(s.slice(4))
+  }
+  stick at = s.find(":")
+  if at < 0 {
+    snuff s
+  }
+  stick kind = s.slice(0, at)
+  stick arg = s.slice(at + 1)
+  if kind == "tool" {
+    snuff "`${arg}` on PATH"
+  }
+  if kind == "grep" or kind == "json" {
+    stick sep = arg.find(":")
+    snuff "`${arg.slice(0, sep)}` " + pick(kind == "grep", "matching", "with") + " `${arg.slice(sep + 1)}`"
+  }
+  snuff "`${arg}`"
+}
+
+pull stages_text(tc) {
+  roll names = STAGES.filter(pack(s) => tc.get("stages", {}).has(s))
+  if tc.has("scripts") {
+    names.push("${tc.scripts.file} ${tc.scripts.key}")
+  }
+  if tc.has("targets") {
+    names.push("${tc.targets} targets")
+  }
+  snuff names.join(", ")
+}
+
+pull do_toolchains() {
+  expect_flags(["--markdown"])
+  stick kb = toolchains_for(soft_manifest())
+  if not targets.is_empty() {
+    for id in targets {
+      if not kb.has(id) {
+        fail("no toolchain `${id}`; ${close_toolchains(kb, id)}")
+      }
+      exhale "${id}: " + json.stringify(kb[id], 2)
+    }
+    snuff
+  }
+  if flags.contains("--markdown") {
+    exhale "# Toolchains"
+    exhale ""
+    exhale "The ${kb.len()} toolchains cig-orchestrator ${VERSION} knows, written by `cigo toolchains --markdown`"
+    exhale "from the knowledge base in `orchestrate.cig`; regenerate it with `cigo run toolchains-doc`"
+    exhale "rather than editing it."
+    exhale ""
+    exhale "A component is a directory and one of these. `cigo adopt` chooses them from"
+    exhale "what each directory holds (the *recognized by* column: a comma is *and*, `or`"
+    exhale "is *or*), and a project changes any of them or adds its own under `toolchains`"
+    exhale "in `cig-tasks.json`. `cigo toolchains <name>` prints one in full: each stage's"
+    exhale "commands with the conditions that choose between them, the tools `cigo doctor`"
+    exhale "looks for, and the version pins it compares."
+    exhale ""
+    exhale "| toolchain | language | recognized by | stages |"
+    exhale "|---|---|---|---|"
+    for id in kb {
+      stick tc = kb[id]
+      stick seen_by = pick(tc.get("auto", true), as_list(tc.get("detect", [])).map(pack(c) => cond_text(c)).join(", "), "added by hand")
+      exhale "| `${id}` | ${tc.get("language", "")} | ${seen_by.replace("|", "\\|")} | ${stages_text(tc)} |"
+    }
+    stick noted = kb.keys().filter(pack(id) => str(kb[id].get("note", "")) != "")
+    if not noted.is_empty() {
+      exhale ""
+      exhale "## Notes"
+      exhale ""
+      for id in noted {
+        exhale "- `${id}`: ${kb[id].note}."
+      }
+    }
+    snuff
+  }
+  stick width = kb.keys().map(pack(k) => k.len()).max()
+  exhale "${kb.len()} toolchains; `cigo toolchains <name>` shows one in full"
+  for id in kb {
+    stick tc = kb[id]
+    exhale "  ${id.pad_right(width)}  ${str(tc.get("language", "")).pad_right(28)}  ${stages_text(tc)}"
+  }
+}
+
+# ----- dispatch ---------------------------------------------------------------------------
 
 if command == "help" or command == "--help" or command == "-h" {
   do_help()
 } else if command == "version" or command == "--version" {
   exhale "cig-orchestrator ${VERSION}"
+} else if command == "toolchains" {
+  do_toolchains()
 } else if command == "adopt" {
   do_adopt()
-} else if command == "list" {
-  do_list(load())
-} else if command == "check" {
-  do_check(load())
-} else if command == "plan" {
-  do_plan(load(), targets)
-} else if command == "run" {
-  do_run(load(), targets)
+} else if command == "outputs" {
+  do_outputs()
+} else if ["list", "show", "plan", "check", "doctor", "run"].contains(command) {
+  stick g = build_graph(load())
+  if command == "list" {
+    do_list(g)
+  } else if command == "show" {
+    do_show(g)
+  } else if command == "plan" {
+    do_plan(g, targets)
+  } else if command == "check" {
+    do_check(g)
+  } else if command == "doctor" {
+    do_doctor(g)
+  } else {
+    do_run(g, targets)
+  }
 } else {
   fail("unknown command `${command}`; `cigo help` lists them")
 }

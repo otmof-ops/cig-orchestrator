@@ -1,0 +1,12 @@
+#!/bin/sh
+# A stand-in for any toolchain program: it records how it was called, where,
+# and succeeds. Version flags print 99.1.0. An argument "fail-please" fails.
+name=$(basename "$0")
+printf '%s %s @%s\n' "$name" "$*" "$(pwd)" >> "${STUB_LOG:-/dev/null}"
+case "$1" in
+  --version|-version|version|-v|-V) echo "$name 99.1.0" ;;
+esac
+case " $* " in
+  *" fail-please "*) exit 3 ;;
+esac
+exit 0

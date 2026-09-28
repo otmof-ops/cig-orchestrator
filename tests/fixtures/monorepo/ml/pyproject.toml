@@ -1,0 +1,13 @@
+[project]
+name = "ml"
+version = "0.1.0"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100

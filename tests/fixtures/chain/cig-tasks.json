@@ -1,0 +1,30 @@
+{
+  "project": "chain",
+  "tasks": {
+    "version": {
+      "cmd": ["python3", "-c", "import json; print(json.dumps({'version': '1.4.0', 'commit': 'abc123'}))"],
+      "capture": "json",
+      "desc": "Python prints JSON; the chain keeps it as a value"
+    },
+    "stats": {
+      "shell": "echo count=3 >> \"$CIG_OUTPUT\"; printf 'notes<<END\\nline one\\nline two\\nEND\\n' >> \"$CIG_OUTPUT\"",
+      "desc": "bash hands on named values through $CIG_OUTPUT"
+    },
+    "words": {"cmd": ["printf", "b\\na\\nc\\n"], "capture": "lines"},
+    "sorted": {"cmd": ["sort"], "stdin_from": "words", "capture": "lines"},
+    "report": {
+      "shell": "echo \"v={{version.version}} c={{version.commit}} n={{stats.count}}\"; python3 -c 'import json, os; o = json.load(open(os.environ[\"CIG_OUTPUTS\"])); print(\"from python:\", o[\"version\"][\"version\"], o[\"stats\"][\"count\"])'",
+      "needs": ["stats"]
+    },
+    "each": {"cmd": ["printf", "[%s]", "{{sorted}}"]},
+    "notes": {"cmd": ["printf", "%s|", "{{stats.notes}}"]},
+    "json-arg": {"cmd": ["python3", "-c", "import sys, json; print(json.loads(sys.argv[1])['commit'])", "{{version|json}}"]},
+    "env-pass": {"cmd": ["bash", "-c", "echo \"$APP_VERSION from $CIG_TASK\""], "env": {"APP_VERSION": "v{{version.version}}"}},
+    "make-out": {
+      "cmd": ["bash", "-c", "mkdir -p out && cat in.txt > out/result.txt && echo made"],
+      "inputs": ["in.txt"], "produces": ["out/result.txt"]
+    },
+    "liar": {"cmd": ["true"], "produces": ["never.txt"]},
+    "bad-json": {"cmd": ["echo", "not json"], "capture": "json"}
+  }
+}
