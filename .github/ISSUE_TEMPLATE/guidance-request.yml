@@ -1,0 +1,35 @@
+name: Ask for guidance
+description: Bringing a project to cigo or CigScript and stuck, or not sure where to start. A person answers.
+title: "guidance: "
+labels: ["guidance", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask anything, however small. Every guidance request gets a direct answer, here,
+        with steps for your project.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What you're trying to do
+    validations:
+      required: true
+  - type: textarea
+    id: project
+    attributes:
+      label: Your project
+      description: Its languages, build tools, task runners and CI. The top two levels of the tree help.
+      placeholder: Python with uv in ml/, Go in services/api, pnpm in web/, a Makefile at the root, GitHub Actions.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you've tried, and what happened
+      description: Commands and what they printed. The output of `cigo adopt` (it changes nothing) shows what cigo sees.
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: cig-orchestrator 0.2.0, cig 1.1.1, Linux x86_64

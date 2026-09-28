@@ -2,7 +2,7 @@
 // as environment variables and an argument, filled in by the orchestrator from
 // the earlier tasks' output: nothing here knows that Python ran.
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { render } from "./render.mjs";
 
 const at = process.argv.indexOf("--version");
@@ -15,8 +15,9 @@ const html = render({
 });
 
 mkdirSync("dist", { recursive: true });
-const page = resolve("dist/index.html");
-writeFileSync(page, html);
+writeFileSync("dist/index.html", html);
+// The path from the project root, which is where the next task runs.
+const page = relative(process.env.CIG_PROJECT_ROOT ?? process.cwd(), resolve("dist/index.html"));
 console.log(`built ${page} (${Buffer.byteLength(html)} bytes)`);
 
 // Named values for the tasks after this one: {{site.page}} and {{site.bytes}}.

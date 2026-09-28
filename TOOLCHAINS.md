@@ -5,13 +5,13 @@ from the knowledge base in `orchestrate.cig`; regenerate it with `cigo run toolc
 rather than editing it.
 
 A component is a directory and one of these. `cigo adopt` chooses them from
-what each directory holds (the *recognised by* column: a comma is *and*, `or`
+what each directory holds (the *recognized by* column: a comma is *and*, `or`
 is *or*), and a project changes any of them or adds its own under `toolchains`
 in `cig-tasks.json`. `cigo toolchains <name>` prints one in full: each stage's
 commands with the conditions that choose between them, the tools `cigo doctor`
 looks for, and the version pins it compares.
 
-| toolchain | language | recognised by | stages |
+| toolchain | language | recognized by | stages |
 |---|---|---|---|
 | `node-npm` | JavaScript / TypeScript | `package.json` | setup, format, format-check, lint, check, package, package.json scripts |
 | `node-pnpm` | JavaScript / TypeScript | `package.json`, `pnpm-lock.yaml` or `package.json` matching `"packageManager"\s*:\s*"pnpm@` | setup, format, format-check, lint, check, package, package.json scripts |
@@ -100,6 +100,6 @@ looks for, and the version pins it compares.
 - `powershell`: never detected on its own: add a component with toolchain powershell.
 - `cigscript`: cig check reads one file at a time, so these stages check every .cig file under the component in turn, test data (fixtures, corpus, testdata) left out.
 - `shell`: never detected on its own: add a component with toolchain shell.
-- `terraform`: setup initialises without the backend so no credentials are needed; plan is a task of its own and apply is never run.
+- `terraform`: setup initializes without the backend so no credentials are needed; plan is a task of its own and apply is never run.
 - `docker`: lint uses docker build --check (Buildx 0.15 and later).
 - `earthly`: Earthly upstream takes critical fixes only since 2025; EarthBuild is the community fork.

@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="428" viewBox="0 0 820 428" role="img" aria-label="Five components, each with its toolchain's own command for each stage: ml with uv, api with go, worker with cargo, web with pnpm, infra with terraform. cigo run test runs every test in its own directory; cigo run ci runs format-check, lint, check, build and test everywhere.">
+  <title>One stage, every language</title>
+  <defs>
+    <marker id="hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f97316"/>
+    </marker>
+  </defs>
+  <style>
+    .h { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 15px; font-weight: 700; fill: #f97316; }
+    .k { font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 12.5px; fill: #9ca3af; }
+    .st { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-weight: 700; fill: #f97316; }
+    .n { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; font-weight: 700; fill: #6b7280; }
+    .t { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 9.5px; fill: #9ca3af; }
+    .c { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; fill: #6b7280; }
+    .cell { fill: none; stroke: #d1d5db; stroke-width: 1.2; }
+    .none { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; fill: #d1d5db; }
+    .span { stroke: #f97316; stroke-width: 2; fill: none; }
+    .cmd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; font-weight: 700; fill: #f97316; }
+    .test { fill: #f97316; opacity: 0.07; }
+  </style>
+  <text x="24" y="34" class="h">one stage, every language</text>
+  <text x="24" y="54" class="k">each component keeps its toolchain's own commands, chosen by what its directory holds;</text>
+  <text x="24" y="72" class="k">a stage name runs that stage in every component, each in its own directory, after its setup</text>
+  <path d="M 266 112 L 266 106 L 814 106 L 814 112" class="span"/>
+  <text x="540.0" y="98" text-anchor="middle" class="cmd">cigo run ci</text>
+  <rect x="710" y="116" width="108" height="276" rx="10" class="test"/>
+  <text x="204.0" y="130" text-anchor="middle" class="st">setup</text>
+  <text x="316.0" y="130" text-anchor="middle" class="st">format-check</text>
+  <text x="428.0" y="130" text-anchor="middle" class="st">lint</text>
+  <text x="540.0" y="130" text-anchor="middle" class="st">check</text>
+  <text x="652.0" y="130" text-anchor="middle" class="st">build</text>
+  <text x="764.0" y="130" text-anchor="middle" class="st">test</text>
+  <text x="24" y="155" class="n">ml</text>
+  <text x="24" y="169" class="t">python-uv</text>
+  <text x="24" y="181" class="t">in ml</text>
+  <rect x="152" y="142" width="104" height="42" rx="7" class="cell"/>
+  <text x="204.0" y="160" text-anchor="middle" class="c">uv sync</text>
+  <text x="204.0" y="174" text-anchor="middle" class="c">--locked</text>
+  <rect x="264" y="142" width="104" height="42" rx="7" class="cell"/>
+  <text x="316.0" y="160" text-anchor="middle" class="c">ruff format</text>
+  <text x="316.0" y="174" text-anchor="middle" class="c">--check .</text>
+  <rect x="376" y="142" width="104" height="42" rx="7" class="cell"/>
+  <text x="428.0" y="167" text-anchor="middle" class="c">ruff check .</text>
+  <text x="540.0" y="167" text-anchor="middle" class="none">·</text>
+  <text x="652.0" y="167" text-anchor="middle" class="none">·</text>
+  <rect x="712" y="142" width="104" height="42" rx="7" class="cell"/>
+  <text x="764.0" y="167" text-anchor="middle" class="c">uv run pytest</text>
+  <text x="24" y="205" class="n">api</text>
+  <text x="24" y="219" class="t">go</text>
+  <text x="24" y="231" class="t">in services/api</text>
+  <rect x="152" y="192" width="104" height="42" rx="7" class="cell"/>
+  <text x="204.0" y="217" text-anchor="middle" class="c">go mod download</text>
+  <rect x="264" y="192" width="104" height="42" rx="7" class="cell"/>
+  <text x="316.0" y="217" text-anchor="middle" class="c">gofmt -l</text>
+  <text x="428.0" y="217" text-anchor="middle" class="none">·</text>
+  <rect x="488" y="192" width="104" height="42" rx="7" class="cell"/>
+  <text x="540.0" y="217" text-anchor="middle" class="c">go vet ./...</text>
+  <rect x="600" y="192" width="104" height="42" rx="7" class="cell"/>
+  <text x="652.0" y="217" text-anchor="middle" class="c">go build ./...</text>
+  <rect x="712" y="192" width="104" height="42" rx="7" class="cell"/>
+  <text x="764.0" y="217" text-anchor="middle" class="c">go test ./...</text>
+  <text x="24" y="255" class="n">worker</text>
+  <text x="24" y="269" class="t">rust-cargo</text>
+  <text x="24" y="281" class="t">in services/worker</text>
+  <rect x="152" y="242" width="104" height="42" rx="7" class="cell"/>
+  <text x="204.0" y="260" text-anchor="middle" class="c">cargo fetch</text>
+  <text x="204.0" y="274" text-anchor="middle" class="c">--locked</text>
+  <rect x="264" y="242" width="104" height="42" rx="7" class="cell"/>
+  <text x="316.0" y="260" text-anchor="middle" class="c">cargo fmt</text>
+  <text x="316.0" y="274" text-anchor="middle" class="c">--check</text>
+  <rect x="376" y="242" width="104" height="42" rx="7" class="cell"/>
+  <text x="428.0" y="260" text-anchor="middle" class="c">cargo clippy</text>
+  <text x="428.0" y="274" text-anchor="middle" class="c">-D warnings</text>
+  <rect x="488" y="242" width="104" height="42" rx="7" class="cell"/>
+  <text x="540.0" y="267" text-anchor="middle" class="c">cargo check</text>
+  <rect x="600" y="242" width="104" height="42" rx="7" class="cell"/>
+  <text x="652.0" y="267" text-anchor="middle" class="c">cargo build</text>
+  <rect x="712" y="242" width="104" height="42" rx="7" class="cell"/>
+  <text x="764.0" y="267" text-anchor="middle" class="c">cargo test</text>
+  <text x="24" y="305" class="n">web</text>
+  <text x="24" y="319" class="t">node-pnpm</text>
+  <text x="24" y="331" class="t">in web</text>
+  <rect x="152" y="292" width="104" height="42" rx="7" class="cell"/>
+  <text x="204.0" y="310" text-anchor="middle" class="c">pnpm install</text>
+  <text x="204.0" y="324" text-anchor="middle" class="c">--frozen-lockfile</text>
+  <text x="316.0" y="317" text-anchor="middle" class="none">·</text>
+  <rect x="376" y="292" width="104" height="42" rx="7" class="cell"/>
+  <text x="428.0" y="317" text-anchor="middle" class="c">pnpm run lint</text>
+  <rect x="488" y="292" width="104" height="42" rx="7" class="cell"/>
+  <text x="540.0" y="310" text-anchor="middle" class="c">pnpm run</text>
+  <text x="540.0" y="324" text-anchor="middle" class="c">typecheck</text>
+  <rect x="600" y="292" width="104" height="42" rx="7" class="cell"/>
+  <text x="652.0" y="317" text-anchor="middle" class="c">pnpm run build</text>
+  <rect x="712" y="292" width="104" height="42" rx="7" class="cell"/>
+  <text x="764.0" y="317" text-anchor="middle" class="c">pnpm run test</text>
+  <text x="24" y="355" class="n">infra</text>
+  <text x="24" y="369" class="t">terraform</text>
+  <text x="24" y="381" class="t">in infra</text>
+  <rect x="152" y="342" width="104" height="42" rx="7" class="cell"/>
+  <text x="204.0" y="367" text-anchor="middle" class="c">terraform init</text>
+  <rect x="264" y="342" width="104" height="42" rx="7" class="cell"/>
+  <text x="316.0" y="360" text-anchor="middle" class="c">terraform fmt</text>
+  <text x="316.0" y="374" text-anchor="middle" class="c">-check</text>
+  <text x="428.0" y="367" text-anchor="middle" class="none">·</text>
+  <rect x="488" y="342" width="104" height="42" rx="7" class="cell"/>
+  <text x="540.0" y="360" text-anchor="middle" class="c">terraform</text>
+  <text x="540.0" y="374" text-anchor="middle" class="c">validate</text>
+  <text x="652.0" y="367" text-anchor="middle" class="none">·</text>
+  <text x="764.0" y="367" text-anchor="middle" class="none">·</text>
+  <text x="764.0" y="414" text-anchor="middle" class="cmd">cigo run test</text>
+  <text x="24" y="414" class="k">· where a component has no such stage</text>
+</svg>

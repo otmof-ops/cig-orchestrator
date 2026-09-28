@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="cig-orchestrator: every language in the project, one chain, no glue script. A CigScript tool.">
+  <title>cig-orchestrator</title>
+  <defs>
+    <radialGradient id="ember" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#fff7ed"/>
+      <stop offset="45%" stop-color="#fb923c"/>
+      <stop offset="100%" stop-color="#ea580c" stop-opacity="0.9"/>
+    </radialGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f3f4f6"/>
+      <stop offset="100%" stop-color="#e5e7eb"/>
+    </linearGradient>
+    <linearGradient id="paper-up" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f3f4f6"/>
+      <stop offset="100%" stop-color="#e5e7eb"/>
+    </linearGradient>
+  </defs>
+  <style>
+    .word { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 66px; font-weight: 700; letter-spacing: -2px; }
+    .tag { font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 31px; fill: #d1d5db; }
+    .sub { font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 24px; fill: #9ca3af; }
+    .chip { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; fill: #9ca3af; }
+  </style>
+  <rect width="1280" height="640" fill="#0d1117"/>
+  <rect x="0" y="0" width="1280" height="8" fill="#f97316"/>
+  <g transform="translate(84 118) scale(1.7)">
+
+  <!-- four sticks standing in the pack, filters up: every language in the project -->
+  <g stroke="#d1d5db" stroke-width="1.2">
+    <rect x="28" y="44" width="16" height="40" rx="3" fill="url(#paper-up)"/>
+    <rect x="48" y="30" width="16" height="54" rx="3" fill="url(#paper-up)"/>
+    <rect x="68" y="52" width="16" height="32" rx="3" fill="url(#paper-up)"/>
+    <rect x="88" y="38" width="16" height="46" rx="3" fill="url(#paper-up)"/>
+  </g>
+  <g fill="#d6b370">
+    <rect x="28" y="28" width="16" height="20" rx="4"/>
+    <rect x="48" y="14" width="16" height="20" rx="4"/>
+    <rect x="68" y="36" width="16" height="20" rx="4"/>
+    <rect x="88" y="22" width="16" height="20" rx="4"/>
+  </g>
+  <g fill="#c8a25f" opacity="0.6">
+    <rect x="30" y="33" width="12" height="3"/><rect x="30" y="41" width="12" height="3"/>
+    <rect x="50" y="19" width="12" height="3"/><rect x="50" y="27" width="12" height="3"/>
+    <rect x="70" y="41" width="12" height="3"/><rect x="70" y="49" width="12" height="3"/>
+    <rect x="90" y="27" width="12" height="3"/><rect x="90" y="35" width="12" height="3"/>
+  </g>
+  <!-- the pack -->
+  <rect x="20" y="66" width="92" height="62" rx="8" fill="url(#paper)" stroke="#d1d5db" stroke-width="1.5"/>
+  <rect x="20" y="66" width="92" height="7" rx="3" fill="#d1d5db" opacity="0.7"/>
+  <rect x="20" y="94" width="92" height="12" fill="#f97316" opacity="0.9"/>
+  <!-- one taken out and lit: the chain -->
+  <g transform="translate(0 0)">
+    <rect x="124" y="92" width="28" height="20" rx="5" fill="#d6b370"/>
+    <rect x="127" y="96" width="22" height="3" fill="#c8a25f" opacity="0.6"/>
+    <rect x="127" y="105" width="22" height="3" fill="#c8a25f" opacity="0.6"/>
+    <rect x="150" y="92" width="62" height="20" rx="5" fill="url(#paper)" stroke="#d1d5db" stroke-width="1.5"/>
+    <circle cx="214" cy="102" r="17" fill="#f97316" opacity="0.14"/>
+    <circle cx="214" cy="102" r="11" fill="url(#ember)"/>
+  </g>
+  <g fill="none" stroke="#9ca3af" stroke-width="2.2" stroke-linecap="round" opacity="0.85">
+    <path d="M 214 84 C 204 74, 226 66, 214 56"/>
+    <path d="M 222 82 C 234 72, 212 66, 224 52"/>
+    <path d="M 206 86 C 196 78, 208 70, 202 60"/>
+  </g>
+    </g>
+  <text x="520" y="232" class="word" fill="#9ca3af">cig-<tspan fill="#f97316">orchestrator</tspan></text>
+  <text x="524" y="284" class="tag">every language, one chain, no glue script</text>
+  <text x="524" y="330" class="sub">a CigScript tool: a dry run, rollback, and values</text>
+  <text x="524" y="362" class="sub">passed from one language to the next</text>
+  <text x="120" y="470" class="sub">runs the toolchains and scripts your project already has</text>
+  <rect x="120" y="498" width="44" height="38" rx="19" fill="none" stroke="#30363d" stroke-width="2"/><text x="142.0" y="523" text-anchor="middle" class="chip">uv</text><rect x="176" y="498" width="44" height="38" rx="19" fill="none" stroke="#30363d" stroke-width="2"/><text x="198.0" y="523" text-anchor="middle" class="chip">go</text><rect x="232" y="498" width="83" height="38" rx="19" fill="none" stroke="#30363d" stroke-width="2"/><text x="273.5" y="523" text-anchor="middle" class="chip">cargo</text><rect x="327" y="498" width="70" height="38" rx="19" fill="none" stroke="#30363d" stroke-width="2"/><text x="362.0" y="523" text-anchor="middle" class="chip">pnpm</text><rect x="409" y="498" width="96" height="38" rx="19" fill="none" stroke="#30363d" stroke-width="2"/><text x="457.0" y="523" text-anchor="middle" class="chip">gradle</text><rect x="517" y="498" width="96" height="38" rx="19" fill="none" stroke="#30363d" stroke-width="2"/><text x="565.0" y="523" text-anchor="middle" class="chip">dotnet</text><rect x="625" y="498" width="96" height="38" rx="19" fill="none" stroke="#30363d" stroke-width="2"/><text x="673.0" y="523" text-anchor="middle" class="chip">bundle</text><rect x="733" y="498" width="135" height="38" rx="19" fill="none" stroke="#30363d" stroke-width="2"/><text x="800.5" y="523" text-anchor="middle" class="chip">terraform</text><rect x="880" y="498" width="70" height="38" rx="19" fill="none" stroke="#30363d" stroke-width="2"/><text x="915.0" y="523" text-anchor="middle" class="chip">make</text><rect x="962" y="498" width="122" height="38" rx="19" fill="none" stroke="#30363d" stroke-width="2"/><text x="1023.0" y="523" text-anchor="middle" class="chip">scripts/</text>
+</svg>
