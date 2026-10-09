@@ -145,6 +145,12 @@ Nothing is expanded.
 output makes it a dependency. [Chaining languages](chaining-languages.md)
 has the whole story.
 
+A program with templates of its own (`go list -f`, `docker --format`,
+`gh --template`, goreleaser, Helm) gets its braces by doubling them:
+`{{{{.ImportPath}}}}` reaches the program as `{{.ImportPath}}`, and the two
+kinds mix in one word, `"{{{{.ID}}}} {{project}}"`. `cigo check` says so when
+it meets a `{{...}}` that names no task.
+
 ## When check says no
 
 `cigo check` reads the manifest against the project before anything runs.

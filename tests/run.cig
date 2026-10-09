@@ -973,6 +973,24 @@ test("cigo finds the project from a subdirectory and hands cig its own flags", p
   assert(not there(dir, "build"), "a dry run through cigo built something")
 })
 
+test("four braces reach the program as two, and check accepts them", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), '{"project": "braces", "tasks": {"show": {"cmd": ["echo", "{{{{.ImportPath}}}} of {{project}}"], "desc": "a template the program reads"}}}')
+  }
+  stick c = tool_in(dir, ["check"])
+  exits(c, 0)
+  stick r = tool_in(dir, ["run", "show"])
+  exits(r, 0)
+  says(r.out, "{{.ImportPath}} of braces")
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), '{"project": "braces", "tasks": {"show": {"cmd": ["go", "list", "-f", "{{.ImportPath}}", "./..."]}}}')
+  }
+  stick q = tool_in(dir, ["check"])
+  exits(q, 1)
+  says(q.out, "four braces")
+})
+
 # ----- the end --------------------------------------------------------------
 
 exhale ""

@@ -1812,6 +1812,20 @@ pull manifest_task(t) {
 # A task that uses another task's output waits for it: the reference is a need.
 
 stick TEMPLATE = '\{\{[^{}]*\}\}'
+
+# Four braces are two: `{{{{.X}}}}` reaches the program as `{{.X}}`, for tools
+# with templates of their own (go list -f, docker --format, gh --template).
+# They are hidden while a string is read for templates and shown again after.
+stick ESCAPED_OPEN = "<<cigo:open>>"
+stick ESCAPED_CLOSE = "<<cigo:close>>"
+
+pull hide_escapes(s) {
+  snuff str(s).replace("{{{{", ESCAPED_OPEN).replace("}}}}", ESCAPED_CLOSE)
+}
+
+pull show_escapes(s) {
+  snuff str(s).replace(ESCAPED_OPEN, "{{").replace(ESCAPED_CLOSE, "}}")
+}
 stick EXPOSED = {}
 stick RAW = {}
 roll DRY = false
@@ -1843,7 +1857,7 @@ pull strings_of(t) {
 }
 
 pull template_exprs(s) {
-  snuff text.find_all(str(s), TEMPLATE).map(pack(m) => m.slice(2, m.len() - 2).trim())
+  snuff text.find_all(hide_escapes(s), TEMPLATE).map(pack(m) => m.slice(2, m.len() - 2).trim())
 }
 
 pull expr_base(expr) {
@@ -1934,9 +1948,9 @@ pull lookup(expr, where) {
 }
 
 pull render(s, where) {
-  stick src = str(s)
+  stick src = hide_escapes(s)
   if not src.contains("{{") {
-    snuff src
+    snuff show_escapes(src)
   }
   roll out = ""
   roll rest = src
@@ -1953,14 +1967,14 @@ pull render(s, where) {
     out = out + rest.slice(0, i) + to_text(lookup(expr, where))
     rest = rest.slice(i + 2 + j + 2)
   }
-  snuff out + rest
+  snuff show_escapes(out + rest)
 }
 
 # An argv word that is one whole template and names a list becomes that many words.
 pull render_argv(words, where) {
   roll out = []
   for w in words {
-    stick s = str(w)
+    stick s = hide_escapes(w)
     stick whole = text.captures(s, '^\{\{([^{}]*)\}\}$')
     if whole != null {
       stick v = lookup(whole[1].trim(), where)
@@ -3348,7 +3362,7 @@ pull do_check(g) {
           problem("error", name, "{{${expr}}}: unknown filter; the filters are |json and |sh")
         }
         if not is_builtin_ref(base) and task_named(base, tasks) == null {
-          problem("error", name, "{{${expr}}} names no task; ${known(tasks, base.split(".").first())}")
+          problem("error", name, "{{${expr}}} names no task; ${known(tasks, base.split(".").first())}. A literal {{ for the program itself is written with four braces: {{{{...}}}}")
         }
       }
     }
