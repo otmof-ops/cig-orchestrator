@@ -1,0 +1,51 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    env:
+      CIG_VERSION: v1.1.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install cig
+        run: |
+          mkdir -p "$HOME/.local/bin" && cd "$RUNNER_TEMP"
+          base="https://github.com/otmof-ops/CigScript/releases/download/$CIG_VERSION"
+          curl -fsSLO "$base/cig-$CIG_VERSION-linux-x86_64"
+          curl -fsSLO "$base/cig-$CIG_VERSION-linux-x86_64.sha256"
+          sha256sum -c "cig-$CIG_VERSION-linux-x86_64.sha256"
+          install -m 755 "cig-$CIG_VERSION-linux-x86_64" "$HOME/.local/bin/cig"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Versions
+        run: |
+          cig --version
+          shellcheck --version | head -2
+          python3 --version
+          node --version
+
+      - name: The repository's own checks (cig check, shellcheck, the suite)
+        run: bin/cigo --no-rollback run ci
+
+      - name: TOOLCHAINS.md matches the knowledge base
+        run: bin/cigo run toolchains-doc && git diff --exit-code TOOLCHAINS.md
+
+      - name: Keep the logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cigo-logs
+          path: .cig-orchestrator/
+          include-hidden-files: true
