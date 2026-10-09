@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
+# SPDX-License-Identifier: Apache-2.0
 # cigo: the launcher for cig-orchestrator. All the logic is in orchestrate.cig;
 # this finds it, finds the project (the nearest directory up that has a
 # cig-tasks.json), and hands cig the flags that are cig's own.

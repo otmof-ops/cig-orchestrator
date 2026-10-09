@@ -12,6 +12,7 @@
   <img alt="needs cig 1.1.1 or newer" src="https://img.shields.io/badge/needs-cig%201.1.1%2B-6b7280">
   <a href="TOOLCHAINS.md"><img alt="60 toolchains" src="https://img.shields.io/badge/toolchains-60-6b7280"></a>
   <a href="docs/roadmap.md"><img alt="actively maintained" src="https://img.shields.io/badge/status-actively%20maintained-f97316"></a>
+  <a href="LICENSE"><img alt="license Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6b7280"></a>
   <img alt="glue scripts: 0" src="https://img.shields.io/badge/glue%20scripts-0-2ea44f">
 </p>
 
@@ -198,3 +199,30 @@ language the way you would: each command is a hop, the tasks are a chain
 built at run time, the project is the pack, and a task's undo is a
 compensation. CigScript itself, the lexicon, and the rules the kernel keeps
 are at [otmof-ops/CigScript](https://github.com/otmof-ops/CigScript).
+
+## Licensing
+
+- **Code** (`orchestrate.cig`, `bin/`, `install.sh`, `tests/`):
+  [Apache-2.0](LICENSE), the same license as CigScript. In plain words: use,
+  copy, change, sell and embed cigo freely, including in closed products;
+  keep the copyright notice and the [NOTICE](NOTICE) file with any copy; you
+  get a patent license from every contributor; and you can't use the name to
+  endorse your derivative.
+- **Documentation** (`docs/`, this README and the other guides at the root):
+  [CC BY 4.0](LICENSES/CC-BY-4.0.txt). Reuse and adapt with credit.
+- **Examples** (`examples/`): [CC0 1.0](LICENSES/CC0-1.0.txt). Paste them
+  into your own projects; no attribution needed.
+- **The name.** CigScript is a trademark of Jay Taylor, and cigo carries it
+  as the maker's own tool. A fork needs a name of its own; CigScript's
+  [trademark policy](https://github.com/otmof-ops/CigScript/blob/main/TRADEMARKS.md)
+  says what is free to do and what to ask about first.
+- **Your project is yours.** Nothing about running cigo gives this project
+  any rights in your manifest, your scripts or what your tools build.
+
+`cig` is installed separately and is not part of this repository; its own
+licensing is at [otmof-ops/CigScript](https://github.com/otmof-ops/CigScript#licensing).
+[REUSE.toml](REUSE.toml) maps every path to its license. Contributions are
+accepted under the same terms; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Security reports: [SECURITY.md](SECURITY.md).
+
+Copyright (c) 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator).

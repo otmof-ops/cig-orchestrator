@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Licensing.** The code is Apache-2.0, the documentation CC BY 4.0 and the
+  examples CC0 1.0, the same split as CigScript. `LICENSE`, `NOTICE`,
+  `LICENSES/` and `REUSE.toml` carry it; the README says it in plain words
+  and CONTRIBUTING says what it means for a contribution.
+
 ## 0.2.0 — 2026-09-28
 
 Every language in the project, one chain, no glue script.

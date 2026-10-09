@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
+# SPDX-License-Identifier: Apache-2.0
 # Install cig-orchestrator: orchestrate.cig into ~/.local/share/cig-orchestrator
 # and the cigo launcher into ~/.local/bin. Run it again to update.
 #
