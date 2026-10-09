@@ -102,3 +102,15 @@ A commit message says what changed and why, in a sentence or two. A pull
 request fills in the template: what broke or was missing, why, the change,
 and the test that proves it. Reviews are about the code and the behavior;
 expect a reply, and expect it to be kind.
+
+## Licensing your contribution
+
+Code is Apache-2.0, documentation is CC BY 4.0 and examples are CC0 1.0;
+[REUSE.toml](REUSE.toml) maps every path, and `orchestrate.cig`, `bin/cigo`,
+`install.sh` and `tests/run.cig` carry SPDX headers (a new source file gets
+the same two lines; copy them from a neighbor). A contribution is accepted
+under the license of the kind of file it changes, which Apache-2.0 says
+itself in its section 5. Sign off each commit (`git commit -s`): the
+`Signed-off-by` line is your statement, under the
+[Developer Certificate of Origin](https://developercertificate.org), that
+the work is yours to give. You keep your copyright.
