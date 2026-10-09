@@ -113,6 +113,16 @@ Makefile's targets than the toolchains' commands, set `"groups": true` on the
 `make` component and `"groups": false` on the others, or point one stage at
 it: `"stages": {"build": ["make", "build"]}`.
 
+### Scripts written in CigScript
+
+A `.cig` file under `scripts/`, `script/`, `bin/` or `tools/` is adopted as a
+task that runs `cig run` on it: a second cig process with its own journal.
+Its compensations do not run when the outer run rolls back, and the outer
+dry run shows one hop instead of the script's plan. Until a file's chain can
+be lit inside the run that calls it, keep operations scripts of your own in
+a directory adopt does not read (`ops/`), check them with a `cigscript`
+component, and run them with `cig run` directly.
+
 ## Retiring the glue script
 
 This is what the tool is for. A typical glue script:

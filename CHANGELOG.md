@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Four braces are two.** `{{{{.ImportPath}}}}` in a task's `cmd`, `shell`,
+  `env`, `stdin`, `cwd` or `undo` reaches the program as `{{.ImportPath}}`,
+  so `go list -f`, `docker --format` and `gh --template` can be called
+  without a script around them; `cigo check` points to it when a `{{...}}`
+  names no task.
+- **Adopting.** The guide says where CigScript scripts of your own belong:
+  a `.cig` file adopted through the `scripts` toolchain runs as a nested
+  `cig run` whose compensations the outer rollback cannot reach.
 - **Licensing.** The code is Apache-2.0, the documentation CC BY 4.0 and the
   examples CC0 1.0, the same split as CigScript. `LICENSE`, `NOTICE`,
   `LICENSES/` and `REUSE.toml` carry it; the README says it in plain words
