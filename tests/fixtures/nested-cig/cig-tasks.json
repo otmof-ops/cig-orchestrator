@@ -1,0 +1,9 @@
+{
+  "project": "nested-cig",
+  "components": {
+    "scripts": {"path": ".", "toolchain": "scripts", "desc": "the project's scripts"}
+  },
+  "tasks": {
+    "boom": {"cmd": ["false"], "needs": ["scripts:mark"], "desc": "fails after the script ran"}
+  }
+}

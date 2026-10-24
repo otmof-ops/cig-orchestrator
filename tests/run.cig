@@ -292,6 +292,20 @@ test("a later failure runs the deploy's undo during the rollback", pack() {
   assert(not there(dir + "-remote", "current"), "the deploy was not undone")
 })
 
+test("a .cig script adopted as a task is undone through its own run id", pack() {
+  stick dir = fresh("tests/fixtures/nested-cig")
+  stick marker = path.join(work, "nested-cig-marker")
+  burn {
+    fs.mkdir(marker)
+  }
+  stick r = tool_in(dir, ["run", "boom"])
+  exits(r, 1)
+  says(r.out, "touched ../nested-cig-marker/flag")
+  says(r.out + r.err, "a cig run of its own")
+  says(r.out + r.err, "undoing scripts:mark: cig unburn")
+  assert(not there(marker, "flag"), "the inner script's compensation did not run on the outer rollback")
+})
+
 test("--no-rollback keeps what the finished tasks made, and unburn still undoes it", pack() {
   stick dir = fresh("examples/demo-app")
   burn {

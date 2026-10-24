@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **A `.cig` script runs as its own cig run and is now undone with it.** A
+  task whose command is `cig run <file>` (how the `scripts` toolchain adopts
+  a `.cig` file) gets `cig unburn <id>` as its undo, the id read from the
+  hop's "burned … run <id>" line, so a later failure in this run or a `cig
+  unburn` of it reverses the inner run at its place; hop watching has nothing
+  left to remove for that task and the inner journal stays true. `cigo adopt`
+  says so beside such a script. Lighting the file's chain in the same run (one
+  journal) is CigScript's to add; this closes the gap until then.
+- **Troubleshooting** says where a running task's output is landing and why
+  nothing streams yet.
+- **CI** installs cig 1.1.2.
 - **Four braces are two.** `{{{{.ImportPath}}}}` in a task's `cmd`, `shell`,
   `env`, `stdin`, `cwd` or `undo` reaches the program as `{{.ImportPath}}`,
   so `go list -f`, `docker --format` and `gh --template` can be called
