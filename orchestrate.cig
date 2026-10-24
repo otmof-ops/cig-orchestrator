@@ -1301,7 +1301,13 @@ pull script_target(dir, rel) {
   if cmd == null {
     snuff null
   }
-  snuff {name: slug(path.stem(rel)), cmd: cmd, desc: describe(lines)}
+  roll desc = describe(lines)
+  if ext == "cig" {
+    # Said once at adoption: a .cig file runs as a cig run of its own, and is
+    # undone through its run id when this run rolls back (see the task runner).
+    desc = pick(desc == "", "", desc + " · ") + "a cig run of its own; undone through its run id on rollback"
+  }
+  snuff {name: slug(path.stem(rel)), cmd: cmd, desc: desc}
 }
 
 # The targets a runner file declares: [{name, desc, cmd?}].
@@ -2414,7 +2420,7 @@ pull attempt(name, t, cmd, opts, n) {
   for line in r.err.trim_end().lines() {
     exhale "    " + line
   }
-  snuff {code: r.code, ok: ok_codes(t).contains(r.code), ms: time.now_ms() - started, out: r.out, simulated: simulated}
+  snuff {code: r.code, ok: ok_codes(t).contains(r.code), ms: time.now_ms() - started, out: r.out, err: r.err, simulated: simulated}
 }
 
 pull failure(name, cmd, result, n) {
@@ -2482,7 +2488,15 @@ pull run_task(ctx, name, index, total) {
     }
   }
   stick undo = undo_of(t, where)
-  if undo == null {
+  # A task that runs another CigScript file (`cig run …`, how the `scripts`
+  # toolchain adopts a .cig file) is a second cig run with a journal of its
+  # own, which this run's rollback cannot reach. Its run id, printed on the
+  # hop's "burned … run <id>" line, gives this run the compensation instead:
+  # `cig unburn <id>` at this task's place in the newest-first order, so the
+  # inner burns are undone by the inner run and hop watching has nothing left
+  # to remove for it.
+  stick nested_cig = undo == null and cmd.has("argv") and not cmd.argv.is_empty() and path.base(cmd.argv.first()) == "cig" and cmd.argv.get(1, "") == "run"
+  if undo == null and not nested_cig {
     attempts()
     if not result.ok {
       cough failure(name, cmd, result, n)
@@ -2501,7 +2515,19 @@ pull run_task(ctx, name, index, total) {
       if not result.ok {
         cough failure(name, cmd, result, n)
       }
+      if nested_cig and not result.simulated {
+        # the inner cig prints its run summary on stderr
+        stick found = text.captures(result.out + "\n" + result.get("err", ""), "burned [^\\n]*, run ([0-9A-Za-z-]+)")
+        if found != null {
+          s.undo = {argv: ["cig", "unburn", found[1]], label: "cig unburn " + found[1]}
+          exhale "    a cig run of its own (" + found[1] + "); undone through `cig unburn` at this task's place"
+        }
+      }
     } unburn {
+      if s.undo == null {
+        log.warn("undoing ${s.task}: the inner cig run printed no run id, so there is nothing to undo through")
+        snuff null
+      }
       log.warn("undoing ${s.task}: ${s.undo.label}")
       stick how = {cwd: s.cwd, env: s.env, timeout_ms: s.timeout_ms, check: true}
       roll done = null

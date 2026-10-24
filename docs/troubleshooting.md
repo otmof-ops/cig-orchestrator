@@ -53,6 +53,17 @@ The task's own output is printed above the error, and in full in
 `.cig-orchestrator/logs/web-test.log`. Run just that task again with
 `cigo run --only web:test`.
 
+**Nothing prints while a long task runs**
+
+A task's output is shown when the task ends: cig captures a hop's output and
+has no streaming option yet (CigScript's roadmap carries `{stream: true}`;
+cigo gets a `--stream` flag the day it lands). While it runs, the full output
+is landing in `.cig-orchestrator/logs/<task>.log` (`web-test.log` for
+`web:test`), appended as each attempt finishes, so `tail -f` on it shows the
+attempt once the task has written it; `cig runs` lists the run itself. A hung
+tool and a slow one look the same until the timeout, which is what
+`timeout_ms` is for.
+
 **`ran longer than 600000 ms`**, then `exited -1`
 
 The task hit its timeout (ten minutes by default) and was killed with its
