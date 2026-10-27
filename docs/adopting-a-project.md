@@ -186,3 +186,16 @@ per-task logs, a report per run, the values tasks handed on, and the
 fingerprints that let a task be skipped as up to date.
 
 Then put it in CI: [cigo in CI](ci.md).
+
+
+## What runs a script
+
+A script's shebang names its interpreter; when the shebang is an absolute
+path this machine does not have (`#!/bin/bash` on FreeBSD, Termux, NixOS or
+Windows), the same program is looked up on `PATH` instead. A `.sh` with no
+shebang runs with `sh`, a `.bash` with `bash`. `.py` runs with `python3`, or
+`python`, or the Windows launcher `py -3`, whichever this machine has; `.ps1`
+with `pwsh`, or Windows PowerShell. On Windows, `.bat` and `.cmd` files are
+adopted too and run through `cmd /d /c`. A `package.json`, `composer.json`,
+`.env` or `cig-tasks.json` saved with a byte-order mark reads the same as
+one without.

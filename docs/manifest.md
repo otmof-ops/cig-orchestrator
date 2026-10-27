@@ -111,6 +111,7 @@ group*), and `ci` runs format-check, lint, check, build and test everywhere.
 | `ok` | exit codes that count as success, `[0]` by default; `grep`'s 1 is an answer, not a failure |
 | `undo`, `undo_shell` | how to take the task back, as `cmd` or `shell`; runs on rollback and on `cig unburn`, only for a task that succeeded |
 | `touches` | a glob or a list of globs, relative to the task's directory, of the files the task may change (`"*"` the directory's own files, `"**"` everything under it, `"src/**"`, `"package.json"`). cig keeps each existing file under them in the tin before the task runs, so a file the task modifies or deletes comes back on rollback, byte for byte, where it would otherwise be listed as irreversible. A format stage gets its language's source files and a setup stage its lockfiles from the knowledge base without being told; a toolchain of your own sets `touches: {format: [...], setup: [...]}` |
+| `encoding` | how the task's output is read: `lossy` (the default: bad bytes replaced, so a Windows console code page or a Latin-1 path never fails a task that exited 0), `utf-8` (strict), `utf-16`, `latin1` |
 
 A task with `needs` and nothing to run is a group: `"release": {"needs":
 ["ci", "deploy"]}`. A task with the name of a generated one (`api:test`,
@@ -141,6 +142,8 @@ TOKEN_FILE="~/.config/shop/token"
 Nothing is expanded.
 
 ### Templates
+
+`{{home}}` is the home directory on every platform (`HOME` is not set under cmd or PowerShell; `USERPROFILE` is).
 
 `{{task}}`, `{{task.field}}`, `{{task.list.0}}`, `{{task|json}}`,
 `{{task|sh}}`, `{{env.NAME}}`, `{{root}}` and `{{project}}` work in `cmd`,

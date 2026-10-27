@@ -106,7 +106,7 @@ hold, checked in the component's directory. A list inside the list means
 
 | condition | holds when |
 |---|---|
-| `file:package-lock.json` | the file exists |
+| `file:package-lock.json` | the file exists, under exactly that name (case counts, on every filesystem) |
 | `dir:tests` | the directory exists |
 | `glob:*.csproj` | a file in the directory matches |
 | `grep:pyproject.toml:(?m)^\[tool\.ruff` | the file's text matches the regular expression; the file may be a glob (`requirements*.txt`) or a path |
