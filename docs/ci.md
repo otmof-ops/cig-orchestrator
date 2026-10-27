@@ -74,7 +74,9 @@ ci:
     - base=https://github.com/otmof-ops/CigScript/releases/download/v1.3.0
     - curl -fsSLO "$base/cig-v1.3.0-linux-x86_64" && curl -fsSLO "$base/cig-v1.3.0-linux-x86_64.sha256"
     - sha256sum -c cig-v1.3.0-linux-x86_64.sha256 && install -m 755 cig-v1.3.0-linux-x86_64 "$HOME/.local/bin/cig"
-    - git clone --depth 1 https://github.com/otmof-ops/cig-orchestrator /tmp/cigo && /tmp/cigo/install.sh
+    - tag=v0.3.0; base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
+    - curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz" && curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
+    - sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256" && tar -xzf "cig-orchestrator-$tag.tar.gz" && "cig-orchestrator-$tag/install.sh"
   script:
     - cigo doctor
     - cigo --no-rollback run ci
@@ -87,8 +89,11 @@ ci:
 
 The same two installs, with the shell each runner has. macOS has no
 `sha256sum`: use `shasum -a 256 -c`. On Windows, PowerShell runs CigScript's
-`install.ps1` and cig-orchestrator's `install.ps1`, and `cigo` is then on
-PATH for the following steps:
+`install.ps1` and then cig-orchestrator's. Each adds its directory to the
+user PATH, which a running job never sees, so the step puts `cig` on its own
+`$env:Path` before the second installer looks for it, tells the first not to
+ask about PATH (`CIG_NO_MODIFY_PATH`; a job cannot answer a prompt), and
+writes both directories to `GITHUB_PATH` for the steps that follow:
 
 ```yaml
   windows:
@@ -96,8 +101,11 @@ PATH for the following steps:
     steps:
       - uses: actions/checkout@v4
       - shell: pwsh
+        env:
+          CIG_NO_MODIFY_PATH: '1'
         run: |
           irm https://raw.githubusercontent.com/otmof-ops/CigScript/main/install.ps1 | iex
+          $env:Path = "$env:LOCALAPPDATA\Programs\cig;$env:Path"
           $tag = 'v0.4.0'
           irm "https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag/cig-orchestrator-$tag.tar.gz" -OutFile cigo.tar.gz
           tar -xzf cigo.tar.gz

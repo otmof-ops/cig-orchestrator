@@ -96,6 +96,29 @@ jobs:
           install -m 755 "cig-$CIG_VERSION-linux-x86_64" /usr/local/bin/cig
       - run: bin/cigo --no-rollback run ci
 
+  # The two PowerShell installers in the order docs/ci.md gives them, on a
+  # Windows runner: CigScript's from its newest release, cig-orchestrator's
+  # from this checkout; then the launcher from PATH, as a user would have it.
+  ci-windows-installers:
+    name: installers (windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install cig and cigo the way docs/ci.md says
+        env:
+          CIG_NO_MODIFY_PATH: '1'
+        run: |
+          irm https://raw.githubusercontent.com/otmof-ops/CigScript/main/install.ps1 | iex
+          $env:Path = "$env:LOCALAPPDATA\Programs\cig;$env:Path"
+          .\install.ps1
+          echo "$env:LOCALAPPDATA\Programs\cig;$env:LOCALAPPDATA\cig-orchestrator\bin" >> $env:GITHUB_PATH
+      - run: cigo version --json
+      - run: cigo doctor
+      - run: cigo check
+
   # A tag vX.Y.Z is a release: one tarball, its checksum, a build attestation,
   # and the licence beside them. `cigo update` reads these.
   release:
