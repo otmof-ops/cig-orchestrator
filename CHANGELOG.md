@@ -5,7 +5,7 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
-## Unreleased
+## 0.4.0 — 2026-10-27
 
 - **A Windows launcher and installer.** `bin/cigo.ps1` for PowerShell and
   `bin/cigo.cmd` for cmd, with the same flag split, walk-up and cig check as

@@ -1321,7 +1321,7 @@ pull fake_release(dir, version) {
     fs.cp(launcher, path.join(src, "bin", "cigo"))
     fs.cp(path.join(root, "LICENSES"), path.join(src, "LICENSES"))
     fs.cp(path.join(root, "docs"), path.join(src, "docs"))
-    fs.write_text(path.join(src, "orchestrate.cig"), fs.read_text(path.join(src, "orchestrate.cig")).replace('stick VERSION = "0.3.0"', 'stick VERSION = "' + version + '"'))
+    fs.write_text(path.join(src, "orchestrate.cig"), fs.read_text(path.join(src, "orchestrate.cig")).replace('stick VERSION = "0.4.0"', 'stick VERSION = "' + version + '"'))
     stick t = proc.run("tar", ["-czf", name + ".tar.gz", name], {cwd: rel, timeout_ms: 60000})
     assert(t.code == 0, t.err)
     fs.write_text(path.join(rel, name + ".tar.gz.sha256"), hash.sha256_file(path.join(rel, name + ".tar.gz")) + "  " + name + ".tar.gz\n")
