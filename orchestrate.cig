@@ -29,7 +29,7 @@
 
 pack { "." }
 
-stick VERSION = "0.3.0"
+stick VERSION = "0.4.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
 stick CIG_NEEDS = ">=1.3.1"
 stick REPO = "otmof-ops/cig-orchestrator"

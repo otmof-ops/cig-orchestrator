@@ -37,7 +37,7 @@ jobs:
       - name: Install cigo
         run: |
           cd "$RUNNER_TEMP"
-          tag=v0.3.0
+          tag=v0.4.0
           base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
           curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz"
           curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
@@ -74,7 +74,7 @@ ci:
     - base=https://github.com/otmof-ops/CigScript/releases/download/v1.3.1
     - curl -fsSLO "$base/cig-v1.3.1-linux-x86_64" && curl -fsSLO "$base/cig-v1.3.1-linux-x86_64.sha256"
     - sha256sum -c cig-v1.3.1-linux-x86_64.sha256 && install -m 755 cig-v1.3.1-linux-x86_64 "$HOME/.local/bin/cig"
-    - tag=v0.3.0; base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
+    - tag=v0.4.0; base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
     - curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz" && curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
     - sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256" && tar -xzf "cig-orchestrator-$tag.tar.gz" && "cig-orchestrator-$tag/install.sh"
   script:
