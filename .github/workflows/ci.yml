@@ -69,8 +69,8 @@ jobs:
           grep -q "^stick VERSION = \"${tag#v}\"" orchestrate.cig || { echo "orchestrate.cig says another version than $tag" >&2; exit 1; }
           dir="cig-orchestrator-$tag"
           mkdir -p "$dir/bin"
-          cp orchestrate.cig install.sh LICENSE NOTICE README.md CHANGELOG.md TOOLCHAINS.md YANKED "$dir/"
-          cp bin/cigo "$dir/bin/cigo"
+          cp orchestrate.cig install.sh install.ps1 LICENSE NOTICE README.md CHANGELOG.md TOOLCHAINS.md YANKED "$dir/"
+          cp bin/cigo bin/cigo.ps1 bin/cigo.cmd "$dir/bin/"
           cp -r LICENSES docs "$dir/"
           tar -czf "$dir.tar.gz" "$dir"
           sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"

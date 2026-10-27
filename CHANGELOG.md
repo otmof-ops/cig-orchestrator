@@ -5,6 +5,25 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## Unreleased
+
+- **A Windows launcher and installer.** `bin/cigo.ps1` for PowerShell and
+  `bin/cigo.cmd` for cmd, with the same flag split, walk-up and cig check as
+  the `sh` launcher; `install.ps1` installs them with the tool into
+  `%LOCALAPPDATA%\cig-orchestrator` and adds its `bin` to the user PATH.
+  A `.gitattributes` keeps scripts LF and the Windows files CRLF, so a
+  Windows checkout runs under Git Bash and WSL. The release tarball ships
+  all three. (#22)
+- **Launcher and installer fixes.** `--max-steps` with no number is an
+  error instead of an endless loop under `bash --posix`, and `--max-steps=N`
+  is accepted; the walk-up stops when `dirname` stops changing (`//` on
+  MSYS); `CDPATH` cannot corrupt the tool's path; Git Bash keeps a task's
+  arguments as typed (`MSYS2_ARG_CONV_EXCL`); `install.sh` takes
+  `CIGO_PREFIX` and honours `PREFIX` except under Termux, writes the
+  launcher through `awk` so a quote, an ampersand or a bar in the path
+  survives, prints the exact PATH line for your shell, and points at
+  CigScript's install docs instead of a pinned command. (#23)
+
 ## 0.3.0 — 2026-10-27
 
 Needs cig 1.2.1: the tin, the pin and `cig.version()` come with 1.2.0, and 1.2.1 snapshots a read-only file (a tin object) like any other, which the suite relies on.

@@ -23,6 +23,11 @@ git clone https://github.com/otmof-ops/cig-orchestrator && cd cig-orchestrator
 cigo version
 ```
 
+On Windows, PowerShell: install cig with CigScript's `install.ps1`, then run
+`.\install.ps1` from the extracted cig-orchestrator release (or the checkout);
+`cigo` then works from PowerShell and cmd, and the `sh` launcher from Git
+Bash and WSL.
+
 cigo runs the tools your project already uses (`npm`, `cargo`, `uv`,
 `go`...), so those need to be installed as they are today. `cigo doctor`
 tells you which ones it can't find.

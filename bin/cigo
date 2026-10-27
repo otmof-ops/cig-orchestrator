@@ -5,7 +5,8 @@
 # this finds it, finds the project (the nearest directory up that has a
 # cig-tasks.json), checks the cig it is about to hand the tool to, and passes
 # cig the flags that are cig's own.
-tool="$(cd "$(dirname "$0")/.." && pwd)/orchestrate.cig"
+# CDPATH= : with CDPATH exported, cd prints the directory and would land in tool=.
+tool="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)/orchestrate.cig"
 # The cig this cigo is written for: the same floor as the `# cig` pin in the
 # tool, checked here for cigs too old to read the pin themselves.
 needs_major=1
@@ -35,12 +36,22 @@ case "$version" in
     exit 2 ;;
 esac
 
+# Under Git Bash and MSYS2, arguments that look like POSIX paths (/prod) are
+# rewritten for native programs; a task argument is handed over as typed.
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*) MSYS2_ARG_CONV_EXCL='*'; export MSYS2_ARG_CONV_EXCL ;; esac
+
 global=""
 run=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run|--no-check|--no-rollback) run="$run $1"; shift ;;
-    --max-steps) run="$run $1 ${2:-}"; shift 2 ;;
+    --max-steps=*) run="$run $1"; shift ;;
+    --max-steps)
+      if [ $# -lt 2 ]; then
+        echo "cigo: --max-steps needs a number (--max-steps N or --max-steps=N)" >&2
+        exit 2
+      fi
+      run="$run $1 $2"; shift 2 ;;
     --json|--no-color|--no-doctor|--plain) global="$global $1"; shift ;;
     *) break ;;
   esac
@@ -50,8 +61,11 @@ case "${1:-help}" in
   adopt|help|version|toolchains|update|crash|config|--help|-h|--version) ;;
   *)
     dir=$PWD
-    while [ "$dir" != "/" ] && [ ! -f "$dir/cig-tasks.json" ]; do
-      dir=$(dirname "$dir")
+    # Up to the root, or until dirname stops changing (// on MSYS stays //).
+    while [ ! -f "$dir/cig-tasks.json" ]; do
+      up=$(dirname -- "$dir")
+      [ "$up" = "$dir" ] && break
+      dir=$up
     done
     if [ -f "$dir/cig-tasks.json" ] && [ "$dir" != "$PWD" ]; then
       cd "$dir" || exit 1

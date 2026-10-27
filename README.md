@@ -173,9 +173,15 @@ sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256" && tar -xzf "cig-orchestrator
 cigo version
 ```
 
+On Windows, PowerShell: extract the same tarball and run `.\install.ps1`
+(`-Prefix`, `-Name`); it installs `cigo.ps1` and a `cigo.cmd` shim into
+`%LOCALAPPDATA%\cig-orchestrator\bin` and puts that on your PATH. Git Bash
+and WSL use `install.sh` as above.
+
 From then on `cigo update` installs the next release, checksum and build
 attestation verified, and `cigo update --check` only says whether there is
-one. `PREFIX=/opt/cig ./install.sh` installs elsewhere; `CIGO_NAME=orch
+one. `CIGO_PREFIX=/opt/cig ./install.sh` installs elsewhere (`PREFIX` works
+too, except under Termux, whose `PREFIX` is its own); `CIGO_NAME=orch
 ./install.sh` names the command something else. From a checkout, `git clone
 https://github.com/otmof-ops/cig-orchestrator && cd cig-orchestrator &&
 ./install.sh`, and `git pull` updates it. Without the launcher, the tool is

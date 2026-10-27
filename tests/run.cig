@@ -1295,6 +1295,48 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
 })
 
+# ----- the launcher and the installer, on every shell (0.4.0) -----------------------
+
+test("a windows checkout runs the launcher: scripts are LF, the Windows files CRLF", pack() {
+  stick attrs = fs.read_text(path.join(root, ".gitattributes"))
+  says(attrs, "* text=auto eol=lf")
+  says(attrs, "*.ps1 text eol=crlf")
+  says(attrs, "*.cmd text eol=crlf")
+  for f in ["bin/cigo", "install.sh", "bin/cigo.ps1", "bin/cigo.cmd", "install.ps1"] {
+    assert(fs.is_file(path.join(root, f)), "${f} is missing")
+  }
+  never_says(fs.read_text(launcher), "\r")
+  says(fs.read_text(path.join(root, "bin/cigo.ps1")), "CIGO_TOOL")
+  says(fs.read_text(path.join(root, "bin/cigo.cmd")), "%~dpn0.ps1")
+})
+
+test("--max-steps without a number is an error, not a loop; --max-steps=N is accepted", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick bare = hop(dir, launcher, ["--max-steps"])
+  exits(bare, 2)
+  says(bare.err, "--max-steps needs a number")
+  stick eq = hop(dir, launcher, ["--max-steps=50000", "version"])
+  exits(eq, 0)
+  says(eq.out, "cig-orchestrator ")
+  stick two = hop(dir, launcher, ["--max-steps", "50000", "version"])
+  exits(two, 0)
+})
+
+test("install.sh honours CIGO_PREFIX over PREFIX, survives CDPATH and a hostile path", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  stick want = dir + "-prefix/it's & here"
+  roll r = null
+  burn {
+    r = proc.run("sh", [path.join(root, "install.sh")], {cwd: root, env: {CIGO_PREFIX: want, PREFIX: dir + "-wrong", CDPATH: "/tmp"}, timeout_ms: 60000})
+  }
+  assert(r.code == 0, r.out + r.err)
+  assert(fs.is_file(path.join(want, "bin", "cigo")), "the launcher is not under CIGO_PREFIX: " + r.out)
+  assert(not fs.exists(dir + "-wrong"), "PREFIX won over CIGO_PREFIX")
+  stick v = hop(dir, path.join(want, "bin", "cigo"), ["version"])
+  exits(v, 0)
+  says(v.out, "cig-orchestrator ")
+})
+
 # ----- the end --------------------------------------------------------------
 
 exhale ""
