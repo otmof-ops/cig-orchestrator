@@ -84,8 +84,10 @@ jobs:
     env:
       CIG_VERSION: v1.3.0
     steps:
-      - uses: actions/checkout@v7
+      # git first: without it, checkout downloads a tarball and leaves no .git,
+      # and the shell component's `git ls-files` has nothing to list.
       - run: apk add --no-cache bash curl git python3 nodejs shellcheck coreutils
+      - uses: actions/checkout@v7
       - name: Install cig
         run: |
           mkdir -p /usr/local/bin && cd /tmp
@@ -115,9 +117,11 @@ jobs:
           $env:Path = "$env:LOCALAPPDATA\Programs\cig;$env:Path"
           .\install.ps1
           echo "$env:LOCALAPPDATA\Programs\cig;$env:LOCALAPPDATA\cig-orchestrator\bin" >> $env:GITHUB_PATH
+      - run: choco install shellcheck -y --no-progress
       - run: cigo version --json
       - run: cigo doctor
       - run: cigo check
+      - run: cigo --no-rollback run ci
 
   # A tag vX.Y.Z is a release: one tarball, its checksum, a build attestation,
   # and the licence beside them. `cigo update` reads these.

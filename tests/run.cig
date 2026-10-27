@@ -1418,8 +1418,9 @@ test("a manifest and an env file with a byte-order mark load, and $CIG_OUTPUT th
 test("a task whose output is not UTF-8 and exits 0 passes; strict encoding is a choice", pack() {
   stick dir = fresh("tests/fixtures/chain")
   edit_manifest(dir, pack(m) {
-    m.tasks["latin"] = {cmd: ["printf", "caf\\xe9\\n"]}
-    m.tasks["strict"] = {cmd: ["printf", "caf\\xe9\\n"], encoding: "utf-8"}
+    # \351 in octal: BSD printf prints \xe9 as the letters x, e, 9.
+    m.tasks["latin"] = {cmd: ["printf", "caf\\351\\n"]}
+    m.tasks["strict"] = {cmd: ["printf", "caf\\351\\n"], encoding: "utf-8"}
     m.tasks["bad"] = {cmd: ["true"], encoding: "ebcdic"}
   })
   stick ok = tool_in(dir, ["run", "latin"])
@@ -1479,8 +1480,10 @@ test("file: matches the exact name on every filesystem", pack() {
   stick before = tool_stubbed(dir, ["adopt"])
   exits(before, 0)
   never_says(before.out, "\"toolchain\": \"docker\"")
+  # Not a rename: on a case-insensitive filesystem the two names are one file.
   burn {
-    fs.mv(path.join(dir, "dockerfile"), path.join(dir, "Dockerfile"))
+    fs.rm(path.join(dir, "dockerfile"))
+    fs.write_text(path.join(dir, "Dockerfile"), "FROM scratch\n")
   }
   stick after = tool_stubbed(dir, ["adopt"])
   exits(after, 0)
