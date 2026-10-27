@@ -133,12 +133,13 @@ stick FAMILY_TOUCHES = {
 
 # Script folders, and how a script in one runs.
 stick SCRIPT_DIRS = ["script", "scripts", "bin", "tools"]
-stick LOOSE_SCRIPT_EXTS = ["sh", "bash"]
+stick LOOSE_SCRIPT_EXTS = pick(cig.os() == "windows", ["sh", "bash", "bat", "cmd", "ps1"], ["sh", "bash"])
 # package.json lifecycle scripts run on their own around install, publish and
 # pack; they are not tasks.
 stick HOOK_SCRIPTS = ["prepare", "preinstall", "install", "postinstall", "prepublish", "prepublishOnly", "prepack", "postpack", "publish", "postpublish", "preversion", "version", "postversion", "dependencies"]
 stick INTERPRETERS = {
-  sh: ["bash"], bash: ["bash"], zsh: ["zsh"],
+  sh: ["sh"], bash: ["bash"], zsh: ["zsh"],
+  bat: ["cmd", "/d", "/c"], cmd: ["cmd", "/d", "/c"],
   py: ["python3"],
   js: ["node"], mjs: ["node"], cjs: ["node"],
   rb: ["ruby"], pl: ["perl"], php: ["php"], lua: ["lua"], r: ["Rscript"],
@@ -978,6 +979,11 @@ pull slug(name) {
   while s.ends_with("-") {
     s = s.slice(0, s.len() - 1)
   }
+  # con, nul, com1...: a device on Windows, so the log and state files a
+  # task of that name gets are named after the task, not the device.
+  if ["con", "prn", "aux", "nul"].contains(s) or text.matches(s, '^(com|lpt)[1-9]$') {
+    s = "task-" + s
+  }
   snuff pick(s == "", "x", s)
 }
 
@@ -1128,7 +1134,7 @@ pull text_of(dir, file) {
     }
     roll t = null
     try {
-      t = fs.read_text(p)
+      t = unbom(fs.read_text(p))
     } ashtray e {
       t = null
     }
@@ -1172,7 +1178,12 @@ pull holds(dir, cond) {
   stick kind = c.slice(0, at)
   stick arg = c.slice(at + 1)
   if kind == "file" {
-    snuff fs.exists(path.join(dir, arg))
+    # The exact name, on every filesystem: a case-insensitive one would
+    # make file:Dockerfile true for dockerfile here and false on Linux.
+    if arg.contains("/") {
+      snuff fs.exists(path.join(dir, arg)) and entries_of(path.dir(path.join(dir, arg))).contains(path.base(arg))
+    }
+    snuff entries_of(dir).contains(arg)
   }
   if kind == "dir" {
     snuff fs.is_dir(path.join(dir, arg))
@@ -1337,6 +1348,11 @@ pull script_target(dir, rel) {
     if not parts.is_empty() and path.base(parts[0]) == "env" {
       parts = parts.slice(1).filter(pack(w) => not w.starts_with("-"))
     }
+    # #!/bin/bash where bash lives elsewhere (FreeBSD, Termux, NixOS,
+    # Windows): the same program, found on PATH instead.
+    if not parts.is_empty() and path.is_abs(parts[0]) and not fs.exists(parts[0]) {
+      parts[0] = path.base(parts[0])
+    }
     if not parts.is_empty() {
       cmd = parts + [rel]
     }
@@ -1347,6 +1363,7 @@ pull script_target(dir, rel) {
   if cmd == null {
     snuff null
   }
+  cmd = interpreter_here(cmd)
   roll desc = describe(lines)
   if ext == "cig" {
     # Said once at adoption: a .cig file runs as a cig run of its own, and is
@@ -1354,6 +1371,31 @@ pull script_target(dir, rel) {
     desc = pick(desc == "", "", desc + " · ") + "a cig run of its own; undone through its run id on rollback"
   }
   snuff {name: slug(path.stem(rel)), cmd: cmd, desc: desc}
+}
+
+# The interpreter this machine has: python3, else python, else the Windows
+# launcher; pwsh, else Windows PowerShell. Decided at adoption, where the
+# machine is known, so the manifest names what runs here.
+pull interpreter_here(cmd) {
+  stick prog = str(cmd.first())
+  if prog == "python3" and which("python3") == null {
+    if which("python") != null {
+      snuff ["python"] + cmd.slice(1)
+    }
+    if which("py") != null {
+      snuff ["py", "-3"] + cmd.slice(1)
+    }
+  }
+  if prog == "pwsh" and which("pwsh") == null and which("powershell") != null {
+    snuff ["powershell"] + cmd.slice(1)
+  }
+  snuff cmd
+}
+
+# A byte-order mark at the start of a text file (Notepad, PowerShell 5.1)
+# is not part of the text.
+pull unbom(textv) {
+  snuff text.replace(str(textv), '^\x{FEFF}', "")
 }
 
 # The targets a runner file declares: [{name, desc, cmd?}].
@@ -1733,7 +1775,7 @@ pull stage_deps(present, stage, order) {
 stick TOP_KEYS = ["project", "cig", "defaults", "components", "toolchains", "tasks"]
 stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms"]
 stick COMPONENT_KEYS = ["path", "toolchain", "after", "stages", "env", "env_file", "groups", "timeout_ms", "retries", "retry_delay_ms", "desc"]
-stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces", "touches"]
+stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces", "touches", "encoding"]
 stick CAPTURES = ["text", "json", "lines", "kv"]
 stick TOOLCHAIN_KEYS = ["language", "short", "extends", "detect", "family", "priority", "auto", "kind", "workspace", "claims_subtree",
   "stages", "extras", "order", "vars", "scripts", "targets", "targets_run", "tools", "versions", "pins", "touches", "install", "note"]
@@ -1788,7 +1830,7 @@ pull load() {
   }
   roll m = null
   try {
-    m = json.load(MANIFEST)
+    m = json.parse(unbom(fs.read_text(MANIFEST)))
   } ashtray e {
     fail("${MANIFEST} is not valid JSON: ${e.message}")
   }
@@ -1931,7 +1973,7 @@ pull expr_base(expr) {
 }
 
 pull is_builtin_ref(base) {
-  snuff base == "root" or base == "project" or base.starts_with("env.")
+  snuff base == "root" or base == "project" or base == "home" or base.starts_with("env.")
 }
 
 # Which task a template path names: the longest leading part that is a task.
@@ -1976,6 +2018,8 @@ pull lookup(expr, where) {
     value = ROOT
   } else if base == "project" {
     value = PROJECT_NAME
+  } else if base == "home" {
+    value = fs.home()
   } else if base.starts_with("env.") {
     value = env.get(base.slice(4), "")
   } else {
@@ -2226,7 +2270,13 @@ pull read_named(file) {
   if not fs.is_file(file) {
     snuff out
   }
-  stick lines = fs.read_lines(file)
+  roll lines = []
+  try {
+    lines = unbom(fs.read_text(file)).lines()
+  } ashtray e {
+    log.warn("${file} is not UTF-8 text, so nothing was handed on from it (Windows PowerShell 5.1 writes UTF-16 with >>; use PowerShell 7, or Out-File -Encoding ascii)")
+    snuff out
+  }
   roll i = 0
   while i < lines.len() {
     stick line = lines[i]
@@ -2256,7 +2306,7 @@ pull read_env_file(file) {
   if not fs.is_file(file) {
     snuff out
   }
-  for line in fs.read_lines(file) {
+  for line in unbom(fs.read_text(file)).lines() {
     roll s = line.trim()
     if s == "" or s.starts_with("#") {
       continue
@@ -2298,7 +2348,10 @@ pull hop_options(name, t, cwd, defaults, where) {
   if t.has("component") {
     e.CIG_COMPONENT = t.component
   }
-  roll o = {timeout_ms: int(t.get("timeout_ms", defaults.get("timeout_ms", 600000))), env: e}
+  # Output is read with bad bytes replaced unless the task asks for strict
+  # text: a Windows console code page or a Latin-1 path must not turn a
+  # task that exited 0 into a failure.
+  roll o = {timeout_ms: int(t.get("timeout_ms", defaults.get("timeout_ms", 600000))), env: e, encoding: str(t.get("encoding", "lossy"))}
   if cwd != "." {
     o.cwd = cwd
   }
@@ -2320,7 +2373,7 @@ pull touches_of(t) {
 
 pull captured(kind, out, name) {
   if kind == "text" {
-    snuff out.trim()
+    snuff out.replace("\r\n", "\n").trim()
   }
   if kind == "lines" {
     snuff out.lines().filter(pack(l) => l.trim() != "")
@@ -2367,7 +2420,9 @@ pull remember(name, value, named, raw) {
 # Files matching a glob under `cwd`. (cig 1.1.1 matches nothing for a pattern
 # that starts with `./`, and can list "" among the matches.)
 pull glob_under(cwd, pattern) {
-  stick p = path.join(cwd, pattern)
+  # Built with a slash, not path.join: a glob is matched against
+  # slash-separated candidates on every platform.
+  stick p = pick(cwd == "." or cwd == "", pattern, cwd + "/" + pattern)
   snuff fs.glob(pick(p.starts_with("./"), p.slice(2), p)).filter(pack(x) => x != "").sort()
 }
 
@@ -2476,7 +2531,12 @@ pull attempt(name, t, cmd, opts, n) {
         r = proc.run(cmd.argv.first(), cmd.argv.slice(1), opts)
       }
     } ashtray e {
-      r = {code: -1, out: "", err: e.message + "\n", duration_ms: time.now_ms() - started}
+      roll said = e.message
+      # E557: the output is not text in the encoding asked for.
+      if e.message.contains(" is not valid ") and e.message.contains(" at byte ") {
+        said = "the task's output is not valid ${opts.encoding} text; encoding: \"lossy\" replaces the bad bytes (" + e.message + ")"
+      }
+      r = {code: -1, out: "", err: said + "\n", duration_ms: time.now_ms() - started}
     }
     fs.append_text("${STATE}/logs/${slug(name)}.log",
       "== ${time.now_iso()} attempt ${n}: ${cmd.label}\n" + r.out + r.err +
@@ -2567,7 +2627,7 @@ pull run_task(ctx, name, index, total) {
   # `cig unburn <id>` at this task's place in the newest-first order, so the
   # inner burns are undone by the inner run and hop watching has nothing left
   # to remove for it.
-  stick nested_cig = undo == null and cmd.has("argv") and not cmd.argv.is_empty() and path.base(cmd.argv.first()) == "cig" and cmd.argv.get(1, "") == "run"
+  stick nested_cig = undo == null and cmd.has("argv") and not cmd.argv.is_empty() and path.stem(cmd.argv.first()).lower() == "cig" and cmd.argv.get(1, "") == "run"
   if undo == null and not nested_cig {
     attempts()
     if not result.ok {
@@ -2831,7 +2891,7 @@ pull soft_manifest() {
   roll m = {}
   if fs.is_file(MANIFEST) {
     try {
-      m = json.load(MANIFEST)
+      m = json.parse(unbom(fs.read_text(MANIFEST)))
     } ashtray e {
       m = {}
     }
@@ -2850,6 +2910,25 @@ pull fits_as_well(kb, old_id, new_id, dir) {
 # Adopting again finds the project again and keeps what the manifest already
 # says: a component found again (same directory, same kind of toolchain) keeps
 # its name and settings, and one written by hand stays while its directory does.
+# The same place, written two ways: `services\\api` is `services/api`, and
+# on a case-insensitive filesystem `Services/API` is too.
+pull same_path(a, b) {
+  pull tidy_path(p) {
+    roll q = str(p).replace("\\", "/")
+    while q.starts_with("./") {
+      q = q.slice(2)
+    }
+    while q.len() > 1 and q.ends_with("/") {
+      q = q.slice(0, q.len() - 1)
+    }
+    if q == "" {
+      q = "."
+    }
+    snuff pick(cig.os() == "linux", q, q.lower())
+  }
+  snuff tidy_path(a) == tidy_path(b)
+}
+
 pull merge_components(found, before, kb) {
   pull family_of(id) {
     snuff pick(kb.has(id), kb.get(id, {}).get("family", id), id)
@@ -2863,7 +2942,7 @@ pull merge_components(found, before, kb) {
     roll hit = null
     for oldname in before {
       stick was = before[oldname]
-      if not used.contains(oldname) and type_of(was) == "map" and str(was.get("path", ".")) == c.path and family_of(str(was.get("toolchain", ""))) == family_of(c.toolchain) {
+      if not used.contains(oldname) and type_of(was) == "map" and same_path(str(was.get("path", ".")), c.path) and family_of(str(was.get("toolchain", ""))) == family_of(c.toolchain) {
         hit = oldname
         break
       }
@@ -3305,7 +3384,7 @@ pull do_check(g) {
     if prog.contains("{{") {
       snuff
     }
-    if prog.contains("/") {
+    if prog.contains("/") or prog.contains("\\") {
       if not fs.exists(path.join(cwd, prog)) {
         problem(level, name, "`${prog}` does not exist")
       }
@@ -3462,6 +3541,9 @@ pull do_check(g) {
       }
       if t.has("capture") and not CAPTURES.contains(to_text(t.capture)) {
         problem("error", name, "`capture` is one of ${CAPTURES.join(", ")}")
+      }
+      if t.has("encoding") and not ["utf-8", "utf8", "lossy", "utf-16", "utf16", "latin1", "latin-1"].contains(str(t.encoding)) {
+        problem("error", name, "`encoding` is one of utf-8, lossy, utf-16, latin1")
       }
       for key in ["inputs", "produces"] {
         if t.has(key) and not as_list(t[key]).all(pack(x) => type_of(x) == "string") {

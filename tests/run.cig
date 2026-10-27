@@ -1337,6 +1337,100 @@ test("install.sh honours CIGO_PREFIX over PREFIX, survives CDPATH and a hostile 
   says(v.out, "cig-orchestrator ")
 })
 
+# ----- the tool itself on every machine (0.4.0): programs, paths, interpreters, encodings
+
+test("a manifest and an env file with a byte-order mark load, and $CIG_OUTPUT that is not UTF-8 is said", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  edit_manifest(dir, pack(m) {
+    m.tasks["from-env"] = {cmd: ["bash", "-c", "echo got-$FOO"], env_file: ".env"}
+    m.tasks["utf16"] = {shell: "printf '\\377\\376n\\0=\\0v\\0\\n\\0' >> \"$CIG_OUTPUT\"; echo wrote"}
+  })
+  burn {
+    # Notepad and PowerShell 5.1 write a BOM; the files are the same files.
+    proc.shell("printf '\\357\\273\\277' > bom.json && cat cig-tasks.json >> bom.json && mv bom.json cig-tasks.json && printf '\\357\\273\\277FOO=bar\\n' > .env", {cwd: dir, timeout_ms: 10000})
+  }
+  stick l = tool_in(dir, ["list"])
+  exits(l, 0)
+  stick r = tool_in(dir, ["run", "from-env"])
+  exits(r, 0)
+  says(r.out, "got-bar")
+  stick u = tool_in(dir, ["run", "utf16"])
+  exits(u, 0)
+  says(u.err, "is not UTF-8 text, so nothing was handed on")
+})
+
+test("a task whose output is not UTF-8 and exits 0 passes; strict encoding is a choice", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  edit_manifest(dir, pack(m) {
+    m.tasks["latin"] = {cmd: ["printf", "caf\\xe9\\n"]}
+    m.tasks["strict"] = {cmd: ["printf", "caf\\xe9\\n"], encoding: "utf-8"}
+    m.tasks["bad"] = {cmd: ["true"], encoding: "ebcdic"}
+  })
+  stick ok = tool_in(dir, ["run", "latin"])
+  exits(ok, 0)
+  says(ok.out, "caf")
+  stick strict = tool_in(dir, ["run", "strict"])
+  exits(strict, 1)
+  says(strict.out + strict.err, "not valid utf-8 text")
+  stick c = tool_in(dir, ["check"])
+  exits(c, 1)
+  says(c.out, "error: bad: `encoding` is one of utf-8, lossy, utf-16, latin1")
+})
+
+test("a .sh without a shebang runs with sh; an absolute shebang nobody has falls back to PATH", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.mkdir(path.join(dir, "scripts"))
+    fs.write_text(path.join(dir, "scripts/plain.sh"), "echo plain\n")
+    fs.write_text(path.join(dir, "scripts/odd.sh"), "#!/nonexistent/bin/bash\necho odd\n")
+  }
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick plain = tool_in(dir, ["show", "scripts:plain"])
+  exits(plain, 0)
+  says(plain.out, "runs       sh scripts/plain.sh")
+  stick odd = tool_in(dir, ["show", "scripts:odd"])
+  exits(odd, 0)
+  says(odd.out, "runs       bash scripts/odd.sh")
+  stick r = tool_in(dir, ["run", "scripts:odd"])
+  exits(r, 0)
+  says(r.out, "odd")
+})
+
+test("a task named after a Windows device keeps a safe log file, and {{home}} is the home directory", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  edit_manifest(dir, pack(m) {
+    m.tasks["nul"] = {cmd: ["echo", "device"]}
+    m.tasks["where"] = {cmd: ["echo", "{{home}}"]}
+  })
+  stick r = hop_env(dir, "cig", ["run", "--no-rollback", tool, "--", "run", "nul"], {})
+  exits(r, 0)
+  assert(there(dir, ".cig-orchestrator/logs/task-nul.log"), "the log was not written under a safe name")
+  stick h = tool_in(dir, ["run", "where"])
+  exits(h, 0)
+  says(h.out, fs.home())
+})
+
+test("file: matches the exact name on every filesystem", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({
+      project: "exact",
+      toolchains: {docker: {language: "Docker", family: "container", detect: ["file:Dockerfile"], tools: [], stages: {build: [["docker", "build", "."]]}}},
+      components: {},
+    }, 2))
+    fs.write_text(path.join(dir, "dockerfile"), "FROM scratch\n")
+  }
+  stick before = tool_stubbed(dir, ["adopt"])
+  exits(before, 0)
+  never_says(before.out, "\"toolchain\": \"docker\"")
+  burn {
+    fs.mv(path.join(dir, "dockerfile"), path.join(dir, "Dockerfile"))
+  }
+  stick after = tool_stubbed(dir, ["adopt"])
+  exits(after, 0)
+  says(after.out, "\"toolchain\": \"docker\"")
+})
+
 # ----- the end --------------------------------------------------------------
 
 exhale ""

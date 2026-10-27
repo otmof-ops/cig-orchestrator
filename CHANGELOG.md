@@ -24,6 +24,28 @@ repository root lists versions it must not pick.
   survives, prints the exact PATH line for your shell, and points at
   CigScript's install docs instead of a pinned command. (#23)
 
+- **Programs and paths on every machine.** A program with a backslash in
+  its name is a path for `check` too; a nested `cig.exe run` is seen as a
+  nested cig run; globs are built with forward slashes; `file:` matches the
+  exact name on every filesystem (so `file:Dockerfile` means the same thing
+  on macOS as on Linux); `adopt --force` recognises an old component's path
+  written with other separators or case; a task named `nul`, `con` or
+  `com1` keeps its log and state under a safe name; `{{home}}` is the home
+  directory where `HOME` is not set. Program lookup itself (`npm.cmd`, Git's
+  bash, a relative program against the task's directory) comes from
+  CigScript 1.3's resolver. (#21, #28)
+- **Interpreters that exist here.** An absolute shebang this machine does
+  not have falls back to the same program on `PATH`; a `.sh` without a
+  shebang runs with `sh`; `.py` runs with `python3`, `python` or `py -3`,
+  `.ps1` with `pwsh` or Windows PowerShell, whichever is installed; `.bat`
+  and `.cmd` are adopted on Windows. (#26)
+- **Encodings.** A byte-order mark in `cig-tasks.json`, a `.env` file or a
+  script is not part of it; `$CIG_OUTPUT` written as UTF-16 is named as the
+  reason nothing arrived; a task's output is read with bad bytes replaced
+  unless the task sets `encoding` (`utf-8`, `utf-16`, `latin1`), so a
+  Windows console code page never fails a task that exited 0; a `text`
+  capture has no stray `\r`. (#27)
+
 ## 0.3.0 — 2026-10-27
 
 Needs cig 1.2.1: the tin, the pin and `cig.version()` come with 1.2.0, and 1.2.1 snapshots a read-only file (a tin object) like any other, which the suite relies on.

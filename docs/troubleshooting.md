@@ -150,6 +150,12 @@ A file the run touched has changed since, so restoring it would overwrite
 newer work. `cig unburn <id> --dry-run` shows which; `--force` restores
 anyway, if the old content is what you want.
 
+**A value handed on from PowerShell never arrives**
+
+Windows PowerShell 5.1 writes `>>` and `Out-File` as UTF-16, which
+`$CIG_OUTPUT` is not read as; cigo says so and hands nothing on. Use
+PowerShell 7, or `Out-File -Encoding ascii -Append`.
+
 ## Still stuck
 
 Open a [guidance
