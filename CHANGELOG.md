@@ -63,6 +63,21 @@ repository root lists versions it must not pick.
   manifest takes `cmds`, `each`, `rm` and `fail_on_output` too. One `sh`
   line remains, the shell toolchain's own lint on Unix, with a per-file
   `shellcheck` beside it for Windows. (#25)
+- **The suite runs on Windows, and CI runs where cigo runs.** The tests
+  join PATH with the platform's separator, compare paths with forward
+  slashes, write `.cmd` stand-ins for the stub toolchain on Windows, and
+  step aside where a program they need is missing; CI runs the suite on
+  Ubuntu and macOS on both architectures, on Windows, and on Alpine with
+  bash, against cig 1.3.0. (#29)
+- **Docs say where cigo runs** and correct the claims that were Unix-only:
+  `shell` lines run under `sh` on Windows too, a timeout ends the whole
+  process tree everywhere, `|sh` is POSIX quoting, WSL projects belong in
+  the Linux filesystem. (#30)
+
+Needs cig 1.3.0: a program is found the same way on every OS (a `.cmd` task,
+`sh -c` under Git for Windows), a timeout ends the whole tree on Windows, and
+a device name is refused before anything runs; the suite on Windows relies on
+all three.
 
 ## 0.3.0 — 2026-10-27
 

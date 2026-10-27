@@ -95,7 +95,7 @@ group*), and `ci` runs format-check, lint, check, build and test everywhere.
 | key | meaning |
 |---|---|
 | `cmd` | what to run, as a list (`["bash", "scripts/build.sh"]`) or a string split on spaces; never a shell |
-| `shell` | a command line for `sh -c`, for pipes, globs and `&&` |
+| `shell` | a command line for `sh -c`, for pipes, globs and `&&`; on Windows it runs under `sh` when one is on PATH (Git for Windows, MSYS2) and under `cmd /d /s /c` only without one, so write it for `sh` |
 | `needs` | tasks that run first; each runs once however many need it |
 | `desc` | one line for `cigo list` |
 | `cwd` | the directory to run in, relative to the project root |
@@ -106,7 +106,7 @@ group*), and `ci` runs format-check, lint, check, build and test everywhere.
 | `stdin_from` | another task's stdout, as standard input |
 | `inputs` | files, directories or globs; unchanged since the last success, with the same command and values, means the task is skipped |
 | `produces` | paths or globs the task must leave behind, or it failed |
-| `timeout_ms` | how long before the task and its whole process group are killed; ten minutes by default |
+| `timeout_ms` | how long before the task and everything it started are killed (the process group on Unix, a Job Object on Windows); ten minutes by default |
 | `retries`, `retry_delay_ms` | attempts after the first, and the pause between them |
 | `ok` | exit codes that count as success, `[0]` by default; `grep`'s 1 is an answer, not a failure |
 | `undo`, `undo_shell` | how to take the task back, as `cmd` or `shell`; runs on rollback and on `cig unburn`, only for a task that succeeded |

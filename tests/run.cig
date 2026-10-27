@@ -75,10 +75,59 @@ pull hop(dir, program, words) {
   snuff hop_env(dir, program, words, {})
 }
 
+# Windows, where the suite runs from Git Bash or PowerShell: PATH entries are
+# joined with a semicolon, paths come back with backslashes, and the stub
+# programs are .cmd files written here, since a .sh symlink cannot start.
+stick on_windows = env.get("OS", "") == "Windows_NT"
+stick path_sep = pick_sep()
+pull pick_sep() {
+  if on_windows {
+    snuff ";"
+  }
+  snuff ":"
+}
+
+# A path as the stub logs it, comparable across platforms: forward slashes,
+# and case folded on Windows.
+pull norm(p) {
+  roll q = str(p).replace("\\", "/")
+  if on_windows {
+    q = q.lower()
+  }
+  snuff q
+}
+
+# Is this program here? Tests that need bash or a coreutil step aside with
+# a line instead of failing on a machine without it.
+pull has(program) {
+  snuff proc.which(program) != null
+}
+
+# The stub programs Windows can start: one <name>.cmd per stub, logging like
+# the sh stub does, written once per suite run.
+stick stub_dir = pick_stub_dir()
+pull pick_stub_dir() {
+  if not on_windows {
+    snuff path.join(root, "tests/fixtures/stub-bin")
+  }
+  stick d = path.join(work, "stub-cmd")
+  burn {
+    fs.mkdir(d)
+    for entry in fs.list(path.join(root, "tests/fixtures/stub-bin")) {
+      stick name = path.base(entry)
+      if name == "stub" {
+        continue
+      }
+      fs.write_text(path.join(d, name + ".cmd"), "@echo off\r\nif defined STUB_LOG echo " + name + " %* @%CD% >> \"%STUB_LOG%\"\r\nif \"%1\"==\"--version\" echo " + name + " 99.1.0\r\nif \"%1\"==\"-version\" echo " + name + " 99.1.0\r\nif \"%1\"==\"version\" echo " + name + " 99.1.0\r\nif \"%1\"==\"-v\" echo " + name + " 99.1.0\r\nif \"%1\"==\"-V\" echo " + name + " 99.1.0\r\necho %* | findstr /C:\"fail-please\" >nul && exit /b 3\r\nexit /b 0\r\n")
+    }
+  }
+  snuff d
+}
+
 # The stub toolchain first on PATH: every npm, cargo, go, uv... it runs is
 # recorded in <dir>-stub.log with its arguments and directory, and succeeds.
 pull stubbed(dir) {
-  snuff {PATH: path.join(root, "tests/fixtures/stub-bin") + ":" + env.get("PATH", ""), STUB_LOG: dir + "-stub.log"}
+  snuff {PATH: stub_dir + path_sep + env.get("PATH", ""), STUB_LOG: dir + "-stub.log"}
 }
 
 pull tool_stubbed(dir, words) {
@@ -87,7 +136,7 @@ pull tool_stubbed(dir, words) {
 
 pull stub_log(dir) {
   if fs.exists(dir + "-stub.log") {
-    snuff fs.read_text(dir + "-stub.log")
+    snuff norm(fs.read_text(dir + "-stub.log"))
   }
   snuff ""
 }
@@ -150,6 +199,7 @@ if fs.exists(work) {
     fs.rm(work)
   }
 }
+# (the Windows stubs are written into the work dir on first use, below)
 
 # ----- the basics -----------------------------------------------------------
 
@@ -482,12 +532,12 @@ test("one stage runs in every language, in dependency order, each in its own dir
   exits(r, 0)
   says(r.out, "done: 6 tasks")
   in_order(stub_log(dir), [
-    "go mod download @" + path.join(dir, "services/api"),
-    "go build ./... @" + path.join(dir, "services/api"),
-    "cargo fetch --locked @" + path.join(dir, "services/worker"),
-    "cargo build --workspace --locked @" + path.join(dir, "services/worker"),
-    "pnpm install --frozen-lockfile @" + path.join(dir, "web"),
-    "pnpm run build @" + path.join(dir, "web"),
+    "go mod download @" + norm(path.join(dir, "services/api")),
+    "go build ./... @" + norm(path.join(dir, "services/api")),
+    "cargo fetch --locked @" + norm(path.join(dir, "services/worker")),
+    "cargo build --workspace --locked @" + norm(path.join(dir, "services/worker")),
+    "pnpm install --frozen-lockfile @" + norm(path.join(dir, "web")),
+    "pnpm run build @" + norm(path.join(dir, "web")),
   ])
   never_says(stub_log(dir), "make ")
   stick listed = tool_in(dir, ["list"]).out
@@ -710,7 +760,7 @@ test("gleam builds and tests with gleam", pack() {
   }
   exits(tool_in(dir, ["adopt", "--write"]), 0)
   exits(tool_stubbed(dir, ["run", "test"]), 0)
-  says(stub_log(dir), "gleam test @" + dir)
+  says(stub_log(dir), "gleam test @" + norm(dir))
 })
 
 test("toolchains lists what this knows, and one in full", pack() {
@@ -1047,10 +1097,16 @@ test("a cig pin the installed cig does not satisfy is flagged on every command, 
 
 test("the manifest's cig key and a script's # cig header are read as pins", pack() {
   stick dir = fresh("tests/fixtures/chain")
-  edit_manifest(dir, pack(m) {
-    m.cig = "1.2"
-    m.tasks["old-script"] = {cmd: ["cig", "run", "old.cig"]}
-  })
+  # The pin is the installed cig's own major.minor, so it is satisfied by
+  # whichever cig runs the suite; the old script's header is what is flagged.
+  stick installed = json.parse(tool_in(dir, ["version", "--json"]).out).cig
+  stick file = path.join(dir, "cig-tasks.json")
+  stick m = json.load(file)
+  m.cig = installed.split(".").slice(0, 2).join(".")
+  m.tasks["old-script"] = {cmd: ["cig", "run", "old.cig"]}
+  burn {
+    json.save(file, m, 2)
+  }
   burn {
     fs.write_text(path.join(dir, "old.cig"), "#!/usr/bin/env cig\n# cig 1.0.0\nexhale \"old\"\n")
   }
@@ -1290,7 +1346,7 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
   }
   stick old = hop_env(dir, launcher, ["version"], {PATH: fake + ":" + env.get("PATH", "")})
   exits(old, 2)
-  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.2.1 or newer")
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.3.0 or newer")
   stick j = json.parse(hop(dir, launcher, ["version", "--json"]).out)
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
 })

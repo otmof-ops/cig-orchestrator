@@ -10,9 +10,22 @@ permissions:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    name: ci (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    asset: linux-x86_64,   ext: "" }
+          - { os: ubuntu-24.04-arm, asset: linux-aarch64,  ext: "" }
+          - { os: macos-latest,     asset: macos-aarch64,  ext: "" }
+          - { os: macos-15-intel,   asset: macos-x86_64,   ext: "" }
+          - { os: windows-latest,   asset: windows-x86_64, ext: ".exe" }
     env:
-      CIG_VERSION: v1.2.1
+      CIG_VERSION: v1.3.0
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
@@ -24,32 +37,64 @@ jobs:
         run: |
           mkdir -p "$HOME/.local/bin" && cd "$RUNNER_TEMP"
           base="https://github.com/otmof-ops/CigScript/releases/download/$CIG_VERSION"
-          curl -fsSLO "$base/cig-$CIG_VERSION-linux-x86_64"
-          curl -fsSLO "$base/cig-$CIG_VERSION-linux-x86_64.sha256"
-          sha256sum -c "cig-$CIG_VERSION-linux-x86_64.sha256"
-          install -m 755 "cig-$CIG_VERSION-linux-x86_64" "$HOME/.local/bin/cig"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          name="cig-$CIG_VERSION-${{ matrix.asset }}${{ matrix.ext }}"
+          curl -fsSLO "$base/$name"
+          curl -fsSLO "$base/$name.sha256"
+          if command -v sha256sum >/dev/null; then sha256sum -c "$name.sha256"; else shasum -a 256 -c "$name.sha256"; fi
+          install -m 755 "$name" "$HOME/.local/bin/cig${{ matrix.ext }}"
+          if command -v cygpath >/dev/null; then cygpath -w "$HOME/.local/bin" >> "$GITHUB_PATH"; else echo "$HOME/.local/bin" >> "$GITHUB_PATH"; fi
+
+      # The images differ in what they carry; the suite needs shellcheck.
+      - name: Install shellcheck where the image lacks it
+        run: |
+          command -v shellcheck && exit 0
+          case "${{ runner.os }}" in
+            Windows) choco install shellcheck -y --no-progress ;;
+            macOS) brew install shellcheck ;;
+            *) sudo apt-get install -y shellcheck ;;
+          esac
 
       - name: Versions
         run: |
           cig --version
           shellcheck --version | head -2
-          python3 --version
-          node --version
+          python3 --version || python --version || true
+          node --version || true
 
       - name: The repository's own checks (cig check, shellcheck, the suite)
         run: bin/cigo --no-rollback run ci
 
       - name: TOOLCHAINS.md matches the knowledge base
+        if: runner.os == 'Linux'
         run: bin/cigo run toolchains-doc && git diff --exit-code TOOLCHAINS.md
 
       - name: Keep the logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: cigo-logs
+          name: cigo-logs-${{ matrix.os }}
           path: .cig-orchestrator/
           include-hidden-files: true
+
+  # musl and BusyBox, with bash installed: what Alpine users have.
+  ci-alpine:
+    name: ci (alpine)
+    runs-on: ubuntu-latest
+    container: alpine:latest
+    env:
+      CIG_VERSION: v1.3.0
+    steps:
+      - uses: actions/checkout@v7
+      - run: apk add --no-cache bash curl git python3 nodejs shellcheck coreutils
+      - name: Install cig
+        run: |
+          mkdir -p /usr/local/bin && cd /tmp
+          base="https://github.com/otmof-ops/CigScript/releases/download/$CIG_VERSION"
+          curl -fsSLO "$base/cig-$CIG_VERSION-linux-x86_64"
+          curl -fsSLO "$base/cig-$CIG_VERSION-linux-x86_64.sha256"
+          sha256sum -c "cig-$CIG_VERSION-linux-x86_64.sha256"
+          install -m 755 "cig-$CIG_VERSION-linux-x86_64" /usr/local/bin/cig
+      - run: bin/cigo --no-rollback run ci
 
   # A tag vX.Y.Z is a release: one tarball, its checksum, a build attestation,
   # and the licence beside them. `cigo update` reads these.

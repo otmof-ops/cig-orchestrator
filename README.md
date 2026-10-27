@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/otmof-ops/CigScript"><img alt="a CigScript tool" src="https://img.shields.io/badge/a-CigScript%20tool-f97316"></a>
-  <img alt="needs cig 1.2.1 or newer" src="https://img.shields.io/badge/needs-cig%201.2.1%2B-6b7280">
+  <img alt="needs cig 1.3.0 or newer" src="https://img.shields.io/badge/needs-cig%201.3.0%2B-6b7280">
   <a href="TOOLCHAINS.md"><img alt="60 toolchains" src="https://img.shields.io/badge/toolchains-60-6b7280"></a>
   <a href="docs/roadmap.md"><img alt="actively maintained" src="https://img.shields.io/badge/status-actively%20maintained-f97316"></a>
   <a href="LICENSE"><img alt="license Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6b7280"></a>
@@ -162,7 +162,7 @@ your sanity.
 
 ## Install
 
-Needs `cig` 1.2.1 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
+Needs `cig` 1.3.0 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
 
 ```sh
 tag=v0.3.0
@@ -186,6 +186,17 @@ too, except under Termux, whose `PREFIX` is its own); `CIGO_NAME=orch
 https://github.com/otmof-ops/cig-orchestrator && cd cig-orchestrator &&
 ./install.sh`, and `git pull` updates it. Without the launcher, the tool is
 one file: `cig run path/to/orchestrate.cig -- run ci`.
+
+## Where it runs
+
+Linux and macOS, on both architectures; FreeBSD, Alpine and Termux with
+`bash` installed; Windows, natively from PowerShell and cmd (`cigo.ps1`,
+`cigo.cmd`) and from Git Bash and WSL. The suite runs in CI on Ubuntu,
+macOS, Windows and Alpine. cig itself runs the tasks: a `shell` line runs
+under `sh` wherever one exists, Git for Windows included, and under `cmd`
+only where it does not; a timeout ends the whole process tree on every
+platform. Keep a WSL project in the Linux filesystem: hop watching on
+`/mnt/c` is slow, and Windows' `npm` shim on the interop PATH will not run.
 
 ## Limits, honestly
 

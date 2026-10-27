@@ -35,7 +35,7 @@ A template works in `cmd`, `shell`, `env`, `stdin`, `cwd`, `undo` and
 | `{{stats}}` | the whole value: the text, or the JSON |
 | `{{stats.total}}`, `{{stats.regions.0}}` | one field, by key or list index |
 | `{{stats\|json}}` | the value as JSON text, for a program that parses its argument |
-| `{{stats\|sh}}` | the value quoted as one shell word (a list: each item quoted) |
+| `{{stats\|sh}}` | the value quoted as one `sh` word (a list: each item quoted); POSIX quoting, which is what `shell` lines run under on every platform |
 | `{{env.HOME}}` | the orchestrator's own environment |
 | `{{root}}`, `{{project}}` | the project directory, and the project's name |
 
@@ -136,7 +136,7 @@ jq -r '.stats.total' "$CIG_OUTPUTS"
 ## Shell lines and quoting
 
 `cmd` never goes through a shell: each word reaches the program as it is, so
-a value can't be misread as shell. `shell` is a command line for `sh -c`, and
+a value can't be misread as shell. `shell` is a command line for `sh -c` (on Windows too, through Git for Windows' `sh`; only a machine without any `sh` falls back to `cmd`), and
 a template in it is pasted in as text, so a value holding `;` or `$(...)`
 would run. Quote values you don't control with `|sh`:
 

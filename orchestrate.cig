@@ -1,7 +1,7 @@
 #!/usr/bin/env cig
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
-# cig >=1.2.1
+# cig >=1.3.0
 # cig-orchestrator: every language in the project, one chain, no glue script.
 #
 # Most projects are several languages in a row: a Python step that makes
@@ -31,7 +31,7 @@ pack { "." }
 
 stick VERSION = "0.3.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
-stick CIG_NEEDS = ">=1.2.1"
+stick CIG_NEEDS = ">=1.3.0"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
