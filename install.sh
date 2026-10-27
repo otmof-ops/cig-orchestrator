@@ -26,8 +26,8 @@ if ! command -v cig >/dev/null 2>&1; then
 fi
 version=$(cig --version | awk '{print $2}')
 case "$version" in
-  0.*|1.0.*|1.1.*|1.2.*)
-    echo "install: cig $version is too old; cig-orchestrator needs 1.3.0 or newer (cig update)" >&2
+  0.*|1.0.*|1.1.*|1.2.*|1.3.0)
+    echo "install: cig $version is too old; cig-orchestrator needs 1.3.1 or newer (cig update)" >&2
     exit 1 ;;
 esac
 

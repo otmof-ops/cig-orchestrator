@@ -22,7 +22,7 @@ jobs:
           - { os: macos-15-intel,   asset: macos-x86_64,   ext: "" }
           - { os: windows-latest,   asset: windows-x86_64, ext: ".exe" }
     env:
-      CIG_VERSION: v1.3.0
+      CIG_VERSION: v1.3.1
     defaults:
       run:
         shell: bash
@@ -82,7 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     container: alpine:latest
     env:
-      CIG_VERSION: v1.3.0
+      CIG_VERSION: v1.3.1
     steps:
       # git first: without it, checkout downloads a tarball and leaves no .git,
       # and the shell component's `git ls-files` has nothing to list.
@@ -120,6 +120,9 @@ jobs:
           .\install.ps1
           echo "$env:LOCALAPPDATA\Programs\cig;$env:LOCALAPPDATA\cig-orchestrator\bin" >> $env:GITHUB_PATH
       - run: choco install shellcheck -y --no-progress
+      # The suite's fixtures run sort and printf as a Git Bash user has
+      # them, first on PATH; Windows' own sort.exe is another program.
+      - run: echo "C:\Program Files\Git\usr\bin" >> $env:GITHUB_PATH
       - run: cigo version --json
       - run: cigo doctor
       - run: cigo check

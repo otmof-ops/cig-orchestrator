@@ -9,7 +9,7 @@ $tool = Join-Path (Split-Path -Parent $PSScriptRoot) 'orchestrate.cig'
 # tool, checked here for cigs too old to read the pin themselves.
 $needsMajor = 1
 $needsMinor = 3
-$needsPatch = 0
+$needsPatch = 1
 
 if (-not (Get-Command cig -ErrorAction SilentlyContinue)) {
     [Console]::Error.WriteLine('cigo: cig is not on PATH; install CigScript first: https://github.com/otmof-ops/CigScript')

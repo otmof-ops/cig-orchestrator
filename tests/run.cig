@@ -92,7 +92,11 @@ pull pick_sep() {
 pull norm(p) {
   roll q = str(p).replace("\\", "/")
   if on_windows {
-    q = q.lower()
+    # Only the drive letter is folded: cmd's %CD% and cig's cwd can spell
+    # it differently, and the rest of a line (a -D flag) must stay as is.
+    for l in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"] {
+      q = q.replace(l + ":/", l.lower() + ":/")
+    }
   }
   snuff q
 }
@@ -141,9 +145,30 @@ pull tool_stubbed(dir, words) {
 
 pull stub_log(dir) {
   if fs.exists(dir + "-stub.log") {
-    snuff norm(fs.read_text(dir + "-stub.log"))
+    roll t = fs.read_text(dir + "-stub.log")
+    if on_windows {
+      # cmd.exe is handed an argument with = or a space in quotes, which
+      # the .cmd stub echoes; the sh stub never sees them.
+      t = t.replace("\"", "")
+    }
+    snuff norm(t)
   }
   snuff ""
+}
+
+# The sh launcher, started the way this platform can: directly, or through
+# sh on Windows, where an extensionless script is not a program.
+pull launch(dir, l, words) {
+  if on_windows {
+    snuff hop(dir, "sh", [l] + words)
+  }
+  snuff hop(dir, l, words)
+}
+pull launch_env(dir, l, words, more) {
+  if on_windows {
+    snuff hop_env(dir, "sh", [l] + words, more)
+  }
+  snuff hop_env(dir, l, words, more)
 }
 
 # `pieces` appear in `textv` in this order.
@@ -1356,10 +1381,10 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
     stick chmod = proc.run("chmod", ["755", path.join(fake, "cig")], {timeout_ms: 10000})
     assert(chmod.code == 0, chmod.err)
   }
-  stick old = hop_env(dir, launcher, ["version"], {PATH: fake + ":" + env.get("PATH", "")})
+  stick old = launch_env(dir, launcher, ["version"], {PATH: fake + path_sep + env.get("PATH", "")})
   exits(old, 2)
-  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.3.0 or newer")
-  stick j = json.parse(hop(dir, launcher, ["version", "--json"]).out)
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.3.1 or newer")
+  stick j = json.parse(launch(dir, launcher, ["version", "--json"]).out)
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
 })
 
@@ -1380,13 +1405,13 @@ test("a windows checkout runs the launcher: scripts are LF, the Windows files CR
 
 test("--max-steps without a number is an error, not a loop; --max-steps=N is accepted", pack() {
   stick dir = fresh("tests/fixtures/chain")
-  stick bare = hop(dir, launcher, ["--max-steps"])
+  stick bare = launch(dir, launcher, ["--max-steps"])
   exits(bare, 2)
   says(bare.err, "--max-steps needs a number")
-  stick eq = hop(dir, launcher, ["--max-steps=50000", "version"])
+  stick eq = launch(dir, launcher, ["--max-steps=50000", "version"])
   exits(eq, 0)
   says(eq.out, "cig-orchestrator ")
-  stick two = hop(dir, launcher, ["--max-steps", "50000", "version"])
+  stick two = launch(dir, launcher, ["--max-steps", "50000", "version"])
   exits(two, 0)
 })
 
@@ -1400,7 +1425,7 @@ test("install.sh honours CIGO_PREFIX over PREFIX, survives CDPATH and a hostile 
   assert(r.code == 0, r.out + r.err)
   assert(fs.is_file(path.join(want, "bin", "cigo")), "the launcher is not under CIGO_PREFIX: " + r.out)
   assert(not fs.exists(dir + "-wrong"), "PREFIX won over CIGO_PREFIX")
-  stick v = hop(dir, path.join(want, "bin", "cigo"), ["version"])
+  stick v = launch(dir, path.join(want, "bin", "cigo"), ["version"])
   exits(v, 0)
   says(v.out, "cig-orchestrator ")
 })

@@ -1,7 +1,7 @@
 #!/usr/bin/env cig
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
-# cig >=1.3.0
+# cig >=1.3.1
 # cig-orchestrator: every language in the project, one chain, no glue script.
 #
 # Most projects are several languages in a row: a Python step that makes
@@ -31,7 +31,7 @@ pack { "." }
 
 stick VERSION = "0.3.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
-stick CIG_NEEDS = ">=1.3.0"
+stick CIG_NEEDS = ">=1.3.1"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
@@ -1287,7 +1287,7 @@ pull vars_for(dir, tc, component) {
         for g in as_list(alt.files) {
           for hit in glob_under(dir, str(g)) {
             stick rel = pick(dir == "." or dir == "", hit, hit.slice(dir.len() + 1))
-            if not rel.split("/").any(pack(part) => skip.contains(part)) and not found.contains(rel) {
+            if not rel.replace("\\", "/").split("/").any(pack(part) => skip.contains(part)) and not found.contains(rel) {
               found.push(rel)
             }
           }
@@ -1406,7 +1406,7 @@ pull script_target(dir, rel) {
     }
     # #!/bin/bash where bash lives elsewhere (FreeBSD, Termux, NixOS,
     # Windows): the same program, found on PATH instead.
-    if not parts.is_empty() and path.is_abs(parts[0]) and not fs.exists(parts[0]) {
+    if not parts.is_empty() and (path.is_abs(parts[0]) or parts[0].starts_with("/")) and not fs.exists(parts[0]) {
       parts[0] = path.base(parts[0])
     }
     if not parts.is_empty() {
@@ -3534,7 +3534,8 @@ pull do_check(g) {
       snuff
     }
     for g in as_list(tv) {
-      if g.trim() == "" or path.is_abs(g) or g.starts_with("~") or g.split("/").contains("..") {
+      stick rooted = g.starts_with("/") or g.starts_with("\\") or (g.len() >= 2 and g.slice(1, 2) == ":")
+      if g.trim() == "" or path.is_abs(g) or rooted or g.starts_with("~") or g.replace("\\", "/").split("/").contains("..") {
         problem("error", name, "`touches`: `${g}` must be a relative glob inside the project; cig keeps what a task may change under its own directory")
       }
     }
@@ -4879,7 +4880,8 @@ pull do_update() {
   }
   roll r = null
   burn {
-    r = proc.run("sh", ["-c", 'cd "$1" && tar -xzf "$2" && cd cig-orchestrator-* && PREFIX="$3" CIGO_NAME="$4" sh ./install.sh', "sh", work, tarball, prefix, name], {timeout_ms: 120000})
+    # By name, from inside work: GNU tar reads a D: in an archive's path as a host.
+    r = proc.run("sh", ["-c", 'cd "$1" && tar -xzf "$2" && cd cig-orchestrator-* && PREFIX="$3" CIGO_NAME="$4" sh ./install.sh', "sh", work, path.base(tarball), prefix, name], {timeout_ms: 120000})
   }
   if r.code != 0 {
     fail("the release's install.sh failed: ${(r.out + r.err).trim()}")
