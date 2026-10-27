@@ -51,12 +51,14 @@ From [FINDINGS.md](../FINDINGS.md). These are changes to the language, and
 they land in [CigScript](https://github.com/otmof-ops/CigScript) with its
 own tests.
 
-- The next release, with directories a task creates removed on rollback.
+Landed in cig 1.2.0, and used by cigo 0.3.0: directories a task creates
+removed on rollback (1.1.2); the tin, so what a task modifies or deletes
+comes back (`touches`); `.cigignore` and the built-in skip list, so a setup
+that fills `.venv` is never journaled; `cig.run_id()`, `cig.version()`,
+`cig.os()` and `cig.arch()`, so cigo reads the cig it runs under and names
+its own run. Still open:
+
 - Streaming hop output.
-- A skip list for hop watching, so a setup that fills `.venv` isn't
-  journaled file by file.
-- A way for a script to read its own run id, so cigo can print the `cig
-  unburn` line itself.
 - A way to fail with a message and a rollback, without quoting the script's
   own source.
 

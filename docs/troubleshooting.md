@@ -115,11 +115,34 @@ Output shows when a task finishes, not as it runs. Streaming is on the
 outputs` for what the tasks handed on, and `cig runs <id>` for cig's
 journal of every file the run touched.
 
-**Empty directories after a rollback**
+**A file a task modified or deleted is listed as irreversible**
 
-With cig 1.1.1, the files a task created are removed but the directories
-it created stay, empty. The next CigScript release removes them too;
-until then, delete them by hand.
+cig can only put back what it kept first. Give the task `touches`, the globs
+of the files it may change (`"src/**"`, `"package.json"`), and cig keeps
+them in the tin before the task runs, so they come back on rollback. Format
+and setup stages carry their language's sources and lockfiles already;
+`cigo show <task>` prints a task's `touches`.
+
+**`warn: ... pins cig 9.9; the installed cig is 1.2.0`**
+
+A `.cig-version` file, the manifest's `cig` key or a script's `# cig` header
+asks for a cig the installed one does not satisfy. For a script, cig itself
+hands the run to a matching version from its humidor when it has one (`cig
+versions`); for the project, change the pin or `cig update`. `cigo doctor`
+prints every version side by side; `--strict` on `run` and `check` makes a
+disagreement a stop, and `CIGO_VERSIONS=0` keeps the warning quiet.
+
+**`warn: web: node is 22.1.0, web/.nvmrc pins 20`**
+
+The tool on `PATH` is not the one the project pins. Switch it (nvm, mise,
+asdf) or change the pin; the run goes ahead unless `--strict` was given.
+
+**`cigo hit a bug and had to stop`**
+
+That is a crash in cigo itself, not in your task: a report was saved under
+`~/.cig-orchestrator/crashes/` and the run was rolled back. `cigo crash show
+<id>` prints exactly what `cigo crash send <id>` would file as an issue;
+sending is yours to decide. See [crash reports](commands.md#crash-reports).
 
 **`cig unburn` refuses with `E704`**
 
@@ -131,7 +154,8 @@ anyway, if the old content is what you want.
 
 Open a [guidance
 request](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=guidance-request.yml)
-with the command, what it printed, and `cigo version` and `cig --version`. If
-it looks like a bug, a [bug
+with the command, what it printed, and `cigo version --json`. If it looks
+like a bug, a [bug
 report](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=bug-report.yml)
-gets it fixed, with a test so it stays fixed.
+gets it fixed, with a test so it stays fixed; if cigo crashed, `cigo crash
+send <id>` files the report for you.

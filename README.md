@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/otmof-ops/CigScript"><img alt="a CigScript tool" src="https://img.shields.io/badge/a-CigScript%20tool-f97316"></a>
-  <img alt="needs cig 1.1.1 or newer" src="https://img.shields.io/badge/needs-cig%201.1.1%2B-6b7280">
+  <img alt="needs cig 1.2.1 or newer" src="https://img.shields.io/badge/needs-cig%201.2.1%2B-6b7280">
   <a href="TOOLCHAINS.md"><img alt="60 toolchains" src="https://img.shields.io/badge/toolchains-60-6b7280"></a>
   <a href="docs/roadmap.md"><img alt="actively maintained" src="https://img.shields.io/badge/status-actively%20maintained-f97316"></a>
   <a href="LICENSE"><img alt="license Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6b7280"></a>
@@ -78,7 +78,9 @@ would have run and the chain would have put back what it created.
 | an undo for what cig cannot see | a task's `undo` (a deploy's teardown, say) runs on rollback and on `cig unburn` |
 | nothing done twice | a task with `inputs` is skipped while its files, and the values it was handed, are unchanged |
 | checked first | `cigo check` finds loops, typos, unknown toolchains, missing programs and broken templates before anything runs |
-| the tools themselves | `cigo doctor` finds each toolchain's tools and versions and compares them with the pins you already keep |
+| the tools themselves | `cigo doctor` finds each toolchain's tools and versions and compares them with the pins you already keep; every command warns where a version disagrees, the installed cig against the project's pins included, and `--strict` stops on one |
+| what a task rewrites | a format stage's sources and a setup stage's lockfiles are kept in the tin before the task runs, so they come back on rollback; `touches` names a task's own |
+| cigo itself | crash reports under your control, `cigo update` to a checksum- and attestation-verified release, `cigo version --json` |
 
 ## One stage, every language
 
@@ -160,30 +162,36 @@ your sanity.
 
 ## Install
 
-Needs `cig` 1.1.1 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
+Needs `cig` 1.2.1 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
 
 ```sh
-git clone https://github.com/otmof-ops/cig-orchestrator && cd cig-orchestrator
-./install.sh      # orchestrate.cig into ~/.local/share/cig-orchestrator, cigo into ~/.local/bin
+tag=v0.3.0
+base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
+curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz" && curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
+sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256" && tar -xzf "cig-orchestrator-$tag.tar.gz"
+"cig-orchestrator-$tag/install.sh"      # orchestrate.cig into ~/.local/share/cig-orchestrator, cigo into ~/.local/bin
 cigo version
 ```
 
-`PREFIX=/opt/cig ./install.sh` installs elsewhere; `CIGO_NAME=orch ./install.sh`
-names the command something else. Run `./install.sh` again after a `git pull`
-to update. Without the launcher, the tool is one file:
-`cig run path/to/orchestrate.cig -- run ci`.
+From then on `cigo update` installs the next release, checksum and build
+attestation verified, and `cigo update --check` only says whether there is
+one. `PREFIX=/opt/cig ./install.sh` installs elsewhere; `CIGO_NAME=orch
+./install.sh` names the command something else. From a checkout, `git clone
+https://github.com/otmof-ops/cig-orchestrator && cd cig-orchestrator &&
+./install.sh`, and `git pull` updates it. Without the launcher, the tool is
+one file: `cig run path/to/orchestrate.cig -- run ci`.
 
 ## Limits, honestly
 
 - A task's output is shown when the task finishes, not as it runs. Long
   builds are quiet until they are done.
 - Tasks run one at a time.
-- Files a task *creates* inside the project are undone; files it *modifies*
-  or deletes are listed as irreversible, with the detail. What a task puts in
-  `.git`, `node_modules` or `target` stays, and a setup that fills `.venv`
-  with thousands of files takes longer under cig than outside it.
-- With cig 1.1.1, directories a task creates are left behind, empty, after a
-  rollback; the next CigScript release removes them too.
+- Files a task *creates* inside the project are undone, and the files it
+  *modifies* or deletes come back when the task said it might touch them
+  (`touches`; format and setup stages say so on their own). Anything else it
+  modifies is listed as irreversible, with the detail. What a task puts in
+  `.git`, `node_modules`, `target`, `.venv` and the other build and
+  dependency trees stays, and is never journaled.
 - The knowledge base holds each ecosystem's documented defaults. A build that
   needs an argument (an Xcode scheme, a Flutter platform, one solution out of
   several) says so in a stage override, and [TOOLCHAINS.md](TOOLCHAINS.md)

@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
 # Install cig-orchestrator: orchestrate.cig into ~/.local/share/cig-orchestrator
-# and the cigo launcher into ~/.local/bin. Run it again to update.
+# and the cigo launcher into ~/.local/bin. Run it again to update a checkout;
+# an installed cigo updates itself with `cigo update`.
 #
 #   ./install.sh                 PREFIX=/opt/cig ./install.sh      CIGO_NAME=orch ./install.sh
 set -eu
@@ -14,13 +15,13 @@ bin=$prefix/bin
 
 if ! command -v cig >/dev/null 2>&1; then
   echo "install: cig is not on PATH. Install CigScript first:" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/otmof-ops/CigScript/v1.1.1/install.sh | sh" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/otmof-ops/CigScript/v1.2.1/install.sh | sh" >&2
   exit 1
 fi
 version=$(cig --version | awk '{print $2}')
 case "$version" in
-  0.*|1.0.*|1.1.0)
-    echo "install: cig $version is too old; cig-orchestrator needs 1.1.1 or newer (cig update)" >&2
+  0.*|1.0.*|1.1.*|1.2.0)
+    echo "install: cig $version is too old; cig-orchestrator needs 1.2.1 or newer (cig update)" >&2
     exit 1 ;;
 esac
 

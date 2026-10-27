@@ -27,17 +27,23 @@ jobs:
       - name: Install cig
         run: |
           mkdir -p "$HOME/.local/bin" && cd "$RUNNER_TEMP"
-          base=https://github.com/otmof-ops/CigScript/releases/download/v1.1.1
-          curl -fsSLO "$base/cig-v1.1.1-linux-x86_64"
-          curl -fsSLO "$base/cig-v1.1.1-linux-x86_64.sha256"
-          sha256sum -c cig-v1.1.1-linux-x86_64.sha256
-          install -m 755 cig-v1.1.1-linux-x86_64 "$HOME/.local/bin/cig"
+          base=https://github.com/otmof-ops/CigScript/releases/download/v1.2.1
+          curl -fsSLO "$base/cig-v1.2.1-linux-x86_64"
+          curl -fsSLO "$base/cig-v1.2.1-linux-x86_64.sha256"
+          sha256sum -c cig-v1.2.1-linux-x86_64.sha256
+          install -m 755 cig-v1.2.1-linux-x86_64 "$HOME/.local/bin/cig"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install cigo
         run: |
-          git clone --depth 1 https://github.com/otmof-ops/cig-orchestrator "$RUNNER_TEMP/cigo"
-          "$RUNNER_TEMP/cigo/install.sh"
+          cd "$RUNNER_TEMP"
+          tag=v0.3.0
+          base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
+          curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz"
+          curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
+          sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256"
+          tar -xzf "cig-orchestrator-$tag.tar.gz"
+          "cig-orchestrator-$tag/install.sh"
 
       - run: cigo doctor
       - run: cigo --no-rollback run ci
@@ -50,8 +56,11 @@ jobs:
           path: .cig-orchestrator/
 ```
 
-The checksum line refuses a download that isn't the published binary. Pin
-the CigScript release you tested with, and bump it on purpose.
+The checksum lines refuse a download that isn't the published binary or
+tarball. Pin the CigScript and cig-orchestrator releases you tested with, and
+bump them on purpose; `cigo doctor` in the job prints every version side by
+side, and `cigo --no-rollback run ci --strict` stops on a pin the runner does
+not satisfy.
 
 ## GitLab CI
 
@@ -62,9 +71,9 @@ ci:
   image: your-build-image
   before_script:
     - mkdir -p "$HOME/.local/bin" && export PATH="$HOME/.local/bin:$PATH"
-    - base=https://github.com/otmof-ops/CigScript/releases/download/v1.1.1
-    - curl -fsSLO "$base/cig-v1.1.1-linux-x86_64" && curl -fsSLO "$base/cig-v1.1.1-linux-x86_64.sha256"
-    - sha256sum -c cig-v1.1.1-linux-x86_64.sha256 && install -m 755 cig-v1.1.1-linux-x86_64 "$HOME/.local/bin/cig"
+    - base=https://github.com/otmof-ops/CigScript/releases/download/v1.2.1
+    - curl -fsSLO "$base/cig-v1.2.1-linux-x86_64" && curl -fsSLO "$base/cig-v1.2.1-linux-x86_64.sha256"
+    - sha256sum -c cig-v1.2.1-linux-x86_64.sha256 && install -m 755 cig-v1.2.1-linux-x86_64 "$HOME/.local/bin/cig"
     - git clone --depth 1 https://github.com/otmof-ops/cig-orchestrator /tmp/cigo && /tmp/cigo/install.sh
   script:
     - cigo doctor

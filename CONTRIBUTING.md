@@ -52,6 +52,8 @@ the tests whose names contain them.
    [CHANGELOG](CHANGELOG.md).
 6. Open the pull request; the template asks for the rest.
 
+A release is cut from main by the checklist in [docs/releasing.md](docs/releasing.md).
+
 ## Adding a toolchain
 
 A toolchain is data in `orchestrate.cig`, under "the toolchains", in the

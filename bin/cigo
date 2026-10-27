@@ -3,13 +3,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # cigo: the launcher for cig-orchestrator. All the logic is in orchestrate.cig;
 # this finds it, finds the project (the nearest directory up that has a
-# cig-tasks.json), and hands cig the flags that are cig's own.
+# cig-tasks.json), checks the cig it is about to hand the tool to, and passes
+# cig the flags that are cig's own.
 tool="$(cd "$(dirname "$0")/.." && pwd)/orchestrate.cig"
+# The cig this cigo is written for: the same floor as the `# cig` pin in the
+# tool, checked here for cigs too old to read the pin themselves.
+needs_major=1
+needs_minor=2
+needs_patch=1
 
 if ! command -v cig >/dev/null 2>&1; then
   echo "cigo: cig is not on PATH; install CigScript first: https://github.com/otmof-ops/CigScript" >&2
   exit 127
 fi
+
+version=$(cig --version 2>/dev/null | awk '{print $2}')
+case "$version" in
+  [0-9]*.[0-9]*.[0-9]*)
+    major=${version%%.*}; rest=${version#*.}; minor=${rest%%.*}; patch=${rest#*.}; patch=${patch%%[!0-9]*}
+    too_old=0
+    if [ "$major" -lt "$needs_major" ]; then too_old=1
+    elif [ "$major" -eq "$needs_major" ] && [ "$minor" -lt "$needs_minor" ]; then too_old=1
+    elif [ "$major" -eq "$needs_major" ] && [ "$minor" -eq "$needs_minor" ] && [ "${patch:-0}" -lt "$needs_patch" ]; then too_old=1
+    fi
+    if [ "$too_old" -eq 1 ]; then
+      echo "cigo: cig $version is too old; cig-orchestrator needs $needs_major.$needs_minor.$needs_patch or newer (cig update)" >&2
+      exit 2
+    fi ;;
+  *)
+    echo "cigo: could not read the version of cig (\`cig --version\` said: $version)" >&2
+    exit 2 ;;
+esac
 
 global=""
 run=""
@@ -23,7 +47,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "${1:-help}" in
-  adopt|help|version|toolchains|--help|-h|--version) ;;
+  adopt|help|version|toolchains|update|crash|config|--help|-h|--version) ;;
   *)
     dir=$PWD
     while [ "$dir" != "/" ] && [ ! -f "$dir/cig-tasks.json" ]; do
@@ -34,6 +58,12 @@ case "${1:-help}" in
     fi
     ;;
 esac
+
+# `cigo update` replaces the tool and the launcher where they are installed;
+# `cigo version --json` names them.
+CIGO_TOOL=$tool
+CIGO_LAUNCHER=$0
+export CIGO_TOOL CIGO_LAUNCHER
 
 # The flag lists are single words, split on purpose.
 # shellcheck disable=SC2086

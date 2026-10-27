@@ -30,6 +30,7 @@ after that it's yours, and `cigo check` reads it over before anything runs.
 | key | meaning |
 |---|---|
 | `project` | the project's name, in the run's first line and as `{{project}}`; the directory's name when absent |
+| `cig` | the cig this project is written for, as cig reads a pin: `1.2` (any 1.2.x), `1.2.0` (exactly), `>=1.2.0`; every command warns when the installed cig does not satisfy it (`.cig-version` at the root says the same to cig itself) |
 | `defaults` | `timeout_ms`, `retries` and `retry_delay_ms` for every task that doesn't set its own |
 | `toolchains` | this project's changes to built-in toolchains, and toolchains of its own ([your own toolchains](custom-toolchains.md)) |
 | `components` | a directory and the toolchain that builds it, one entry each |
@@ -64,6 +65,7 @@ Each component becomes one task per stage it has, named `component:stage`
 | `"build": {"shell": "pnpm run build && pnpm run size", "timeout_ms": 900000}` | build runs this, with these options |
 | `"test": {"timeout_ms": 1200000, "retries": 1}` | the toolchain's test, with these options |
 | `"storybook": {"cmd": ["pnpm", "run", "storybook", "--ci"]}` | a task that isn't a stage, `web:storybook` |
+| `"format": {"touches": ["src/**"]}` | the toolchain's format, with these files kept in the tin first (below) |
 
 A command in an override can use the toolchain's vars (`{component}`,
 `{dir}`, `{locked}`...). Options on a stage the toolchain doesn't have are an
@@ -108,6 +110,7 @@ group*), and `ci` runs format-check, lint, check, build and test everywhere.
 | `retries`, `retry_delay_ms` | attempts after the first, and the pause between them |
 | `ok` | exit codes that count as success, `[0]` by default; `grep`'s 1 is an answer, not a failure |
 | `undo`, `undo_shell` | how to take the task back, as `cmd` or `shell`; runs on rollback and on `cig unburn`, only for a task that succeeded |
+| `touches` | a glob or a list of globs, relative to the task's directory, of the files the task may change (`"*"` the directory's own files, `"**"` everything under it, `"src/**"`, `"package.json"`). cig keeps each existing file under them in the tin before the task runs, so a file the task modifies or deletes comes back on rollback, byte for byte, where it would otherwise be listed as irreversible. A format stage gets its language's source files and a setup stage its lockfiles from the knowledge base without being told; a toolchain of your own sets `touches: {format: [...], setup: [...]}` |
 
 A task with `needs` and nothing to run is a group: `"release": {"needs":
 ["ci", "deploy"]}`. A task with the name of a generated one (`api:test`,
