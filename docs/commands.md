@@ -58,15 +58,40 @@ needs, whose output it uses, and its options.
 
 **`cigo check`** reads the manifest against the project: unknown keys,
 toolchains and components, loops, missing programs and scripts, broken
-templates, stage overrides that leave a task with nothing to run, and the
-conditions, alternatives and vars of the project's own toolchains. It
-changes nothing.
+templates, stage overrides that leave a task with nothing to run, the shape
+of each task's `touches`, the conditions, alternatives and vars of the
+project's own toolchains, and every version disagreement (below) as a
+warning. `--strict` makes a disagreement an error. It changes nothing.
 
 **`cigo doctor`** looks at each toolchain the project uses: whether its tools
 are on `PATH`, which versions they are, and whether those match the pins the
 project keeps (`.nvmrc`, `.python-version`, `.tool-versions`, `mise.toml`,
 `rust-toolchain.toml`, `global.json`, and the minimums in `go.mod` and
-`build.zig.zon`, among others). It exits 1 when a tool is missing.
+`build.zig.zon`, among others); then the cig this runs under against the
+range cigo supports and every cig pin the project carries. It exits 1 when a
+tool is missing, and with `--strict` when a version disagrees.
+
+**`cigo version`** prints this cigo and the cig it runs on; `--json` adds
+the range of cig it supports, whether the installed cig is inside it, and
+where the tool is installed.
+
+**`cigo update`** installs the newest release over this one: it reads the
+releases, downloads `cig-orchestrator-vX.Y.Z.tar.gz` and its `.sha256`,
+refuses a checksum that does not match, checks the build attestation when
+`gh` is installed, and runs the release's own `install.sh` into the same
+prefix. `--check` only says whether there is one. `--to=X.Y.Z` installs that
+version, a yanked one included (`cigo update` on its own never picks a
+version listed in the repository's `YANKED` file). A cigo running from a git
+checkout is updated with `git pull` instead, and `update` says so.
+
+**`cigo crash`** is the crash reports: `list`, `show <id>`, `send <id>`,
+`delete <id>` (or `--all`). See [crash reports](#crash-reports).
+
+**`cigo config`** reads and writes `~/.cig-orchestrator/config`:
+`crash_reports` (`ask`, `always`, `never`), `issues_repo` and
+`update_channel` (`stable`, `prerelease`). `cigo config` lists them,
+`cigo config <key>` prints one, `cigo config <key> <value>` sets it,
+`--unset` removes it.
 
 **`cigo outputs`** shows what the last run's tasks handed on; `cigo outputs
 stats` shows one task's, as JSON.
@@ -75,6 +100,48 @@ stats` shows one task's, as JSON.
 rust-cargo` prints one in full (every stage, its alternatives and the
 conditions that choose them); `--markdown` writes the table in
 [TOOLCHAINS.md](../TOOLCHAINS.md).
+
+## Version checks, on every command
+
+Every command that opens a project looks at the versions it depends on and
+says, on stderr, where they disagree:
+
+- the cig this runs under against the range cigo supports (`cigo version
+  --json` shows both), and against the cig on `PATH` when they differ, since
+  that one runs the tasks that call `cig`;
+- the cig against every cig pin the project carries: `.cig-version` at the
+  root, `"cig"` in the manifest, and the `# cig` header of each script a task
+  hands to `cig run` or a CigScript component holds (written as cig reads
+  them: `1.2` is any 1.2.x, `1.2.0` exactly that, `>=1.2.0` that or newer);
+- each toolchain's installed version against the pins the project keeps
+  (`.nvmrc`, `.python-version`, `go.mod`, `rust-toolchain.toml` and the rest
+  of the list under `cigo doctor`).
+
+The cig pins are files, so `list`, `plan` and `show` read them on every call.
+Asking a tool its version is a process, which cig journals as a hop, so
+`run` (for the components about to run), `check` and `doctor` ask; `list`,
+`plan` and `show` do not. `--strict` on `run`, `check` and `doctor` turns a
+disagreement into a stop; `CIGO_VERSIONS=0` keeps the warnings quiet.
+
+## Crash reports
+
+A task failing is cigo doing its job. cigo itself failing, a runtime or type
+error inside `orchestrate.cig`, is a bug in cigo, and it is reported the way
+cig reports its own crashes: a report is saved under
+`~/.cig-orchestrator/crashes/`, the run is rolled back as any failed run is,
+and nothing is sent anywhere unless you say so.
+
+The report holds cigo's and cig's versions, OS and architecture, the command
+line (token-, secret-, URL- and path-looking values redacted), the project
+directory relative to your home, a timestamp, the error and its line in
+`orchestrate.cig`, and the id of the run. It does not hold your manifest,
+environment variable values, or file contents. `cigo crash show <id>` is
+exactly what `cigo crash send <id>` would file as a public issue on
+`issues_repo`, one issue per fingerprint, with a comment when the same crash
+is seen again. `crash_reports = always` sends without asking; `never` keeps
+every report local; `ask`, the default, prints the two commands and leaves it
+with you (cigo runs under cig, which owns the terminal, so it does not
+prompt). `CIGO_INTERNAL_PANIC=<command>` raises one on purpose, for the suite.
 
 ## cig's own flags
 
@@ -121,8 +188,16 @@ Everything goes in `.cig-orchestrator/` at the project root; add it to
 | `run/<task>.out` | the `$CIG_OUTPUT` file a task wrote |
 | `state/<task>.json` | a task's inputs fingerprint and values, for skipping it when up to date |
 
-cig keeps its own run records (the journal and snapshots) under
-`~/.cigscript/runs/`.
+cig keeps its own run records (the journal, the snapshots, and the tin that
+holds the before-bytes of what a task's `touches` named) under
+`~/.cigscript/`. cigo keeps its own, outside any project, under
+`~/.cig-orchestrator/` (`CIGO_HOME`):
+
+| path | holds |
+|---|---|
+| `config` | `crash_reports`, `issues_repo`, `update_channel` (`cigo config`) |
+| `crashes/<id>.json` | crash reports, yours until you send them (`cigo crash`) |
+| `update/<tag>/` | the last release `cigo update` downloaded and verified |
 
 ## Environment
 
@@ -132,6 +207,10 @@ cig keeps its own run records (the journal and snapshots) under
 | `CIG_PLAIN=1` | the same as `--plain` |
 | `CIG_DOCTOR=0` | the same as `--no-doctor` |
 | `CIGSCRIPT_HOME` | where cig keeps run records, instead of `~/.cigscript` |
+| `CIGO_HOME` | where cigo keeps its config, crash reports and downloads, instead of `~/.cig-orchestrator` |
+| `CIGO_VERSIONS=0` | no version warnings |
+| `CIGO_UPDATE_MANIFEST`, `CIGO_YANKED_FILE` | a local releases list and YANKED file for `cigo update`, instead of GitHub's (the suite uses them) |
+| `CIGO_INTERNAL_PANIC=<command>` | crash on purpose at that command (`mid-run` for inside a run), for the suite |
 
 ## Without the launcher
 

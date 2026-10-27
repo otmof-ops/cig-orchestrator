@@ -4,6 +4,46 @@ What building this orchestrator taught about CigScript. Three rounds: the
 sandbox (against 1.1.0 with the hardening round merged), 0.1.0 of the tool,
 and 0.2.0, the polyglot orchestrator (both against 1.1.1).
 
+## Round four: building 0.3.0 (CigScript 1.2.0)
+
+0.3.0 is the version-and-crash parity round, built against 1.2.0 the day it
+was cut, so most of what round three asked for was there to use.
+
+Delivered upstream and used: the tin (`proc.run(..., {touches: [...]})`),
+so a task's modified and deleted files come back; `.cigignore` and the
+built-in skip list (`.venv`, `__pycache__`, `.gradle`, `.terraform`), so a
+setup is no longer journaled file by file; `cig.run_id()`, `cig.version()`,
+`cig.os()`, `cig.arch()`; the pin (`# cig >=1.2.0` on the tool itself, read
+by cig, and the same grammar cigo reads from `.cig-version`, the manifest's
+`cig` and scripts' headers); the humidor, which cigo points people at when a
+script pins another cig.
+
+Found this round:
+
+- **A write outside the pack is refused, and a write inside it is rolled
+  back.** A crash report has to survive the rollback that follows the crash,
+  so cigo writes it through a hop (`sh -c 'cat > file'`) into
+  `~/.cig-orchestrator/`, outside the pack, where the hop is irreversible by
+  definition and the file stays. A native way to write a file that is
+  deliberately outside the journal (a log, a report, a cache) would read
+  better than a shell hop.
+- **A script has no way to know whether stdin is a terminal.** cig's crash
+  prompt asks `[y/N]`; cigo cannot, because `stdin()` reads everything and
+  blocks, so `crash_reports = ask` prints the two commands instead of
+  asking. `stdin.is_terminal()` would close the gap.
+- **A probe is a burn.** Asking `node --version` is a hop, and a hop is a
+  burn, so `cigo list` would leave a run record of irreversible ops behind
+  if it asked; it reads the pin files alone and leaves the asking to `run`,
+  `check` and `doctor`. A read-only hop (no watch, no journal, output only)
+  is the "streaming hop" item's neighbour.
+- **The error raised again from an `ashtray` is framed at the re-raise.**
+  The crash wrapper catches everything, reports a runtime error, and
+  coughs it on; cig's report then quotes `cough what_went_wrong` in the
+  wrapper rather than the line that failed. The report keeps the message
+  and the original line is in the crash report, so nothing is lost, but
+  a way to re-raise without re-framing is the same request as round
+  three's "fail with a message of its own".
+
 ## Round three: building 0.2.0 (CigScript 1.1.1)
 
 0.2.0 runs eight components' stages as one chain and hands values from one

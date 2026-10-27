@@ -1005,6 +1005,296 @@ test("four braces reach the program as two, and check accepts them", pack() {
   says(q.out, "four braces")
 })
 
+# ----- versions: the cig, the project's pins, the tools (0.3.0) ------------------
+
+test("version names this cigo and the cig it runs on, as text and as JSON", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick r = tool_in(dir, ["version"])
+  exits(r, 0)
+  says(r.out, "cig-orchestrator ")
+  says(r.out, "(cig ")
+  stick j = json.parse(tool_in(dir, ["version", "--json"]).out)
+  assert(j.version != "" and j.cig != "" and j.cig_needs.starts_with(">="), "incomplete: ${json.stringify(j)}")
+  assert(j.cig_ok == true, "this cig is outside cigo's range: ${json.stringify(j)}")
+})
+
+test("a cig pin the installed cig does not satisfy is flagged on every command, and --strict stops", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.write_text(path.join(dir, ".cig-version"), "9.9\n")
+  }
+  stick l = tool_in(dir, ["list"])
+  exits(l, 0)
+  says(l.err, ".cig-version pins cig 9.9; the installed cig is ")
+  stick c = tool_in(dir, ["check"])
+  exits(c, 0)
+  says(c.out, "warning: .cig-version: .cig-version pins cig 9.9")
+  stick strict = tool_in(dir, ["check", "--strict"])
+  exits(strict, 1)
+  says(strict.out, "error: .cig-version: .cig-version pins cig 9.9")
+  stick run = tool_in(dir, ["run", "version", "--strict"])
+  exits(run, 2)
+  says(run.err, "1 version disagreement and --strict given")
+  # Quiet when asked, and quiet when the pin fits.
+  stick quiet = hop_env(dir, "cig", ["run", tool, "--", "list"], {CIGO_VERSIONS: "0"})
+  exits(quiet, 0)
+  never_says(quiet.err, "pins cig")
+  burn {
+    fs.write_text(path.join(dir, ".cig-version"), ">=1.2.0\n")
+  }
+  never_says(tool_in(dir, ["list"]).err, "pins cig")
+})
+
+test("the manifest's cig key and a script's # cig header are read as pins", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  edit_manifest(dir, pack(m) {
+    m.cig = "1.2"
+    m.tasks["old-script"] = {cmd: ["cig", "run", "old.cig"]}
+  })
+  burn {
+    fs.write_text(path.join(dir, "old.cig"), "#!/usr/bin/env cig\n# cig 1.0.0\nexhale \"old\"\n")
+  }
+  stick l = tool_in(dir, ["list"])
+  exits(l, 0)
+  says(l.err, "old.cig pins cig 1.0.0; the installed cig is ")
+  says(l.err, "humidor")
+  never_says(l.err, "cig-tasks.json cig pins")
+  edit_manifest(dir, pack(m) {
+    m.cig = "banana"
+  })
+  stick c = tool_in(dir, ["check"])
+  exits(c, 1)
+  says(c.out, "`cig` is the cig version this project is written for")
+})
+
+test("toolchain pins are flagged before a run and in check, not only by doctor", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick r = tool_stubbed(dir, ["run", "web:build"])
+  exits(r, 0)
+  says(r.err, "web: node is 99.1.0, web/.nvmrc pins 20")
+  stick c = tool_stubbed(dir, ["check"])
+  exits(c, 0)
+  says(c.out, "warning: web: web: node is 99.1.0, web/.nvmrc pins 20")
+  stick strict = tool_stubbed(dir, ["run", "web:build", "--strict"])
+  exits(strict, 2)
+  says(strict.err, "version disagreement")
+  # plan looks at the files alone, so it never asks a tool its version.
+  stick asked_before = stub_log(dir).len()
+  stick p = tool_stubbed(dir, ["plan", "web:build"])
+  exits(p, 0)
+  never_says(stub_log(dir).slice(asked_before), "node --version")
+  stick d = tool_stubbed(dir, ["doctor"])
+  exits(d, 0)
+  says(d.out, "cig (CigScript): the cig this runs under")
+  says(d.out, "pin      cig-orchestrator ")
+  exits(tool_stubbed(dir, ["doctor", "--strict"]), 1)
+})
+
+# ----- the tin: what a task may change comes back (0.3.0, cig 1.2) -------------------
+
+test("a task's touches are kept in the tin, so a file it rewrote comes back after a later failure", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  edit_manifest(dir, pack(m) {
+    m.tasks["rewrite"] = {cmd: ["bash", "-c", "echo changed > in.txt"], touches: ["in.txt"]}
+    m.tasks["then-fail"] = {cmd: ["bash", "-c", "exit 7"], needs: ["rewrite"]}
+  })
+  stick before = read(dir, "in.txt")
+  stick r = tool_in(dir, ["run", "then-fail"])
+  exits(r, 1)
+  says(r.err, "restored hop modified")
+  says(r.err, "(tin)")
+  assert(read(dir, "in.txt") == before, "in.txt was not put back: ${read(dir, "in.txt")}")
+  stick s = tool_in(dir, ["show", "rewrite"])
+  exits(s, 0)
+  says(s.out, "touches    in.txt")
+  says(s.out, "kept in the tin before the task runs")
+  stick p = tool_in(dir, ["plan", "rewrite"])
+  exits(p, 0)
+  says(p.out, "touches in.txt")
+})
+
+test("touches must be relative globs inside the project; a stage's come from the knowledge base", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  edit_manifest(dir, pack(m) {
+    m.tasks["bad"] = {cmd: ["true"], touches: ["/etc/x", "../up"]}
+    m.tasks["worse"] = {cmd: ["true"], touches: 7}
+  })
+  stick c = tool_in(dir, ["check"])
+  exits(c, 1)
+  says(c.out, "error: bad: `touches`: `/etc/x` must be a relative glob inside the project")
+  says(c.out, "error: bad: `touches`: `../up` must be a relative glob inside the project")
+  says(c.out, "error: worse: `touches` is a glob or a list of globs")
+  stick mono = fresh("tests/fixtures/monorepo")
+  exits(tool_in(mono, ["adopt", "--write"]), 0)
+  stick s = tool_stubbed(mono, ["show", "ml:setup"])
+  exits(s, 0)
+  says(s.out, "touches    uv.lock poetry.lock pdm.lock Pipfile.lock")
+  # A stage override's touches win over the family's.
+  edit_manifest(mono, pack(m) {
+    m.components.ml.stages = {setup: {touches: ["uv.lock"]}}
+  })
+  says(tool_stubbed(mono, ["show", "ml:setup"]).out, "touches    uv.lock\n")
+})
+
+# ----- crash reports and config: the same deal as cig's (0.3.0) ---------------------
+
+pull cigo_home(dir) {
+  snuff dir + "-cigo-home"
+}
+
+pull tool_crashing(dir, words, where) {
+  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, {CIGO_HOME: cigo_home(dir), CIGO_INTERNAL_PANIC: where})
+}
+
+pull tool_home(dir, words) {
+  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, {CIGO_HOME: cigo_home(dir)})
+}
+
+test("a bug inside cigo is a crash report, saved outside the project and kept through the rollback", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick r = tool_crashing(dir, ["run", "version"], "mid-run")
+  exits(r, 1)
+  says(r.err, "cigo hit a bug and had to stop: map has no key `this_key_does_not_exist`")
+  says(r.err, "A crash report was saved locally:")
+  says(r.err, "cigo crash show ")
+  says(r.err, "rolling back")
+  stick reports = fs.glob(path.join(cigo_home(dir), "crashes", "*.json"))
+  assert(reports.len() == 1, "expected one report, found ${reports.len()}")
+  stick report = json.load(reports[0])
+  assert(report.tool == "cig-orchestrator" and report.fingerprint.len() == 8 and report.kind == "runtime", json.stringify(report))
+  assert(report.command[0] == "run" and report.version != "" and report.cig != "", json.stringify(report))
+  assert(report.panic_location.starts_with("orchestrate.cig:"), report.panic_location)
+  assert(report.active_run_id != null, "the run id is missing: ${json.stringify(report)}")
+  assert(not fs.exists(path.join(dir, ".cig-orchestrator")), "the run was not rolled back")
+  # list, show, delete
+  stick l = tool_home(dir, ["crash", "list"])
+  exits(l, 0)
+  says(l.out, report.id)
+  says(l.out, "orchestrate.cig:")
+  stick s = tool_home(dir, ["crash", "show", report.id.slice(0, 10)])
+  exits(s, 0)
+  says(s.out, "this is exactly what `cigo crash send` would file")
+  says(s.out, "\"fingerprint\": \"${report.fingerprint}\"")
+  stick d = tool_home(dir, ["crash", "delete", report.id])
+  exits(d, 0)
+  assert(fs.glob(path.join(cigo_home(dir), "crashes", "*.json")).is_empty(), "the report is still there")
+  stick none = tool_home(dir, ["crash", "list"])
+  exits(none, 0)
+  says(none.err, "no crash reports saved (that is good)")
+  # A task failing is not a crash.
+  stick fail = tool_home(dir, ["run", "liar"])
+  exits(fail, 1)
+  never_says(fail.err, "cigo hit a bug")
+  assert(fs.glob(path.join(cigo_home(dir), "crashes", "*.json")).is_empty(), "a task failure wrote a crash report")
+})
+
+test("config keeps crash_reports, issues_repo and update_channel, and never keeps a report local", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick all = tool_home(dir, ["config"])
+  exits(all, 0)
+  says(all.out, "crash_reports   ask")
+  says(all.out, "update_channel  stable")
+  exits(tool_home(dir, ["config", "crash_reports", "sometimes"]), 2)
+  stick set = tool_home(dir, ["config", "crash_reports", "never"])
+  exits(set, 0)
+  says(set.err, "crash_reports = never")
+  says(tool_home(dir, ["config", "crash_reports"]).out, "never")
+  stick r = tool_crashing(dir, ["list"], "list")
+  exits(r, 1)
+  says(r.err, "crash_reports is \"never\": the report stays local")
+  stick reports = fs.glob(path.join(cigo_home(dir), "crashes", "*.json"))
+  assert(reports.len() == 1, "the report was not saved")
+  stick send = tool_home(dir, ["crash", "send", json.load(reports[0]).id])
+  exits(send, 2)
+  says(send.err, "crash_reports is \"never\"")
+  exits(tool_home(dir, ["config", "crash_reports", "--unset"]), 0)
+  says(tool_home(dir, ["config", "crash_reports"]).out, "ask")
+})
+
+# ----- update: a verified release, installed over this one (0.3.0) ------------------
+
+# A release of the tool at `version`, as the release job builds it: the
+# tarball, its checksum, and a releases list that points at them.
+pull fake_release(dir, version) {
+  stick rel = dir + "-release"
+  stick name = "cig-orchestrator-v${version}"
+  stick src = path.join(rel, name)
+  burn {
+    fs.mkdir(path.join(src, "bin"))
+    for f in ["orchestrate.cig", "install.sh", "LICENSE", "NOTICE", "README.md", "CHANGELOG.md", "TOOLCHAINS.md", "YANKED"] {
+      fs.cp(path.join(root, f), path.join(src, f))
+    }
+    fs.cp(launcher, path.join(src, "bin", "cigo"))
+    fs.cp(path.join(root, "LICENSES"), path.join(src, "LICENSES"))
+    fs.cp(path.join(root, "docs"), path.join(src, "docs"))
+    fs.write_text(path.join(src, "orchestrate.cig"), fs.read_text(path.join(src, "orchestrate.cig")).replace('stick VERSION = "0.3.0"', 'stick VERSION = "' + version + '"'))
+    stick t = proc.run("tar", ["-czf", name + ".tar.gz", name], {cwd: rel, timeout_ms: 60000})
+    assert(t.code == 0, t.err)
+    fs.write_text(path.join(rel, name + ".tar.gz.sha256"), hash.sha256_file(path.join(rel, name + ".tar.gz")) + "  " + name + ".tar.gz\n")
+    json.save(path.join(rel, "releases.json"), [{
+      tag_name: "v${version}", draft: false, prerelease: false, html_url: "https://example.invalid/releases/v${version}", published_at: "2026-10-27T00:00:00Z",
+      assets: [
+        {name: name + ".tar.gz", browser_download_url: "file://" + path.join(rel, name + ".tar.gz")},
+        {name: name + ".tar.gz.sha256", browser_download_url: "file://" + path.join(rel, name + ".tar.gz.sha256")},
+      ],
+    }], 2)
+  }
+  snuff rel
+}
+
+test("update --check reads the releases, and update installs a verified tarball over this one", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick rel = fake_release(dir, "9.0.0")
+  stick prefix = dir + "-prefix"
+  roll installed = null
+  burn {
+    installed = proc.run("sh", [path.join(root, "install.sh")], {cwd: root, env: {PREFIX: prefix}, timeout_ms: 60000})
+  }
+  assert(installed.code == 0, installed.err)
+  stick more = {CIGO_HOME: cigo_home(dir), CIGO_UPDATE_MANIFEST: path.join(rel, "releases.json"), CIGO_TOOL: path.join(prefix, "share/cig-orchestrator/orchestrate.cig"), CIGO_LAUNCHER: path.join(prefix, "bin/cigo")}
+  stick check = hop_env(dir, "cig", ["run", tool, "--", "update", "--check"], more)
+  exits(check, 0)
+  says(check.out, "cig-orchestrator 9.0.0 is available (released 2026-10-27)")
+  stick up = hop_env(dir, "cig", ["run", tool, "--", "update"], more)
+  exits(up, 0)
+  says(up.out, "updated: cig-orchestrator ")
+  says(up.out, "-> 9.0.0 (verified)")
+  stick v = hop_env(dir, "cig", ["run", path.join(prefix, "share/cig-orchestrator/orchestrate.cig"), "--", "version"], more)
+  exits(v, 0)
+  says(v.out, "cig-orchestrator 9.0.0")
+  # A yanked version is never picked; a checksum that does not match is never installed.
+  burn {
+    fs.write_text(path.join(rel, "YANKED"), "9.0.0 broken on purpose\n")
+  }
+  stick gone = hop_env(dir, "cig", ["run", tool, "--", "update", "--check"], more.merge({CIGO_YANKED_FILE: path.join(rel, "YANKED")}))
+  exits(gone, 2)
+  says(gone.err, "no release of ")
+  burn {
+    fs.write_text(path.join(rel, "cig-orchestrator-v9.0.0.tar.gz.sha256"), "deadbeef  cig-orchestrator-v9.0.0.tar.gz\n")
+  }
+  stick bad = hop_env(dir, "cig", ["run", tool, "--", "update", "--to=9.0.0"], more)
+  exits(bad, 2)
+  says(bad.err, "checksum mismatch for v9.0.0")
+  says(bad.err, "nothing installed")
+})
+
+test("the launcher refuses a cig older than the tool's floor, and names the tool", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick fake = dir + "-old-cig"
+  burn {
+    fs.mkdir(fake)
+    fs.write_text(path.join(fake, "cig"), "#!/bin/sh\necho 'cig 1.1.2'\n")
+    stick chmod = proc.run("chmod", ["755", path.join(fake, "cig")], {timeout_ms: 10000})
+    assert(chmod.code == 0, chmod.err)
+  }
+  stick old = hop_env(dir, launcher, ["version"], {PATH: fake + ":" + env.get("PATH", "")})
+  exits(old, 2)
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.2.1 or newer")
+  stick j = json.parse(hop(dir, launcher, ["version", "--json"]).out)
+  assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
+})
+
 # ----- the end --------------------------------------------------------------
 
 exhale ""

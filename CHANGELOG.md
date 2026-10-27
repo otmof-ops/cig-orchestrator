@@ -1,6 +1,56 @@
 # Changelog
 
-## Unreleased
+All notable changes to cig-orchestrator. The format follows Keep a Changelog;
+the project follows semantic versioning, and from 0.3.0 every version is a
+tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
+repository root lists versions it must not pick.
+
+## 0.3.0 — 2026-10-27
+
+Needs cig 1.2.1: the tin, the pin and `cig.version()` come with 1.2.0, and 1.2.1 snapshots a read-only file (a tin object) like any other, which the suite relies on.
+
+- **Version checks on every command.** Every command that opens a project
+  says, on stderr, where versions disagree: the installed cig against the
+  range cigo supports and against the project's pins (`.cig-version`, the
+  manifest's new `cig` key, the `# cig` header of each script a task hands
+  to cig or a CigScript component holds), the cig on `PATH` against the one
+  running cigo, and each toolchain's version against the pins the project
+  keeps (`.nvmrc`, `go.mod`, `rust-toolchain.toml`...). `check` lists them
+  as warnings, `doctor` prints every version side by side, and `--strict`
+  on `run`, `check` and `doctor` stops on a disagreement. `CIGO_VERSIONS=0`
+  keeps them quiet. (#18, step 11, and the versioning parity with CigScript)
+- **The tin: what a task rewrites comes back.** A task's `touches` (a glob
+  or a list, relative to its directory) names the files it may change; cig
+  1.2 keeps them before the task runs and puts a modified or deleted one
+  back on rollback, where it was listed as irreversible before. Format stages
+  carry their language's source files and setup stages their lockfiles from
+  the knowledge base, so an adopted project gets this without a line of
+  config; a toolchain's `touches` map or a stage override sets its own.
+  `cigo check` refuses an absolute or climbing glob; `cigo show` and `cigo
+  plan` print them. (#18, step 11)
+- **Crash reports, the same deal as cig's.** A runtime or type error inside
+  `orchestrate.cig` is a bug in cigo: a report (versions, OS, the redacted
+  command line, the error and its line, the run id; never your manifest,
+  environment or files) is saved under `~/.cig-orchestrator/crashes/` by a
+  hop outside the project, so the rollback that follows the crash leaves it
+  in place, and nothing is sent unless you say so. `cigo crash
+  list|show|send|delete`; `crash_reports`, `issues_repo` and
+  `update_channel` in `~/.cig-orchestrator/config` through `cigo config`.
+  `CIGO_INTERNAL_PANIC` raises one on purpose, for the suite.
+- **Releases, and `cigo update`.** A tag `vX.Y.Z` builds
+  `cig-orchestrator-vX.Y.Z.tar.gz`, its `.sha256` and a build attestation,
+  with the licence beside them. `cigo update` installs the newest release the
+  channel allows over the installed one, refusing a checksum that does not
+  match and checking the attestation when `gh` is installed; `--check` only
+  looks, `--to=X.Y.Z` names one. `cigo version --json` names this cigo, the
+  cig it runs on, the range it supports and where it is installed.
+- **The launcher checks cig first.** `cigo` refuses a cig older than 1.2.1
+  with the version and the remedy, before the tool runs; `orchestrate.cig`
+  carries `# cig >=1.2.1`, which cig 1.2 enforces on its own. `install.sh`
+  says the same.
+- **CI** installs cig 1.2.1 and installs cigo from the release tarball.
+
+The changes below were on main before 0.3.0 and ship with it.
 
 - **A `.cig` script runs as its own cig run and is now undone with it.** A
   task whose command is `cig run <file>` (how the `scripts` toolchain adopts

@@ -1,0 +1,4 @@
+# Versions of cig-orchestrator that `cigo update` must not pick, one per line
+# with the reason after it. Releases are never deleted and tags never moved:
+# a yanked version stays available to `cigo update --to X.Y.Z`, which names it
+# on purpose. The same convention as CigScript's YANKED file.

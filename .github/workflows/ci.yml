@@ -2,6 +2,7 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 permissions:
@@ -11,7 +12,7 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     env:
-      CIG_VERSION: v1.1.2
+      CIG_VERSION: v1.2.1
     steps:
       - uses: actions/checkout@v7
 
@@ -49,3 +50,38 @@ jobs:
           name: cigo-logs
           path: .cig-orchestrator/
           include-hidden-files: true
+
+  # A tag vX.Y.Z is a release: one tarball, its checksum, a build attestation,
+  # and the licence beside them. `cigo update` reads these.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: the tarball and its checksum (matches orchestrate.cig's `cigo update`)
+        run: |
+          tag="$GITHUB_REF_NAME"
+          grep -q "^stick VERSION = \"${tag#v}\"" orchestrate.cig || { echo "orchestrate.cig says another version than $tag" >&2; exit 1; }
+          dir="cig-orchestrator-$tag"
+          mkdir -p "$dir/bin"
+          cp orchestrate.cig install.sh LICENSE NOTICE README.md CHANGELOG.md TOOLCHAINS.md YANKED "$dir/"
+          cp bin/cigo "$dir/bin/cigo"
+          cp -r LICENSES docs "$dir/"
+          tar -czf "$dir.tar.gz" "$dir"
+          sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
+          cat "$dir.tar.gz.sha256"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: cig-orchestrator-${{ github.ref_name }}.tar.gz
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cig-orchestrator-${{ github.ref_name }}.tar.gz
+            cig-orchestrator-${{ github.ref_name }}.tar.gz.sha256
+            LICENSE
+            NOTICE
