@@ -46,6 +46,24 @@ repository root lists versions it must not pick.
   Windows console code page never fails a task that exited 0; a `text`
   capture has no stray `\r`. (#27)
 
+- **An `os:` condition, and commands for each OS.** `os:windows`, `os:macos`,
+  `os:linux`, `os:bsd` and `os:unix` join the conditions (`cig.os()` behind
+  them), and the knowledge base uses them: `gradlew.bat`, `mvnw.cmd` and
+  `mill.bat` on Windows, the venv's `Scripts\python.exe`, `python` before
+  `python3` where the latter is the Store's alias, `pwsh` or Windows
+  PowerShell, `--config Debug` for CMake's multi-config generators, `gmake`
+  for a GNU makefile on the BSDs, Xcode only on macOS, no Clojure CLI on
+  Windows, `ruby bin/rails` and `php vendor/bin/...` everywhere. (#24)
+- **No shell in the knowledge base.** Stages that were `sh -c` lines are
+  `cmds` (commands in a row), `each` (one command per file), `rm` (a
+  journaled removal, undone on rollback) or `when` alternatives, and vars
+  can come from a `glob` or a `files` list, so `gem build *.gemspec`,
+  `gofmt -l` over the tree and `clang-format` over the sources need no
+  shell; `fail_on_output` makes a check that prints its findings fail. The
+  manifest takes `cmds`, `each`, `rm` and `fail_on_output` too. One `sh`
+  line remains, the shell toolchain's own lint on Unix, with a per-file
+  `shellcheck` beside it for Windows. (#25)
+
 ## 0.3.0 — 2026-10-27
 
 Needs cig 1.2.1: the tin, the pin and `cig.version()` come with 1.2.0, and 1.2.1 snapshots a read-only file (a tin object) like any other, which the suite relies on.

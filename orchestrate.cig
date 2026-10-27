@@ -175,14 +175,15 @@ stick PY_DEV_EXTRA = 'grep:pyproject.toml:(?m)^\[project\.optional-dependencies\
 stick PY_TEST_EXTRA = 'grep:pyproject.toml:(?m)^\[project\.optional-dependencies\]\r?\n(?:(?:[^\[\r\n][^\n]*)?\n)*?"?test"?\s*='
 stick PY_TESTS_EXTRA = 'grep:pyproject.toml:(?m)^\[project\.optional-dependencies\]\r?\n(?:(?:[^\[\r\n][^\n]*)?\n)*?"?tests"?\s*='
 stick PY_PINS = {python: [".python-version", ".tool-versions:python", "mise.toml:python"]}
+# The Python this machine has: python3 (python on Windows, where python3
+# may be the Store's alias), else the Windows launcher.
+stick PY_PYTHON = [{when: ["os:windows", "tool:python"], value: "python"}, {when: ["tool:python3"], value: "python3"}, {when: ["tool:python"], value: "python"}, {value: ["py", "-3"]}]
 stick NODE_PINS = {node: [".nvmrc", ".node-version", ".tool-versions:nodejs", "mise.toml:node"]}
 stick JAVA_PINS = {java: [".java-version", ".sdkmanrc:java", ".tool-versions:java", "mise.toml:java"]}
 stick JS_PRETTIER = ["glob:.prettierrc*", "glob:prettier.config.*", "json:package.json:prettier"]
 stick JS_ESLINT = ["glob:eslint.config.*", "glob:.eslintrc*", "json:package.json:eslintConfig"]
 stick JS_BIOME = ["file:biome.json", "file:biome.jsonc"]
 stick YARN_BERRY = ["file:.yarnrc.yml", "grep:yarn.lock:__metadata:", 'grep:package.json:"packageManager"\s*:\s*"yarn@[2-9]']
-stick CLANG_FILES = "git ls-files -- '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hh' '*.hpp' '*.hxx'"
-stick GO_FILES = "find . -name '*.go' -not -path './vendor/*' -not -path '*/testdata/*' -print0"
 
 # The Python stages, for a way of running tools inside the project's
 # environment (`uv run --locked`, `poetry run`, a venv's python -m).
@@ -271,7 +272,8 @@ stick TOOLCHAINS = {
   "python-poetry": {
     language: "Python", short: "python", family: "python", priority: 35,
     detect: [["file:poetry.lock", 'grep:pyproject.toml:(?m)^\[tool\.poetry', 'grep:pyproject.toml:poetry\.core\.masonry']],
-    tools: ["poetry"], versions: {poetry: ["poetry", "--version"], python: ["python3", "--version"]}, pins: PY_PINS,
+    tools: ["poetry"], versions: {poetry: ["poetry", "--version"], python: ["{python}", "--version"]}, pins: PY_PINS,
+    vars: {python: PY_PYTHON},
     install: "https://python-poetry.org/docs/#installation",
     stages: python_stages(["poetry", "run"], ["poetry", "run", "python"]).merge({
       setup: [["poetry", "install", "--no-interaction"]], package: [["poetry", "build", "--no-interaction"]],
@@ -280,7 +282,8 @@ stick TOOLCHAINS = {
   "python-pdm": {
     language: "Python", short: "python", family: "python", priority: 35,
     detect: [["file:pdm.lock", 'grep:pyproject.toml:(?m)^\[tool\.pdm', 'grep:pyproject.toml:pdm\.backend']],
-    tools: ["pdm"], versions: {pdm: ["pdm", "--version"], python: ["python3", "--version"]}, pins: PY_PINS,
+    tools: ["pdm"], versions: {pdm: ["pdm", "--version"], python: ["{python}", "--version"]}, pins: PY_PINS,
+    vars: {python: PY_PYTHON},
     install: "https://pdm-project.org/latest/#installation",
     stages: python_stages(["pdm", "run"], ["pdm", "run", "python"]).merge({
       setup: [{when: ["file:pdm.lock"], cmd: ["pdm", "install", "--check"]}, ["pdm", "install"]], package: [["pdm", "build"]],
@@ -301,7 +304,8 @@ stick TOOLCHAINS = {
   "python-pipenv": {
     language: "Python", short: "python", family: "python", priority: 30,
     detect: ["file:Pipfile"],
-    tools: ["pipenv"], versions: {pipenv: ["pipenv", "--version"], python: ["python3", "--version"]}, pins: PY_PINS,
+    tools: ["pipenv"], versions: {pipenv: ["pipenv", "--version"], python: ["{python}", "--version"]}, pins: PY_PINS,
+    vars: {python: PY_PYTHON},
     install: "https://pipenv.pypa.io/en/latest/installation.html",
     stages: python_stages(["pipenv", "run"], ["pipenv", "run", "python"]).merge({
       setup: [{when: ["file:Pipfile.lock"], cmd: ["pipenv", "sync", "--dev"]}, ["pipenv", "install", "--dev"]],
@@ -310,21 +314,26 @@ stick TOOLCHAINS = {
   "python-pip": {
     language: "Python", short: "python", family: "python", priority: 10,
     detect: [["file:requirements.txt", "file:pyproject.toml", "file:setup.py", "file:setup.cfg"]],
-    tools: ["python3"], versions: {python: ["python3", "--version"]}, pins: PY_PINS,
+    tools: [], versions: {python: ["{python}", "--version"]}, pins: PY_PINS,
     install: "https://www.python.org/downloads/",
     note: "setup makes .venv with the project and its dev requirements (requirements-dev.txt, a dev dependency group, or a dev, test or tests extra); the other stages run inside it",
-    vars: {py: [{when: [["file:requirements.txt", PY_BUILDABLE]], value: ".venv/bin/python"}, {value: "python3"}]},
+    vars: {
+      python: PY_PYTHON,
+      py: [{when: ["os:windows", ["file:requirements.txt", PY_BUILDABLE]], value: ".venv/Scripts/python.exe"}, {when: [["file:requirements.txt", PY_BUILDABLE]], value: ".venv/bin/python"}, {value: "{python}"}],
+    },
     stages: python_stages(["{py}", "-m"], ["{py}"]).merge({
+      # Two or three commands in a row, no shell between them: the venv, then
+      # pip inside it. `{py}` is the venv's own python on every OS.
       setup: [
-        {when: ["file:requirements.txt", "file:requirements-dev.txt"], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt"},
-        {when: ["file:requirements.txt", "file:dev-requirements.txt"], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt -r dev-requirements.txt"},
-        {when: ["file:requirements.txt"], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt"},
+        {when: ["file:requirements.txt", "file:requirements-dev.txt"], cmds: [["{python}", "-m", "venv", ".venv"], ["{py}", "-m", "pip", "install", "-r", "requirements.txt", "-r", "requirements-dev.txt"]]},
+        {when: ["file:requirements.txt", "file:dev-requirements.txt"], cmds: [["{python}", "-m", "venv", ".venv"], ["{py}", "-m", "pip", "install", "-r", "requirements.txt", "-r", "dev-requirements.txt"]]},
+        {when: ["file:requirements.txt"], cmds: [["{python}", "-m", "venv", ".venv"], ["{py}", "-m", "pip", "install", "-r", "requirements.txt"]]},
         # --group needs pip 25.1, newer than many system Pythons ship in a venv.
-        {when: [PY_BUILDABLE, PY_DEV_GROUP], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -U pip && .venv/bin/python -m pip install -e . --group dev"},
-        {when: [PY_BUILDABLE, PY_DEV_EXTRA], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -e '.[dev]'"},
-        {when: [PY_BUILDABLE, PY_TEST_EXTRA], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -e '.[test]'"},
-        {when: [PY_BUILDABLE, PY_TESTS_EXTRA], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -e '.[tests]'"},
-        {when: [PY_BUILDABLE], shell: "python3 -m venv .venv && .venv/bin/python -m pip install -e ."},
+        {when: [PY_BUILDABLE, PY_DEV_GROUP], cmds: [["{python}", "-m", "venv", ".venv"], ["{py}", "-m", "pip", "install", "-U", "pip"], ["{py}", "-m", "pip", "install", "-e", ".", "--group", "dev"]]},
+        {when: [PY_BUILDABLE, PY_DEV_EXTRA], cmds: [["{python}", "-m", "venv", ".venv"], ["{py}", "-m", "pip", "install", "-e", ".[dev]"]]},
+        {when: [PY_BUILDABLE, PY_TEST_EXTRA], cmds: [["{python}", "-m", "venv", ".venv"], ["{py}", "-m", "pip", "install", "-e", ".[test]"]]},
+        {when: [PY_BUILDABLE, PY_TESTS_EXTRA], cmds: [["{python}", "-m", "venv", ".venv"], ["{py}", "-m", "pip", "install", "-e", ".[tests]"]]},
+        {when: [PY_BUILDABLE], cmds: [["{python}", "-m", "venv", ".venv"], ["{py}", "-m", "pip", "install", "-e", "."]]},
       ],
       package: [{when: [PY_BUILDABLE], cmd: ["{py}", "-m", "build"]}],
     }),
@@ -340,7 +349,7 @@ stick TOOLCHAINS = {
     note: "cig does not watch target/, so build outputs are not rolled back; --locked is used when Cargo.lock exists",
     vars: {locked: [{when: ["file:Cargo.lock"], value: ["--locked"]}, {value: []}], lockflag: [{when: ["file:Cargo.lock"], value: " --locked"}, {value: ""}]},
     stages: {
-      setup: [{when: [["file:rust-toolchain.toml", "file:rust-toolchain"]], shell: "rustup toolchain install && cargo fetch{lockflag}"}, ["cargo", "fetch", "{locked}"]],
+      setup: [{when: [["file:rust-toolchain.toml", "file:rust-toolchain"], "tool:rustup"], cmds: [["rustup", "toolchain", "install"], ["cargo", "fetch", "{locked}"]]}, ["cargo", "fetch", "{locked}"]],
       format: [["cargo", "fmt", "--all"]], "format-check": [["cargo", "fmt", "--all", "--check"]],
       lint: [["cargo", "clippy", "--workspace", "--all-targets", "{locked}", "--", "-D", "warnings"]],
       check: [["cargo", "check", "--workspace", "--all-targets", "{locked}"]],
@@ -354,10 +363,11 @@ stick TOOLCHAINS = {
     tools: ["go"], versions: {go: ["go", "version"]},
     pins: {go: ["go.mod:go", ".go-version", ".tool-versions:golang", "mise.toml:go"]},
     install: "https://go.dev/doc/install",
+    vars: {go_files: [{files: ["**/*.go"], skip: ["vendor", "testdata"]}]},
     stages: {
       setup: [["go", "mod", "download"]],
       format: [["go", "fmt", "./..."]],
-      "format-check": [{shell: "out=$(" + GO_FILES + " | xargs -0 -r gofmt -l); if [ -n \"$out\" ]; then echo \"not formatted:\"; echo \"$out\"; exit 1; fi"}],
+      "format-check": [{cmd: ["gofmt", "-l", "{go_files}"], fail_on_output: true}],
       lint: [{when: [["file:.golangci.yml", "file:.golangci.yaml", "file:.golangci.toml", "file:.golangci.json"]], cmd: ["golangci-lint", "run"]}],
       check: [["go", "vet", "./..."]], build: [["go", "build", "./..."]], test: [["go", "test", "./..."]],
       run: [{when: ["file:main.go"], cmd: ["go", "run", "."]}], clean: [["go", "clean"]],
@@ -372,7 +382,7 @@ stick TOOLCHAINS = {
     tools: ["java"], versions: {java: ["java", "-version"]}, pins: JAVA_PINS,
     install: "https://docs.gradle.org/current/userguide/installation.html",
     note: "a root task name runs in every subproject; formatter and linter tasks exist only when their plugin is applied",
-    vars: {gradle: [{when: ["file:gradlew"], value: "./gradlew"}, {value: "gradle"}]},
+    vars: {gradle: [{when: ["os:windows", "file:gradlew.bat"], value: "gradlew.bat"}, {when: ["file:gradlew"], value: "./gradlew"}, {value: "gradle"}]},
     stages: {
       format: [{when: ["grep:build.gradle*:spotless"], cmd: ["{gradle}", "--console=plain", "spotlessApply"]}, {when: ["grep:build.gradle*:ktlint"], cmd: ["{gradle}", "--console=plain", "ktlintFormat"]}],
       "format-check": [{when: ["grep:build.gradle*:spotless"], cmd: ["{gradle}", "--console=plain", "spotlessCheck"]}, {when: ["grep:build.gradle*:ktlint"], cmd: ["{gradle}", "--console=plain", "ktlintCheck"]}],
@@ -391,7 +401,7 @@ stick TOOLCHAINS = {
     tools: ["java"], versions: {java: ["java", "-version"]}, pins: JAVA_PINS,
     install: "https://developer.android.com/build/building-cmdline",
     note: "needs the Android SDK (ANDROID_HOME or local.properties); device tests are left out",
-    vars: {gradle: [{when: ["file:gradlew"], value: "./gradlew"}, {value: "gradle"}]},
+    vars: {gradle: [{when: ["os:windows", "file:gradlew.bat"], value: "gradlew.bat"}, {when: ["file:gradlew"], value: "./gradlew"}, {value: "gradle"}]},
     stages: {
       lint: [["{gradle}", "--console=plain", "lint"]], check: [["{gradle}", "--console=plain", "compileDebugSources"]],
       build: [["{gradle}", "--console=plain", "assembleDebug"]], test: [["{gradle}", "--console=plain", "testDebugUnitTest"]],
@@ -404,7 +414,7 @@ stick TOOLCHAINS = {
     tools: ["java"], versions: {java: ["java", "-version"]}, pins: JAVA_PINS,
     install: "https://maven.apache.org/install.html",
     note: "phases are cumulative (package runs the tests unless skipped); install writes to ~/.m2 and is not setup",
-    vars: {mvn: [{when: ["file:mvnw"], value: "./mvnw"}, {value: "mvn"}]},
+    vars: {mvn: [{when: ["os:windows", "file:mvnw.cmd"], value: "mvnw.cmd"}, {when: ["file:mvnw"], value: "./mvnw"}, {value: "mvn"}]},
     stages: {
       setup: [["{mvn}", "-B", "-ntp", "dependency:go-offline"]],
       format: [{when: ["grep:pom.xml:spotless"], cmd: ["{mvn}", "-B", "-ntp", "spotless:apply"]}],
@@ -431,7 +441,7 @@ stick TOOLCHAINS = {
     language: "Scala", short: "scala", family: "scala", priority: 15,
     detect: [["file:build.mill", "file:build.mill.yaml", "file:build.sc"]], tools: [],
     install: "https://mill-build.org/mill/cli/installation-ide.html",
-    vars: {mill: [{when: ["file:mill"], value: "./mill"}, {value: "mill"}]},
+    vars: {mill: [{when: ["os:windows", "file:mill.bat"], value: "mill.bat"}, {when: ["file:mill"], value: "./mill"}, {value: "mill"}]},
     stages: {
       format: [{when: ["file:.scalafmt.conf"], cmd: ["{mill}", "mill.scalalib.scalafmt/"]}],
       "format-check": [{when: ["file:.scalafmt.conf"], cmd: ["{mill}", "mill.scalalib.scalafmt/checkFormatAll"]}],
@@ -449,7 +459,8 @@ stick TOOLCHAINS = {
   },
   "clojure-cli": {
     language: "Clojure", short: "clojure", family: "clojure", priority: 15,
-    detect: ["file:deps.edn"], tools: ["clojure"], install: "https://clojure.org/guides/install_clojure",
+    detect: ["file:deps.edn", "not:os:windows"], tools: ["clojure"], install: "https://clojure.org/guides/install_clojure",
+    note: "on Windows the Clojure CLI is a PowerShell module, not a program, so this toolchain is not offered there",
     stages: {
       setup: [["clojure", "-P"]],
       test: [{when: ["grep:deps.edn::exec-fn"], cmd: ["clojure", "-X:test"]}, {when: ["grep:deps.edn::test"], cmd: ["clojure", "-M:test"]}],
@@ -467,8 +478,8 @@ stick TOOLCHAINS = {
     note: "a folder with several solution or project files needs a stage override naming one",
     stages: {
       setup: [
-        {when: ["file:.config/dotnet-tools.json", "file:packages.lock.json"], shell: "dotnet tool restore && dotnet restore --locked-mode"},
-        {when: ["file:.config/dotnet-tools.json"], shell: "dotnet tool restore && dotnet restore"},
+        {when: ["file:.config/dotnet-tools.json", "file:packages.lock.json"], cmds: [["dotnet", "tool", "restore"], ["dotnet", "restore", "--locked-mode"]]},
+        {when: ["file:.config/dotnet-tools.json"], cmds: [["dotnet", "tool", "restore"], ["dotnet", "restore"]]},
         {when: ["file:packages.lock.json"], cmd: ["dotnet", "restore", "--locked-mode"]},
         ["dotnet", "restore"],
       ],
@@ -483,15 +494,20 @@ stick TOOLCHAINS = {
     language: "C / C++", short: "cmake", family: "c", priority: 20,
     detect: ["file:CMakeLists.txt"], tools: ["cmake"], versions: {cmake: ["cmake", "--version"]},
     install: "https://cmake.org/download/",
-    note: "ctest --test-dir needs CMake 3.20; multi-config generators need a --config override",
+    note: "ctest --test-dir needs CMake 3.20; on Windows the Visual Studio generator is multi-config, so build and test take Debug unless a stage override says otherwise",
     order: {test: ["build"]},
+    vars: {
+      cfg: [{when: ["os:windows"], value: ["--config", "Debug"]}, {value: []}],
+      tcfg: [{when: ["os:windows"], value: ["-C", "Debug"]}, {value: []}],
+      clang_files: [{files: ["**/*.c", "**/*.cc", "**/*.cpp", "**/*.cxx", "**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx"], skip: ["build", "third_party", "vendor", "external", "node_modules"]}],
+    },
     stages: {
-      setup: [["cmake", "-S", ".", "-B", "build", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]], build: [["cmake", "--build", "build", "--parallel"]],
-      test: [{when: ['grep:CMakeLists.txt:(enable_testing|add_test|include\(CTest\))'], cmd: ["ctest", "--test-dir", "build", "--output-on-failure"]}],
+      setup: [["cmake", "-S", ".", "-B", "build", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]], build: [["cmake", "--build", "build", "--parallel", "{cfg}"]],
+      test: [{when: ['grep:CMakeLists.txt:(enable_testing|add_test|include\(CTest\))'], cmd: ["ctest", "--test-dir", "build", "{tcfg}", "--output-on-failure"]}],
       package: [{when: ['grep:CMakeLists.txt:include\(CPack\)'], cmd: ["cpack", "--config", "build/CPackConfig.cmake"]}],
       clean: [["cmake", "--build", "build", "--target", "clean"]],
-      format: [{when: [["file:.clang-format", "file:_clang-format"], "tool:git"], shell: CLANG_FILES + " | xargs -r clang-format -i"}],
-      "format-check": [{when: [["file:.clang-format", "file:_clang-format"], "tool:git"], shell: CLANG_FILES + " | xargs -r clang-format --dry-run --Werror"}],
+      format: [{when: [["file:.clang-format", "file:_clang-format"]], cmd: ["clang-format", "-i", "{clang_files}"]}],
+      "format-check": [{when: [["file:.clang-format", "file:_clang-format"]], cmd: ["clang-format", "--dry-run", "--Werror", "{clang_files}"]}],
     },
   },
   meson: {
@@ -500,7 +516,7 @@ stick TOOLCHAINS = {
     install: "https://mesonbuild.com/Getting-meson.html",
     order: {test: ["build"]},
     stages: {
-      setup: [{shell: "if [ -d builddir ]; then meson setup --reconfigure builddir; else meson setup builddir; fi"}],
+      setup: [{when: ["dir:builddir"], cmd: ["meson", "setup", "--reconfigure", "builddir"]}, ["meson", "setup", "builddir"]],
       build: [["meson", "compile", "-C", "builddir"]], test: [["meson", "test", "-C", "builddir", "--print-errorlogs"]],
       clean: [["meson", "compile", "-C", "builddir", "--clean"]],
     },
@@ -540,11 +556,11 @@ stick TOOLCHAINS = {
     targets: "rake", targets_run: ["bundle", "exec", "rake"],
     stages: {
       setup: [{when: ["file:Gemfile.lock"], cmd: ["bundle", "install"], env: {BUNDLE_FROZEN: "true"}}, ["bundle", "install"]],
-      test: [{when: [["file:.rspec", "dir:spec"]], cmd: ["bundle", "exec", "rspec"]}, {when: ["file:bin/rails"], cmd: ["bin/rails", "test"]}, {when: ["file:Rakefile"], cmd: ["bundle", "exec", "rake", "test"]}],
+      test: [{when: [["file:.rspec", "dir:spec"]], cmd: ["bundle", "exec", "rspec"]}, {when: ["file:bin/rails"], cmd: ["ruby", "bin/rails", "test"]}, {when: ["file:Rakefile"], cmd: ["bundle", "exec", "rake", "test"]}],
       lint: [{when: ["file:.standard.yml"], cmd: ["bundle", "exec", "standardrb"]}, {when: ["file:.rubocop.yml"], cmd: ["bundle", "exec", "rubocop"]}],
       format: [{when: ["file:.standard.yml"], cmd: ["bundle", "exec", "standardrb", "--fix"]}, {when: ["file:.rubocop.yml"], cmd: ["bundle", "exec", "rubocop", "-a"]}],
       check: [{when: ["dir:sorbet"], cmd: ["bundle", "exec", "srb", "tc"]}, {when: ["file:Steepfile"], cmd: ["bundle", "exec", "steep", "check"]}],
-      package: [{when: ["glob:*.gemspec"], shell: "gem build *.gemspec"}],
+      package: [{when: ["glob:*.gemspec"], cmd: ["gem", "build", "{gemspec}"]}],
     },
   },
   "php-composer": {
@@ -555,11 +571,11 @@ stick TOOLCHAINS = {
     scripts: {file: "composer.json", key: "scripts", run: ["composer", "run-script"]},
     stages: {
       setup: [["composer", "install", "--no-interaction", "--no-progress", "--prefer-dist"]],
-      test: [{when: ["file:tests/Pest.php"], cmd: ["vendor/bin/pest"]}, {when: [["file:phpunit.xml", "file:phpunit.xml.dist", "file:phpunit.dist.xml"]], cmd: ["vendor/bin/phpunit"]}],
-      lint: [{when: [["file:phpcs.xml", "file:phpcs.xml.dist", "file:.phpcs.xml"]], cmd: ["vendor/bin/phpcs"]}],
-      check: [{when: [["file:phpstan.neon", "file:phpstan.neon.dist", "file:phpstan.dist.neon"]], cmd: ["vendor/bin/phpstan", "analyse", "--no-progress"]}, {when: [["file:psalm.xml", "file:psalm.xml.dist"]], cmd: ["vendor/bin/psalm", "--no-progress"]}],
-      format: [{when: [["file:pint.json", "grep:composer.json:laravel/pint"]], cmd: ["vendor/bin/pint"]}, {when: [["file:.php-cs-fixer.php", "file:.php-cs-fixer.dist.php"]], cmd: ["vendor/bin/php-cs-fixer", "fix"]}],
-      "format-check": [{when: [["file:pint.json", "grep:composer.json:laravel/pint"]], cmd: ["vendor/bin/pint", "--test"]}, {when: [["file:.php-cs-fixer.php", "file:.php-cs-fixer.dist.php"]], cmd: ["vendor/bin/php-cs-fixer", "fix", "--dry-run", "--diff"]}],
+      test: [{when: ["file:tests/Pest.php"], cmd: ["php", "vendor/bin/pest"]}, {when: [["file:phpunit.xml", "file:phpunit.xml.dist", "file:phpunit.dist.xml"]], cmd: ["php", "vendor/bin/phpunit"]}],
+      lint: [{when: [["file:phpcs.xml", "file:phpcs.xml.dist", "file:.phpcs.xml"]], cmd: ["php", "vendor/bin/phpcs"]}],
+      check: [{when: [["file:phpstan.neon", "file:phpstan.neon.dist", "file:phpstan.dist.neon"]], cmd: ["php", "vendor/bin/phpstan", "analyse", "--no-progress"]}, {when: [["file:psalm.xml", "file:psalm.xml.dist"]], cmd: ["php", "vendor/bin/psalm", "--no-progress"]}],
+      format: [{when: [["file:pint.json", "grep:composer.json:laravel/pint"]], cmd: ["php", "vendor/bin/pint"]}, {when: [["file:.php-cs-fixer.php", "file:.php-cs-fixer.dist.php"]], cmd: ["php", "vendor/bin/php-cs-fixer", "fix"]}],
+      "format-check": [{when: [["file:pint.json", "grep:composer.json:laravel/pint"]], cmd: ["php", "vendor/bin/pint", "--test"]}, {when: [["file:.php-cs-fixer.php", "file:.php-cs-fixer.dist.php"]], cmd: ["php", "vendor/bin/php-cs-fixer", "fix", "--dry-run", "--diff"]}],
     },
   },
 
@@ -571,7 +587,7 @@ stick TOOLCHAINS = {
     pins: {elixir: [".tool-versions:elixir", "mise.toml:elixir"]},
     install: "https://elixir-lang.org/install.html",
     stages: {
-      setup: [{shell: "mix local.hex --force --if-missing && mix local.rebar --force --if-missing && mix deps.get"}],
+      setup: [{cmds: [["mix", "local.hex", "--force", "--if-missing"], ["mix", "local.rebar", "--force", "--if-missing"], ["mix", "deps.get"]]}],
       format: [["mix", "format"]], "format-check": [["mix", "format", "--check-formatted"]],
       lint: [{when: ["grep:mix.exs::credo"], cmd: ["mix", "credo", "--strict"]}],
       check: [["mix", "compile", "--warnings-as-errors"]], build: [["mix", "compile"]], test: [["mix", "test"]],
@@ -610,8 +626,8 @@ stick TOOLCHAINS = {
     note: "swift format ships with Swift 6; lint only fails with --strict",
     stages: {
       setup: [["swift", "package", "resolve"]],
-      format: [{shell: "swift format --in-place --recursive $(ls -d Sources Tests Package.swift 2>/dev/null)"}],
-      "format-check": [{shell: "swift format lint --strict --recursive $(ls -d Sources Tests Package.swift 2>/dev/null)"}],
+      format: [{when: ["dir:Tests"], cmd: ["swift", "format", "--in-place", "--recursive", "Sources", "Tests", "Package.swift"]}, ["swift", "format", "--in-place", "--recursive", "Sources", "Package.swift"]],
+      "format-check": [{when: ["dir:Tests"], cmd: ["swift", "format", "lint", "--strict", "--recursive", "Sources", "Tests", "Package.swift"]}, ["swift", "format", "lint", "--strict", "--recursive", "Sources", "Package.swift"]],
       lint: [{when: ["file:.swiftlint.yml"], cmd: ["swiftlint", "lint", "--strict"]}],
       check: [["swift", "build", "--build-tests"]], build: [["swift", "build"]], test: [["swift", "test"]],
       package: [["swift", "build", "-c", "release"]], run: [["swift", "run"]], clean: [["swift", "package", "clean"]],
@@ -619,7 +635,7 @@ stick TOOLCHAINS = {
   },
   xcode: {
     language: "Swift / Objective-C (Xcode)", short: "xcode", family: "swift", priority: 10,
-    detect: [["glob:*.xcworkspace", "glob:*.xcodeproj"]], tools: ["xcodebuild"],
+    detect: [["glob:*.xcworkspace", "glob:*.xcodeproj"], "os:macos"], tools: ["xcodebuild"],
     install: "https://developer.apple.com/xcode/",
     note: "xcodebuild needs a scheme for workspaces and tests: override the stages with -scheme <name> (xcodebuild -list shows them)",
     stages: {build: [["xcodebuild", "build"]], clean: [["xcodebuild", "clean"]]},
@@ -659,7 +675,7 @@ stick TOOLCHAINS = {
       build: [["zig", "build"]],
       test: [{when: ['grep:build.zig:step\(\s*"test"'], cmd: ["zig", "build", "test"]}],
       run: [{when: ['grep:build.zig:step\(\s*"run"'], cmd: ["zig", "build", "run"]}],
-      clean: [{shell: "rm -rf zig-out .zig-cache zig-cache"}],
+      clean: [{rm: ["zig-out", ".zig-cache", "zig-cache"]}],
     },
   },
 
@@ -679,7 +695,7 @@ stick TOOLCHAINS = {
     detect: [["glob:*.cabal", "file:cabal.project"]], tools: ["cabal"], versions: {ghc: ["ghc", "--version"]},
     install: "https://www.haskell.org/ghcup/",
     stages: {
-      setup: [{shell: "cabal update && cabal build all --only-dependencies --enable-tests"}],
+      setup: [{cmds: [["cabal", "update"], ["cabal", "build", "all", "--only-dependencies", "--enable-tests"]]}],
       build: [["cabal", "build", "all"]], test: [["cabal", "test", "all"]],
       package: [["cabal", "sdist", "all"]], clean: [["cabal", "clean"]],
     },
@@ -729,12 +745,12 @@ stick TOOLCHAINS = {
     detect: ["glob:*.rockspec"], tools: ["luarocks"], versions: {luarocks: ["luarocks", "--version"]},
     install: "https://github.com/luarocks/luarocks/wiki/Download",
     stages: {
-      setup: [{shell: "luarocks install --only-deps --tree=lua_modules *.rockspec"}],
+      setup: [{when: ["glob:*.rockspec"], cmd: ["luarocks", "install", "--only-deps", "--tree=lua_modules", "{rockspec}"]}],
       format: [{when: [["file:stylua.toml", "file:.stylua.toml"]], cmd: ["stylua", "."]}],
       "format-check": [{when: [["file:stylua.toml", "file:.stylua.toml"]], cmd: ["stylua", "--check", "."]}],
       lint: [{when: ["file:.luacheckrc"], cmd: ["luacheck", "."]}],
       build: [["luarocks", "make"]], test: [{when: ["file:.busted"], cmd: ["busted"]}],
-      package: [{shell: "luarocks pack *.rockspec"}],
+      package: [{when: ["glob:*.rockspec"], cmd: ["luarocks", "pack", "{rockspec}"]}],
     },
   },
   perl: {
@@ -744,7 +760,7 @@ stick TOOLCHAINS = {
     stages: {
       setup: [{when: ["file:cpanfile"], cmd: ["cpanm", "--installdeps", "--notest", "."]}],
       lint: [{when: ["file:.perlcriticrc"], cmd: ["perlcritic", "lib"]}],
-      build: [{when: ["file:Makefile.PL"], shell: "perl Makefile.PL && make"}],
+      build: [{when: ["file:Makefile.PL"], cmds: [["perl", "Makefile.PL"], ["{make}"]]}],
       test: [{when: ["dir:t"], cmd: ["prove", "-lr", "t"]}],
       package: [{when: ["file:Makefile.PL"], cmd: ["make", "dist"]}],
     },
@@ -776,22 +792,23 @@ stick TOOLCHAINS = {
   },
   powershell: {
     language: "PowerShell", short: "powershell", family: "powershell", priority: 5, auto: false,
-    detect: [], tools: ["pwsh"], versions: {pwsh: ["pwsh", "--version"]},
+    detect: [], tools: [], versions: {powershell: ["{ps}", "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"]},
     install: "https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell",
-    note: "never detected on its own: add a component with toolchain powershell",
+    note: "never detected on its own: add a component with toolchain powershell; pwsh (PowerShell 7) when it is installed, else Windows PowerShell",
+    vars: {ps: [{when: ["tool:pwsh"], value: "pwsh"}, {value: "powershell"}]},
     stages: {
-      lint: [["pwsh", "-NoProfile", "-NonInteractive", "-Command", "Invoke-ScriptAnalyzer -Path . -Recurse -EnableExit"]],
-      test: [["pwsh", "-NoProfile", "-NonInteractive", "-Command", "Invoke-Pester -CI"]],
+      lint: [["{ps}", "-NoProfile", "-NonInteractive", "-Command", "Invoke-ScriptAnalyzer -Path . -Recurse -EnableExit"]],
+      test: [["{ps}", "-NoProfile", "-NonInteractive", "-Command", "Invoke-Pester -CI"]],
     },
   },
   cigscript: {
     language: "CigScript", short: "cig", family: "cigscript", priority: 15,
     detect: ["glob:*.cig"], workspace: ["glob:*.cig"], tools: ["cig"], versions: {cig: ["cig", "--version"]},
     install: "https://github.com/otmof-ops/CigScript",
-    note: "cig check reads one file at a time, so these stages check every .cig file under the component in turn, test data (fixtures, corpus, testdata) left out",
+    note: "cig check reads one file at a time, so these stages run it once per .cig file under the component, test data (fixtures, corpus, testdata) left out",
     stages: {
-      check: [{shell: "find . -name '*.cig' -not -path '*/.cig-orchestrator/*' -not -path '*/.test-work/*' -not -path '*/node_modules/*' -not -path '*/fixtures/*' -not -path '*/corpus/*' -not -path '*/testdata/*' -print0 | xargs -0 -r -n1 cig check"}],
-      lint: [{shell: "find . -name '*.cig' -not -path '*/.cig-orchestrator/*' -not -path '*/.test-work/*' -not -path '*/node_modules/*' -not -path '*/fixtures/*' -not -path '*/corpus/*' -not -path '*/testdata/*' -print0 | xargs -0 -r -n1 cig check --deny-warnings"}],
+      check: [{each: {files: ["**/*.cig"], skip: [".cig-orchestrator", ".test-work", "node_modules", "fixtures", "corpus", "testdata"]}, cmd: ["cig", "check", "{file}"]}],
+      lint: [{each: {files: ["**/*.cig"], skip: [".cig-orchestrator", ".test-work", "node_modules", "fixtures", "corpus", "testdata"]}, cmd: ["cig", "check", "--deny-warnings", "{file}"]}],
     },
   },
   shell: {
@@ -801,7 +818,8 @@ stick TOOLCHAINS = {
     stages: {
       # Tracked .sh and .bash files, and extensionless scripts whose shebang
       # names a shell (bin/deploy); symlinks are the files they point at.
-      lint: [{when: ["tool:git"], shell: "git ls-files | while IFS= read -r f; do [ -L \"$f\" ] && continue; case \"\${f##*/}\" in *.sh|*.bash) printf '%s\\0' \"$f\" ;; *.*) ;; *) head -n1 -- \"$f\" 2>/dev/null | grep -qE '^#!.*[/ ](ba|da|k)?sh( |$)' && printf '%s\\0' \"$f\" ;; esac; done | xargs -0 -r shellcheck"}],
+      lint: [{when: ["tool:git", "os:unix"], shell: "git ls-files | while IFS= read -r f; do [ -L \"$f\" ] && continue; case \"\${f##*/}\" in *.sh|*.bash) printf '%s\\0' \"$f\" ;; *.*) ;; *) head -n1 -- \"$f\" 2>/dev/null | grep -qE '^#!.*[/ ](ba|da|k)?sh( |$)' && printf '%s\\0' \"$f\" ;; esac; done | xargs -0 -r shellcheck"},
+        {each: {files: ["**/*.sh", "**/*.bash"], skip: ["node_modules", ".git", "vendor"]}, cmd: ["shellcheck", "{file}"]}],
       format: [["shfmt", "-w", "."]], "format-check": [["shfmt", "-d", "."]],
     },
   },
@@ -820,7 +838,7 @@ stick TOOLCHAINS = {
       check: [["{tf}", "validate"]], lint: [{when: ["file:.tflint.hcl"], cmd: ["tflint", "--recursive"]}],
       test: [{when: ["glob:*.tftest.hcl"], cmd: ["{tf}", "test"]}],
     },
-    extras: {plan: [{shell: "{tf} init -input=false && {tf} plan -input=false"}]},
+    extras: {plan: [{cmds: [["{tf}", "init", "-input=false"], ["{tf}", "plan", "-input=false"]]}]},
   },
   docker: {
     language: "Container image", short: "docker", family: "container", priority: 8,
@@ -850,7 +868,9 @@ stick TOOLCHAINS = {
   make: {
     language: "Makefile", short: "make", kind: "runner", priority: 5,
     detect: [["file:GNUmakefile", "file:makefile", "file:Makefile"]], tools: ["make"],
-    install: "https://www.gnu.org/software/make/", targets: "make", targets_run: ["make"],
+    install: "https://www.gnu.org/software/make/", targets: "make", targets_run: ["{make}"],
+    vars: {make: [{when: ["os:bsd", "tool:gmake"], value: "gmake"}, {value: "make"}]},
+    note: "on the BSDs, make is bmake; a GNU makefile runs with gmake when it is installed",
   },
   just: {
     language: "justfile", short: "just", kind: "runner", priority: 5,
@@ -1194,6 +1214,18 @@ pull holds(dir, cond) {
   if kind == "tool" {
     snuff which(arg) != null
   }
+  if kind == "os" {
+    # windows, macos, linux, freebsd...: cig.os(); bsd is any of them, unix
+    # is everything but Windows.
+    stick here = cig.os()
+    if arg == "unix" {
+      snuff here != "windows"
+    }
+    if arg == "bsd" {
+      snuff here.ends_with("bsd")
+    }
+    snuff here == arg
+  }
   if kind == "grep" or kind == "json" {
     stick sep = arg.find(":")
     if sep < 0 {
@@ -1239,7 +1271,31 @@ pull vars_for(dir, tc, component) {
   for name in defs {
     stick alt = choose(dir, defs[name])
     if alt != null {
-      v[name] = alt.get("value", "")
+      if alt.has("glob") {
+        # The first file a glob names (*.gemspec, *.rockspec), so the command
+        # need not go through a shell to expand it.
+        stick hits = glob_under(dir, str(alt.glob))
+        if not hits.is_empty() {
+          v[name] = path.base(hits.first())
+        }
+      } else if alt.has("files") {
+        # Every file the globs name, relative to the component, minus the
+        # skipped folders: a file list for a formatter, built here instead
+        # of by find and xargs.
+        stick skip = as_list(alt.get("skip", []))
+        roll found = []
+        for g in as_list(alt.files) {
+          for hit in glob_under(dir, str(g)) {
+            stick rel = pick(dir == "." or dir == "", hit, hit.slice(dir.len() + 1))
+            if not rel.split("/").any(pack(part) => skip.contains(part)) and not found.contains(rel) {
+              found.push(rel)
+            }
+          }
+        }
+        v[name] = found
+      } else {
+        v[name] = alt.get("value", "")
+      }
     }
   }
   snuff v
@@ -1611,8 +1667,18 @@ pull spec_of(alt, vars, source) {
   roll spec = {source: source}
   if alt.has("shell") {
     spec.shell = fill_text(alt.shell, vars)
+  } else if alt.has("cmds") {
+    spec.cmds = as_list(alt.cmds).map(pack(c) => fill(argv_of(c) ?? [], vars))
+  } else if alt.has("rm") {
+    spec.rm = as_list(alt.rm).map(pack(x) => fill_text(str(x), vars))
   } else {
     spec.cmd = fill(alt.cmd, vars)
+  }
+  if alt.has("each") {
+    spec.each = alt.each
+  }
+  if alt.has("fail_on_output") {
+    spec.fail_on_output = alt.fail_on_output
   }
   if alt.has("env") {
     spec.env = alt.env
@@ -1671,7 +1737,7 @@ pull resolve_component(name, comp, kb) {
   if tk != null {
     stick found = targets_of(dir, tk)
     stick mapped = map_names(found.map(pack(t) => t.name), pick(tk == "make", MAKE_ALIASES, SCRIPT_ALIASES))
-    stick run = tc.get("targets_run", [])
+    stick run = fill(as_list(tc.get("targets_run", [])), vars)
     pull command_for(t) {
       if t.cmd != null {
         snuff t.cmd
@@ -1775,11 +1841,11 @@ pull stage_deps(present, stage, order) {
 stick TOP_KEYS = ["project", "cig", "defaults", "components", "toolchains", "tasks"]
 stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms"]
 stick COMPONENT_KEYS = ["path", "toolchain", "after", "stages", "env", "env_file", "groups", "timeout_ms", "retries", "retry_delay_ms", "desc"]
-stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces", "touches", "encoding"]
+stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces", "touches", "encoding", "cmds", "rm", "each", "fail_on_output"]
 stick CAPTURES = ["text", "json", "lines", "kv"]
 stick TOOLCHAIN_KEYS = ["language", "short", "extends", "detect", "family", "priority", "auto", "kind", "workspace", "claims_subtree",
   "stages", "extras", "order", "vars", "scripts", "targets", "targets_run", "tools", "versions", "pins", "touches", "install", "note"]
-stick CONDITION_KINDS = ["file", "dir", "glob", "grep", "json", "tool", "not"]
+stick CONDITION_KINDS = ["file", "dir", "glob", "grep", "json", "tool", "os", "not"]
 
 # The first condition in `c` (a condition, or a list of them, nested for
 # "any of") that is not one cigo knows how to check, or null.
@@ -1868,7 +1934,7 @@ pull component_task(comp_name, r, stage, spec, needs) {
   roll t = {}
   if spec.has("shell") {
     t.shell = str(spec.shell)
-  } else {
+  } else if not spec.has("cmds") and not spec.has("rm") {
     t.cmd = argv_of(spec.get("cmd", null)) ?? []
   }
   t.cwd = r.dir
@@ -1882,7 +1948,7 @@ pull component_task(comp_name, r, stage, spec, needs) {
       t[key] = c[key]
     }
   }
-  for key in ["ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces", "touches", "desc", "unresolved"] {
+  for key in ["ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces", "touches", "desc", "unresolved", "cmds", "rm", "each", "fail_on_output"] {
     if spec.has(key) {
       t[key] = spec[key]
     }
@@ -2250,11 +2316,28 @@ pull label_of(t) {
   if t.has("shell") {
     snuff str(t.shell)
   }
+  if t.has("rm") {
+    snuff "remove " + as_list(t.rm).map(pack(x) => str(x)).join(" ") + "   (journaled, undone on rollback)"
+  }
+  if t.has("cmds") {
+    snuff as_list(t.cmds).map(pack(c) => (argv_of(c) ?? []).map(quote).join(" ")).join("  &&  ")
+  }
   stick argv = argv_of(t.get("cmd", null))
   if argv == null or argv.is_empty() {
     snuff "(nothing to run)"
   }
-  snuff argv.map(quote).join(" ")
+  roll per_file = ""
+  if t.has("each") {
+    # pick() runs both arms, so the lookups stay behind an if.
+    roll each_globs = []
+    if type_of(t.each) == "map" {
+      each_globs = as_list(t.each.get("files", []))
+    } else {
+      each_globs = as_list(t.each)
+    }
+    per_file = "   (once per file: ${each_globs.map(pack(x) => str(x)).join(" ")})"
+  }
+  snuff argv.map(quote).join(" ") + per_file
 }
 
 # ----- running one task ---------------------------------------------------------------
@@ -2527,6 +2610,43 @@ pull attempt(name, t, cmd, opts, n) {
     try {
       if cmd.has("shell") {
         r = proc.shell(cmd.shell, opts)
+      } else if cmd.has("rm") {
+        roll gone = []
+        for p in cmd.rm {
+          roll at = p
+          if opts.has("cwd") {
+            at = path.join(opts.cwd, p)
+          }
+          if fs.exists(at) {
+            fs.rm(at)
+            gone.push(p)
+          }
+        }
+        r = {code: 0, out: pick(gone.is_empty(), "nothing to remove\n", "removed " + gone.join(" ") + "\n"), err: "", duration_ms: time.now_ms() - started, simulated: false}
+      } else if cmd.has("argvs") {
+        # Each command's output is kept in order; the first failure ends the run of them.
+        roll out = ""
+        roll err = ""
+        roll code = 0
+        if cmd.argvs.is_empty() {
+          out = "nothing matched " + as_list(cmd.get("files", [])).join(" ") + "\n"
+        }
+        for argv in cmd.argvs {
+          stick one = proc.run(argv.first(), argv.slice(1), opts)
+          out = out + one.out
+          err = err + one.err
+          code = one.code
+          if one.get("simulated", false) {
+            r = one
+          }
+          if not ok_codes(t).contains(one.code) {
+            err = err + "(" + argv.map(quote).join(" ") + " exited " + str(one.code) + ")\n"
+            break
+          }
+        }
+        if r == null {
+          r = {code: code, out: out, err: err, duration_ms: time.now_ms() - started}
+        }
       } else {
         r = proc.run(cmd.argv.first(), cmd.argv.slice(1), opts)
       }
@@ -2552,12 +2672,19 @@ pull attempt(name, t, cmd, opts, n) {
   for line in r.err.trim_end().lines() {
     exhale "    " + line
   }
-  snuff {code: r.code, ok: ok_codes(t).contains(r.code), ms: time.now_ms() - started, out: r.out, err: r.err, simulated: simulated}
+  # A formatter's check prints the files it would change and exits 0:
+  # with fail_on_output, printing anything is the failure.
+  roll ok = ok_codes(t).contains(r.code)
+  if ok and t.get("fail_on_output", false) and not simulated and r.out.trim() != "" {
+    ok = false
+    exhale "    (the task printed output, which it must not; the lines above are the reason)"
+  }
+  snuff {code: r.code, ok: ok, ms: time.now_ms() - started, out: r.out, err: r.err, simulated: simulated}
 }
 
 pull failure(name, cmd, result, n) {
   snuff {
-    message: "task `${name}` failed: ${clip(cmd.label, 100)} exited ${result.code}" + pick(n > 1, " after ${n} attempts", ""),
+    message: "task `${name}` failed: ${clip(cmd.label, 100)} " + pick(result.code == 0, "printed output it must not", "exited ${result.code}") + pick(n > 1, " after ${n} attempts", ""),
     task: name,
     exit_code: result.code,
   }
@@ -2576,12 +2703,42 @@ pull run_task(ctx, name, index, total) {
       line = line + " " + quote(w)
     }
     cmd = {shell: line, label: line}
+  } else if t.has("rm") {
+    # A built-in removal: journaled by cig, so rollback and unburn put it back.
+    stick paths = as_list(t.rm).map(pack(x) => render(str(x), where))
+    cmd = {rm: paths, label: label_of(t)}
+  } else if t.has("cmds") {
+    # Several commands in a row, no shell between them; the first failure ends the task.
+    stick argvs = as_list(t.cmds).map(pack(c) => render_argv(argv_of(c) ?? [], where))
+    if argvs.is_empty() or argvs.any(pack(a) => a.is_empty()) {
+      cough {message: "task `${name}` has an empty command in `cmds`; `cigo check` looks it over", task: name, exit_code: -1}
+    }
+    cmd = {argvs: argvs, label: label_of(t)}
   } else {
     stick argv = render_argv(argv_of(t.get("cmd", null)) ?? [], where) + more
     if argv.is_empty() {
       cough {message: "task `${name}` has nothing to run; `cigo check` looks it over", task: name, exit_code: -1}
     }
-    cmd = {argv: argv, label: argv.map(quote).join(" ")}
+    if t.has("each") {
+      # One command per file the globs name, {file} standing for each:
+      # `each: ["**/*.cig"]`, or `each: {files: [...], skip: ["fixtures"]}`.
+      stick spec_each = t.each
+      stick globs = pick(type_of(spec_each) == "map", as_list(spec_each.get("files", [])), as_list(spec_each))
+      stick skip = pick(type_of(spec_each) == "map", as_list(spec_each.get("skip", [])), [])
+      roll files = []
+      for g in globs {
+        for hit in glob_under(cwd, str(g)) {
+          stick rel = pick(cwd == "." or cwd == "", hit, hit.slice(cwd.len() + 1))
+          if not files.contains(rel) and not rel.split("/").any(pack(part) => skip.contains(part)) {
+            files.push(rel)
+          }
+        }
+      }
+      stick argvs = files.map(pack(f) => argv.map(pack(w) => w.replace("{file}", f)))
+      cmd = {argvs: argvs, label: label_of(t), files: files}
+    } else {
+      cmd = {argv: argv, label: argv.map(quote).join(" ")}
+    }
   }
   stick opts = hop_options(name, t, cwd, d, where)
   if t.has("stdin_from") {
@@ -3286,7 +3443,7 @@ pull do_check(g) {
     }
     snuff ""
   }
-  stick CONDITIONS_ARE = "conditions are file:, dir:, glob:, grep:FILE:REGEX, json:FILE:key, tool: and not:"
+  stick CONDITIONS_ARE = "conditions are file:, dir:, glob:, grep:FILE:REGEX, json:FILE:key, tool:, os:(windows|macos|linux|bsd|unix) and not:"
   pull check_conditions(where, key, conds) {
     stick b = bad_condition(as_list(conds))
     if b != null {
@@ -3331,8 +3488,11 @@ pull do_check(g) {
         }
         for alt in alts {
           if type_of(alt) == "map" {
-            if not alt.has("cmd") and not alt.has("shell") {
-              problem("error", where, "`${table}.${name}`: an alternative needs `cmd` or `shell`")
+            if not alt.has("cmd") and not alt.has("shell") and not alt.has("cmds") and not alt.has("rm") {
+              problem("error", where, "`${table}.${name}`: an alternative needs `cmd`, `cmds`, `rm` or `shell`")
+            }
+            if alt.has("each") and not alt.has("cmd") {
+              problem("error", where, "`${table}.${name}`: `each` runs `cmd` once per file, so it needs `cmd`")
             }
             if alt.has("when") {
               check_conditions(where, "${table}.${name}", alt.when)
@@ -3353,8 +3513,8 @@ pull do_check(g) {
           problem("error", where, "`vars.${v}` must be a list of alternatives, like [{\"when\": [\"file:Cargo.lock\"], \"value\": [\"--locked\"]}, {\"value\": []}]")
           continue
         }
-        if not alts.all(pack(a) => type_of(a) == "map" and a.has("value")) {
-          problem("error", where, "`vars.${v}`: each alternative needs a `value`")
+        if not alts.all(pack(a) => type_of(a) == "map" and (a.has("value") or a.has("glob") or a.has("files"))) {
+          problem("error", where, "`vars.${v}`: each alternative needs a `value`, a `glob` (the first file it names) or `files` (every file the globs name)")
         }
         for a in alts {
           if type_of(a) == "map" and a.has("when") {
@@ -3502,10 +3662,20 @@ pull do_check(g) {
           problem("warning", name, "unknown key `${key}`, ignored${hint_for(key)}")
         }
       }
-      if t.has("cmd") and t.has("shell") {
-        problem("error", name, "has both `cmd` and `shell`; keep one")
-      } else if not t.has("cmd") and not t.has("shell") and needs_of(t).is_empty() {
-        problem("error", name, "has nothing to run: give it `cmd` or `shell`, or `needs` to make it a group")
+      stick ways = ["cmd", "shell", "cmds", "rm"].filter(pack(k) => t.has(k))
+      if t.has("each") and not t.has("cmd") {
+        problem("error", name, "`each` runs `cmd` once per file, so it needs `cmd`")
+      }
+      if t.has("cmds") and (type_of(t.cmds) != "list" or t.cmds.is_empty() or not t.cmds.all(pack(c) => argv_of(c) != null and not argv_of(c).is_empty())) {
+        problem("error", name, "`cmds` is a list of commands, each a list like [\"go\", \"vet\", \"./...\"]")
+      }
+      if t.has("rm") and not as_list(t.rm).all(pack(x) => type_of(x) == "string" and x != "" and not path.is_abs(x) and not x.split("/").contains("..")) {
+        problem("error", name, "`rm` is a list of paths inside the project to remove, like [\"dist\", \"build\"]")
+      }
+      if ways.len() > 1 {
+        problem("error", name, "has both ${ways.map(pack(k) => "`" + k + "`").join(" and ")}; keep one")
+      } else if ways.is_empty() and needs_of(t).is_empty() {
+        problem("error", name, "has nothing to run: give it `cmd`, `cmds`, `rm` or `shell`, or `needs` to make it a group")
       } else if t.has("shell") {
         if type_of(t.shell) != "string" or t.shell.trim() == "" {
           problem("error", name, "`shell` must be a command line (a string)")
@@ -3577,8 +3747,15 @@ pull do_check(g) {
       stick argv = argv_of(t.get("cmd", null))
       if argv != null and not argv.is_empty() {
         check_program(name, argv, str(t.get("cwd", ".")), pick(own, "error", "warning"))
-      } else if not own and not t.has("shell") and not t.get("bad", false) {
-        problem("error", name, "has nothing to run: its stage or target gives it no `cmd` or `shell`")
+      } else if t.has("cmds") {
+        for c in as_list(t.cmds) {
+          stick a = argv_of(c)
+          if a != null and not a.is_empty() {
+            check_program(name, a, str(t.get("cwd", ".")), pick(own, "error", "warning"))
+          }
+        }
+      } else if not own and not t.has("shell") and not t.has("rm") and not t.get("bad", false) {
+        problem("error", name, "has nothing to run: its stage or target gives it no `cmd`, `cmds`, `rm` or `shell`")
       }
     }
     for s in strings_of(t) {

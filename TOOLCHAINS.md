@@ -32,7 +32,7 @@ looks for, and the version pins it compares.
 | `scala-sbt` | Scala | `build.sbt` | setup, format, format-check, check, build, test, package, run, clean |
 | `scala-mill` | Scala | `build.mill` or `build.mill.yaml` or `build.sc` | format, format-check, check, build, test, package, clean |
 | `clojure-lein` | Clojure | `project.clj` | setup, check, build, test, package, run, clean |
-| `clojure-cli` | Clojure | `deps.edn` | setup, test, package, clean |
+| `clojure-cli` | Clojure | `deps.edn`, no `windows` | setup, test, package, clean |
 | `dotnet` | C# / F# / VB | `*.sln` or `*.slnx` or `*.csproj` or `*.fsproj` or `*.vbproj` | setup, format, format-check, build, test, package, clean |
 | `cmake` | C / C++ | `CMakeLists.txt` | setup, format, format-check, build, test, package, clean |
 | `meson` | C / C++ | `meson.build` | setup, build, test, clean |
@@ -45,7 +45,7 @@ looks for, and the version pins it compares.
 | `erlang-rebar3` | Erlang | `rebar.config` | setup, format, format-check, lint, check, build, test, package, clean |
 | `gleam` | Gleam | `gleam.toml` | setup, format, format-check, check, build, test, package, run, clean |
 | `swift-spm` | Swift | `Package.swift` | setup, format, format-check, lint, check, build, test, package, run, clean |
-| `xcode` | Swift / Objective-C (Xcode) | `*.xcworkspace` or `*.xcodeproj` | build, clean |
+| `xcode` | Swift / Objective-C (Xcode) | `*.xcworkspace` or `*.xcodeproj`, `macos` | build, clean |
 | `dart` | Dart | `pubspec.yaml`, no `pubspec.yaml` matching `(?m)^\s+sdk:\s*flutter` | setup, format, format-check, lint, test |
 | `flutter` | Dart (Flutter) | `pubspec.yaml`, `pubspec.yaml` matching `(?m)^\s+sdk:\s*flutter` | setup, format, format-check, lint, test, clean |
 | `zig` | Zig | `build.zig` | setup, format, format-check, build, test, run, clean |
@@ -88,8 +88,9 @@ looks for, and the version pins it compares.
 - `android-gradle`: needs the Android SDK (ANDROID_HOME or local.properties); device tests are left out.
 - `java-maven`: phases are cumulative (package runs the tests unless skipped); install writes to ~/.m2 and is not setup.
 - `scala-sbt`: sbt 2 runs tests incrementally; add a stage override with testFull to run them all.
+- `clojure-cli`: on Windows the Clojure CLI is a PowerShell module, not a program, so this toolchain is not offered there.
 - `dotnet`: a folder with several solution or project files needs a stage override naming one.
-- `cmake`: ctest --test-dir needs CMake 3.20; multi-config generators need a --config override.
+- `cmake`: ctest --test-dir needs CMake 3.20; on Windows the Visual Studio generator is multi-config, so build and test take Debug unless a stage override says otherwise.
 - `ruby-bundler`: Bundler 4 dropped --frozen; setup sets BUNDLE_FROZEN when Gemfile.lock exists.
 - `swift-spm`: swift format ships with Swift 6; lint only fails with --strict.
 - `xcode`: xcodebuild needs a scheme for workspaces and tests: override the stages with -scheme <name> (xcodebuild -list shows them).
@@ -97,9 +98,10 @@ looks for, and the version pins it compares.
 - `zig`: test and run are steps build.zig defines, so they appear only when it does; minimum_zig_version is advisory, doctor checks it.
 - `ocaml-dune`: OCaml files are formatted only when .ocamlformat exists.
 - `fortran-fpm`: plain fpm clean asks before deleting, so clean passes --skip.
-- `powershell`: never detected on its own: add a component with toolchain powershell.
-- `cigscript`: cig check reads one file at a time, so these stages check every .cig file under the component in turn, test data (fixtures, corpus, testdata) left out.
+- `powershell`: never detected on its own: add a component with toolchain powershell; pwsh (PowerShell 7) when it is installed, else Windows PowerShell.
+- `cigscript`: cig check reads one file at a time, so these stages run it once per .cig file under the component, test data (fixtures, corpus, testdata) left out.
 - `shell`: never detected on its own: add a component with toolchain shell.
 - `terraform`: setup initializes without the backend so no credentials are needed; plan is a task of its own and apply is never run.
 - `docker`: lint uses docker build --check (Buildx 0.15 and later).
+- `make`: on the BSDs, make is bmake; a GNU makefile runs with gmake when it is installed.
 - `earthly`: Earthly upstream takes critical fixes only since 2025; EarthBuild is the community fork.

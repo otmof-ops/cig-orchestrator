@@ -112,6 +112,10 @@ group*), and `ci` runs format-check, lint, check, build and test everywhere.
 | `undo`, `undo_shell` | how to take the task back, as `cmd` or `shell`; runs on rollback and on `cig unburn`, only for a task that succeeded |
 | `touches` | a glob or a list of globs, relative to the task's directory, of the files the task may change (`"*"` the directory's own files, `"**"` everything under it, `"src/**"`, `"package.json"`). cig keeps each existing file under them in the tin before the task runs, so a file the task modifies or deletes comes back on rollback, byte for byte, where it would otherwise be listed as irreversible. A format stage gets its language's source files and a setup stage its lockfiles from the knowledge base without being told; a toolchain of your own sets `touches: {format: [...], setup: [...]}` |
 | `encoding` | how the task's output is read: `lossy` (the default: bad bytes replaced, so a Windows console code page or a Latin-1 path never fails a task that exited 0), `utf-8` (strict), `utf-16`, `latin1` |
+| `cmds` | several commands in a row, each a list, no shell between them; the first failure ends the task (`cmd`, `cmds`, `rm` and `shell` are alternatives, keep one) |
+| `each` | with `cmd`: run it once per file the globs name, `{file}` standing for each; a list of globs, or `{"files": [...], "skip": [...]}` |
+| `rm` | paths inside the project to remove through cig itself, journaled, so a rollback or `cig unburn` puts them back |
+| `fail_on_output` | `true` makes any output a failure, for checks like `gofmt -l` that print what they would change and exit 0 |
 
 A task with `needs` and nothing to run is a group: `"release": {"needs":
 ["ci", "deploy"]}`. A task with the name of a generated one (`api:test`,
