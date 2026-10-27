@@ -4419,7 +4419,6 @@ pull version_newer(a, b) {
 }
 
 pull fetch_text(url, what) {
-  stick local = env.get("CIGO_UPDATE_MANIFEST", "")
   roll r = null
   burn {
     if which("gh") != null and url.starts_with("https://api.github.com/") {
@@ -4440,8 +4439,16 @@ pull fetch_text(url, what) {
 }
 
 pull releases() {
+  # `pick` is a function, so both arms would run: the fetch stays behind an if.
   stick local = env.get("CIGO_UPDATE_MANIFEST", "")
-  stick textv = pick(local != "", pick(fs.is_file(local), fs.read_text(local), "[]"), fetch_text("https://api.github.com/repos/${REPO}/releases?per_page=20", "the releases of ${REPO}"))
+  roll textv = "[]"
+  if local != "" {
+    if fs.is_file(local) {
+      textv = fs.read_text(local)
+    }
+  } else {
+    textv = fetch_text("https://api.github.com/repos/${REPO}/releases?per_page=20", "the releases of ${REPO}")
+  }
   roll items = []
   try {
     items = json.parse(textv)
