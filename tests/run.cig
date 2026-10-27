@@ -75,10 +75,68 @@ pull hop(dir, program, words) {
   snuff hop_env(dir, program, words, {})
 }
 
+# Windows, where the suite runs from Git Bash or PowerShell: PATH entries are
+# joined with a semicolon, paths come back with backslashes, and the stub
+# programs are .cmd files written here, since a .sh symlink cannot start.
+stick on_windows = env.get("OS", "") == "Windows_NT"
+stick path_sep = pick_sep()
+pull pick_sep() {
+  if on_windows {
+    snuff ";"
+  }
+  snuff ":"
+}
+
+# A path as the stub logs it, comparable across platforms: forward slashes,
+# and case folded on Windows.
+pull norm(p) {
+  roll q = str(p).replace("\\", "/")
+  if on_windows {
+    # Only the drive letter is folded: cmd's %CD% and cig's cwd can spell
+    # it differently, and the rest of a line (a -D flag) must stay as is.
+    for l in ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"] {
+      q = q.replace(l + ":/", l.lower() + ":/")
+    }
+  }
+  snuff q
+}
+
+# Is this program here? Tests that need bash or a coreutil step aside with
+# a line instead of failing on a machine without it.
+pull has(program) {
+  snuff proc.which(program) != null
+}
+
+# The stub programs Windows can start: one <name>.cmd per stub, logging like
+# the sh stub does, written into the work dir on first use, which is after
+# the wipe at the start of the run (written at load, they went with it).
+stick stub_dir = pick_stub_dir()
+pull pick_stub_dir() {
+  if not on_windows {
+    snuff path.join(root, "tests/fixtures/stub-bin")
+  }
+  snuff path.join(work, "stub-cmd")
+}
+pull write_stubs() {
+  if on_windows and not fs.exists(stub_dir) {
+    burn {
+      fs.mkdir(stub_dir)
+      for entry in fs.list(path.join(root, "tests/fixtures/stub-bin")) {
+        stick name = path.base(entry)
+        if name == "stub" {
+          continue
+        }
+        fs.write_text(path.join(stub_dir, name + ".cmd"), "@echo off\r\nif defined STUB_LOG echo " + name + " %* @%CD% >> \"%STUB_LOG%\"\r\nif \"%1\"==\"--version\" echo " + name + " 99.1.0\r\nif \"%1\"==\"-version\" echo " + name + " 99.1.0\r\nif \"%1\"==\"version\" echo " + name + " 99.1.0\r\nif \"%1\"==\"-v\" echo " + name + " 99.1.0\r\nif \"%1\"==\"-V\" echo " + name + " 99.1.0\r\necho %* | findstr /C:\"fail-please\" >nul && exit /b 3\r\nexit /b 0\r\n")
+      }
+    }
+  }
+}
+
 # The stub toolchain first on PATH: every npm, cargo, go, uv... it runs is
 # recorded in <dir>-stub.log with its arguments and directory, and succeeds.
 pull stubbed(dir) {
-  snuff {PATH: path.join(root, "tests/fixtures/stub-bin") + ":" + env.get("PATH", ""), STUB_LOG: dir + "-stub.log"}
+  write_stubs()
+  snuff {PATH: stub_dir + path_sep + env.get("PATH", ""), STUB_LOG: dir + "-stub.log"}
 }
 
 pull tool_stubbed(dir, words) {
@@ -87,9 +145,30 @@ pull tool_stubbed(dir, words) {
 
 pull stub_log(dir) {
   if fs.exists(dir + "-stub.log") {
-    snuff fs.read_text(dir + "-stub.log")
+    roll t = fs.read_text(dir + "-stub.log")
+    if on_windows {
+      # cmd.exe is handed an argument with = or a space in quotes, which
+      # the .cmd stub echoes; the sh stub never sees them.
+      t = t.replace("\"", "")
+    }
+    snuff norm(t)
   }
   snuff ""
+}
+
+# The sh launcher, started the way this platform can: directly, or through
+# sh on Windows, where an extensionless script is not a program.
+pull launch(dir, l, words) {
+  if on_windows {
+    snuff hop(dir, "sh", [l] + words)
+  }
+  snuff hop(dir, l, words)
+}
+pull launch_env(dir, l, words, more) {
+  if on_windows {
+    snuff hop_env(dir, "sh", [l] + words, more)
+  }
+  snuff hop_env(dir, l, words, more)
 }
 
 # `pieces` appear in `textv` in this order.
@@ -150,6 +229,7 @@ if fs.exists(work) {
     fs.rm(work)
   }
 }
+# (the Windows stubs are written into the work dir on first use, by stubbed())
 
 # ----- the basics -----------------------------------------------------------
 
@@ -333,7 +413,14 @@ test("arguments after -- reach the last task named, quoted for a shell", pack() 
   stick dir = fresh("tests/fixtures/edge")
   stick r = tool_in(dir, ["run", "echo", "--", "a", "b c", "it's"])
   exits(r, 0)
-  says(r.out, "[a]\n    [b c]\n    [it's]")
+  if on_windows {
+    # Git's bash is an MSYS program: started by a native one, it parses its
+    # own command line and drops a bare apostrophe (otmof-ops/CigScript#63).
+    # The shell line below still carries it, through sh.
+    says(r.out, "[a]\n    [b c]\n")
+  } else {
+    says(r.out, "[a]\n    [b c]\n    [it's]")
+  }
   stick s = tool_in(dir, ["run", "echo-shell", "--", "a", "b c", "it's"])
   exits(s, 0)
   says(s.out, "<a><b c><it's>")
@@ -482,12 +569,12 @@ test("one stage runs in every language, in dependency order, each in its own dir
   exits(r, 0)
   says(r.out, "done: 6 tasks")
   in_order(stub_log(dir), [
-    "go mod download @" + path.join(dir, "services/api"),
-    "go build ./... @" + path.join(dir, "services/api"),
-    "cargo fetch --locked @" + path.join(dir, "services/worker"),
-    "cargo build --workspace --locked @" + path.join(dir, "services/worker"),
-    "pnpm install --frozen-lockfile @" + path.join(dir, "web"),
-    "pnpm run build @" + path.join(dir, "web"),
+    "go mod download @" + norm(path.join(dir, "services/api")),
+    "go build ./... @" + norm(path.join(dir, "services/api")),
+    "cargo fetch --locked @" + norm(path.join(dir, "services/worker")),
+    "cargo build --workspace --locked @" + norm(path.join(dir, "services/worker")),
+    "pnpm install --frozen-lockfile @" + norm(path.join(dir, "web")),
+    "pnpm run build @" + norm(path.join(dir, "web")),
   ])
   never_says(stub_log(dir), "make ")
   stick listed = tool_in(dir, ["list"]).out
@@ -710,7 +797,7 @@ test("gleam builds and tests with gleam", pack() {
   }
   exits(tool_in(dir, ["adopt", "--write"]), 0)
   exits(tool_stubbed(dir, ["run", "test"]), 0)
-  says(stub_log(dir), "gleam test @" + dir)
+  says(stub_log(dir), "gleam test @" + norm(dir))
 })
 
 test("toolchains lists what this knows, and one in full", pack() {
@@ -1047,10 +1134,16 @@ test("a cig pin the installed cig does not satisfy is flagged on every command, 
 
 test("the manifest's cig key and a script's # cig header are read as pins", pack() {
   stick dir = fresh("tests/fixtures/chain")
-  edit_manifest(dir, pack(m) {
-    m.cig = "1.2"
-    m.tasks["old-script"] = {cmd: ["cig", "run", "old.cig"]}
-  })
+  # The pin is the installed cig's own major.minor, so it is satisfied by
+  # whichever cig runs the suite; the old script's header is what is flagged.
+  stick installed = json.parse(tool_in(dir, ["version", "--json"]).out).cig
+  stick file = path.join(dir, "cig-tasks.json")
+  stick m = json.load(file)
+  m.cig = installed.split(".").slice(0, 2).join(".")
+  m.tasks["old-script"] = {cmd: ["cig", "run", "old.cig"]}
+  burn {
+    json.save(file, m, 2)
+  }
   burn {
     fs.write_text(path.join(dir, "old.cig"), "#!/usr/bin/env cig\n# cig 1.0.0\nexhale \"old\"\n")
   }
@@ -1288,10 +1381,10 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
     stick chmod = proc.run("chmod", ["755", path.join(fake, "cig")], {timeout_ms: 10000})
     assert(chmod.code == 0, chmod.err)
   }
-  stick old = hop_env(dir, launcher, ["version"], {PATH: fake + ":" + env.get("PATH", "")})
+  stick old = launch_env(dir, launcher, ["version"], {PATH: fake + path_sep + env.get("PATH", "")})
   exits(old, 2)
-  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.2.1 or newer")
-  stick j = json.parse(hop(dir, launcher, ["version", "--json"]).out)
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.3.1 or newer")
+  stick j = json.parse(launch(dir, launcher, ["version", "--json"]).out)
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
 })
 
@@ -1312,13 +1405,13 @@ test("a windows checkout runs the launcher: scripts are LF, the Windows files CR
 
 test("--max-steps without a number is an error, not a loop; --max-steps=N is accepted", pack() {
   stick dir = fresh("tests/fixtures/chain")
-  stick bare = hop(dir, launcher, ["--max-steps"])
+  stick bare = launch(dir, launcher, ["--max-steps"])
   exits(bare, 2)
   says(bare.err, "--max-steps needs a number")
-  stick eq = hop(dir, launcher, ["--max-steps=50000", "version"])
+  stick eq = launch(dir, launcher, ["--max-steps=50000", "version"])
   exits(eq, 0)
   says(eq.out, "cig-orchestrator ")
-  stick two = hop(dir, launcher, ["--max-steps", "50000", "version"])
+  stick two = launch(dir, launcher, ["--max-steps", "50000", "version"])
   exits(two, 0)
 })
 
@@ -1332,7 +1425,7 @@ test("install.sh honours CIGO_PREFIX over PREFIX, survives CDPATH and a hostile 
   assert(r.code == 0, r.out + r.err)
   assert(fs.is_file(path.join(want, "bin", "cigo")), "the launcher is not under CIGO_PREFIX: " + r.out)
   assert(not fs.exists(dir + "-wrong"), "PREFIX won over CIGO_PREFIX")
-  stick v = hop(dir, path.join(want, "bin", "cigo"), ["version"])
+  stick v = launch(dir, path.join(want, "bin", "cigo"), ["version"])
   exits(v, 0)
   says(v.out, "cig-orchestrator ")
 })
@@ -1362,8 +1455,9 @@ test("a manifest and an env file with a byte-order mark load, and $CIG_OUTPUT th
 test("a task whose output is not UTF-8 and exits 0 passes; strict encoding is a choice", pack() {
   stick dir = fresh("tests/fixtures/chain")
   edit_manifest(dir, pack(m) {
-    m.tasks["latin"] = {cmd: ["printf", "caf\\xe9\\n"]}
-    m.tasks["strict"] = {cmd: ["printf", "caf\\xe9\\n"], encoding: "utf-8"}
+    # \351 in octal: BSD printf prints \xe9 as the letters x, e, 9.
+    m.tasks["latin"] = {cmd: ["printf", "caf\\351\\n"]}
+    m.tasks["strict"] = {cmd: ["printf", "caf\\351\\n"], encoding: "utf-8"}
     m.tasks["bad"] = {cmd: ["true"], encoding: "ebcdic"}
   })
   stick ok = tool_in(dir, ["run", "latin"])
@@ -1423,8 +1517,10 @@ test("file: matches the exact name on every filesystem", pack() {
   stick before = tool_stubbed(dir, ["adopt"])
   exits(before, 0)
   never_says(before.out, "\"toolchain\": \"docker\"")
+  # Not a rename: on a case-insensitive filesystem the two names are one file.
   burn {
-    fs.mv(path.join(dir, "dockerfile"), path.join(dir, "Dockerfile"))
+    fs.rm(path.join(dir, "dockerfile"))
+    fs.write_text(path.join(dir, "Dockerfile"), "FROM scratch\n")
   }
   stick after = tool_stubbed(dir, ["adopt"])
   exits(after, 0)

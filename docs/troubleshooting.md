@@ -156,6 +156,13 @@ Windows PowerShell 5.1 writes `>>` and `Out-File` as UTF-16, which
 `$CIG_OUTPUT` is not read as; cigo says so and hands nothing on. Use
 PowerShell 7, or `Out-File -Encoding ascii -Append`.
 
+**Under WSL, a task is slow or `npm` will not start**
+
+Keep the project in the Linux filesystem (`~/project`, not `/mnt/c/...`):
+hop watching walks the project around every task, and `/mnt/c` is slow to
+walk. WSL's interop puts Windows' `npm` shim on PATH where it cannot run;
+install Node inside WSL, or put its `bin` first on PATH.
+
 ## Still stuck
 
 Open a [guidance

@@ -26,17 +26,20 @@ if ! command -v cig >/dev/null 2>&1; then
 fi
 version=$(cig --version | awk '{print $2}')
 case "$version" in
-  0.*|1.0.*|1.1.*|1.2.0)
-    echo "install: cig $version is too old; cig-orchestrator needs 1.2.1 or newer (cig update)" >&2
+  0.*|1.0.*|1.1.*|1.2.*|1.3.0)
+    echo "install: cig $version is too old; cig-orchestrator needs 1.3.1 or newer (cig update)" >&2
     exit 1 ;;
 esac
 
 mkdir -p "$share" "$bin"
 cp "$here/orchestrate.cig" "$share/orchestrate.cig"
 # The launcher's tool= line is rewritten to the installed path; awk takes
-# the path as data, so a quote, an ampersand or a bar in it survives.
+# the path from the environment, so a quote, an ampersand, a bar or a
+# backslash (a Windows path) in it survives as it is, where -v would read
+# the backslashes as escapes.
 # shellcheck disable=SC1003
-awk -v t="$share/orchestrate.cig" '
+t="$share/orchestrate.cig" awk '
+  BEGIN { t = ENVIRON["t"] }
   /^tool=/ && !done { gsub(/'"'"'/, "'"'"'\\'"'"''"'"'", t); print "tool='"'"'" t "'"'"'"; done = 1; next }
   { print }
 ' "$here/bin/cigo" > "$bin/$name.tmp"

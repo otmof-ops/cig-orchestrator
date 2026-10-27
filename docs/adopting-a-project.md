@@ -24,8 +24,11 @@ toolchain it recognizes. Three kinds of thing count:
   `*.sh` and `*.bash` files, at the project root or beside a language's
   manifest. Each script is a task named after its file (`gen_docs.sh`
   becomes `scripts:gen-docs`), run with the interpreter its shebang names or,
-  without one, the one its extension implies (`.py` with `python3`, `.js`
-  with `node`, `.ps1` with `pwsh`, `.cig` with `cig run`). Its first comment
+  without one, the one its extension implies (`.sh` with `sh`, `.py` with
+  the Python this machine has, `.js` with `node`, `.ps1` with `pwsh` or
+  Windows PowerShell, `.cig` with `cig run`; `.bat` and `.cmd` on Windows).
+  A shebang pointing at a path this machine lacks falls back to the same
+  program on `PATH`. Its first comment
   is its description. Hidden files and files with neither a shebang nor a
   known extension are left alone.
 

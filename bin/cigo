@@ -10,7 +10,7 @@ tool="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)/orchestrate.cig"
 # The cig this cigo is written for: the same floor as the `# cig` pin in the
 # tool, checked here for cigs too old to read the pin themselves.
 needs_major=1
-needs_minor=2
+needs_minor=3
 needs_patch=1
 
 if ! command -v cig >/dev/null 2>&1; then
@@ -38,7 +38,13 @@ esac
 
 # Under Git Bash and MSYS2, arguments that look like POSIX paths (/prod) are
 # rewritten for native programs; a task argument is handed over as typed.
-case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*) MSYS2_ARG_CONV_EXCL='*'; export MSYS2_ARG_CONV_EXCL ;; esac
+# cig is a native program too, so the one path this launcher hands it, the
+# tool's, is converted here by hand (D:/a/... reads on both sides).
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    MSYS2_ARG_CONV_EXCL='*'; export MSYS2_ARG_CONV_EXCL
+    if command -v cygpath >/dev/null 2>&1; then tool=$(cygpath -m -- "$tool"); fi ;;
+esac
 
 global=""
 run=""
