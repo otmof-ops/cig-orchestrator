@@ -34,9 +34,12 @@ esac
 mkdir -p "$share" "$bin"
 cp "$here/orchestrate.cig" "$share/orchestrate.cig"
 # The launcher's tool= line is rewritten to the installed path; awk takes
-# the path as data, so a quote, an ampersand or a bar in it survives.
+# the path from the environment, so a quote, an ampersand, a bar or a
+# backslash (a Windows path) in it survives as it is, where -v would read
+# the backslashes as escapes.
 # shellcheck disable=SC1003
-awk -v t="$share/orchestrate.cig" '
+t="$share/orchestrate.cig" awk '
+  BEGIN { t = ENVIRON["t"] }
   /^tool=/ && !done { gsub(/'"'"'/, "'"'"'\\'"'"''"'"'", t); print "tool='"'"'" t "'"'"'"; done = 1; next }
   { print }
 ' "$here/bin/cigo" > "$bin/$name.tmp"

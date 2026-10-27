@@ -2729,7 +2729,7 @@ pull run_task(ctx, name, index, total) {
       for g in globs {
         for hit in glob_under(cwd, str(g)) {
           stick rel = pick(cwd == "." or cwd == "", hit, hit.slice(cwd.len() + 1))
-          if not files.contains(rel) and not rel.split("/").any(pack(part) => skip.contains(part)) {
+          if not files.contains(rel) and not rel.replace("\\", "/").split("/").any(pack(part) => skip.contains(part)) {
             files.push(rel)
           }
         }
@@ -4880,8 +4880,11 @@ pull do_update() {
   }
   roll r = null
   burn {
-    # By name, from inside work: GNU tar reads a D: in an archive's path as a host.
-    r = proc.run("sh", ["-c", 'cd "$1" && tar -xzf "$2" && cd cig-orchestrator-* && PREFIX="$3" CIGO_NAME="$4" sh ./install.sh', "sh", work, path.base(tarball), prefix, name], {timeout_ms: 120000})
+    # By name, from inside work (GNU tar reads the D: of a Windows path as a
+    # host), then into the one directory the glob matches: with the tarball
+    # beside it, `cd cig-orchestrator-*` is two arguments, which bash 4.4
+    # refuses and older shells silently took the first of.
+    r = proc.run("sh", ["-c", 'cd "$1" && tar -xzf "$2" && p=$3 n=$4 && set -- cig-orchestrator-*/ && cd "$1" && PREFIX="$p" CIGO_NAME="$n" sh ./install.sh', "sh", work, path.base(tarball), prefix, name], {timeout_ms: 120000})
   }
   if r.code != 0 {
     fail("the release's install.sh failed: ${(r.out + r.err).trim()}")
