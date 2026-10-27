@@ -492,9 +492,9 @@ test("one stage runs in every language, in dependency order, each in its own dir
   never_says(stub_log(dir), "make ")
   stick listed = tool_in(dir, ["list"]).out
   in_order(listed, ["ml:setup", "ml:format", "ml:lint", "ml:test", "api:setup", "web:setup", "web:lint", "web:check", "web:build"])
-  says(listed, "api:format-check     out=$(find . -name")
+  says(listed, "api:format-check     gofmt -l")
   says(listed, "...   (in services/api)")
-  says(tool_in(dir, ["show", "api:format-check"]).out, "exit 1; fi")
+  says(tool_in(dir, ["show", "api:format-check"]).out, "gofmt -l main.go")
 })
 
 test("ci runs format-check, lint, check, build and test in every language", pack() {
@@ -648,7 +648,7 @@ test("check reads a project's own toolchains: keys, conditions, stages and vars"
     "toolchain mine: unknown key `detcet`, ignored; did you mean `detect`?",
     "toolchain mine: `detect`: `fiel:mine.toml` is not a condition",
     "toolchain mine: `stages.biuld` is not a stage; did you mean `build`?",
-    "toolchain mine: `stages.test`: an alternative needs `cmd` or `shell`",
+    "toolchain mine: `stages.test`: an alternative needs `cmd`, `cmds`, `rm` or `shell`",
     "toolchain mine: `stages.lint` must be a list of alternatives",
     "toolchain mine: `stages.check`: `grepp:a:b` is not a condition",
     "toolchain mine: `vars.flag`: each alternative needs a `value`",
@@ -1429,6 +1429,109 @@ test("file: matches the exact name on every filesystem", pack() {
   stick after = tool_stubbed(dir, ["adopt"])
   exits(after, 0)
   says(after.out, "\"toolchain\": \"docker\"")
+})
+
+# ----- the knowledge base on every OS (0.4.0): os:, cmds, each, rm, fail_on_output, globs
+
+test("an os: condition picks the command for this machine", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({
+      project: "oses",
+      toolchains: {mine: {language: "Mine", family: "mine", detect: ["file:mine.toml"], tools: [],
+        vars: {greet: [{when: ["os:windows"], value: "windows-hello"}, {when: ["os:unix"], value: "unix-hello"}, {value: "other"}]},
+        stages: {build: [{when: ["os:windows"], cmd: ["echo", "on-windows"]}, {when: ["os:unix"], cmd: ["echo", "{greet}"]}]}}},
+      components: {m: {path: ".", toolchain: "mine"}},
+    }, 2))
+    fs.write_text(path.join(dir, "mine.toml"), "x = 1\n")
+  }
+  stick r = tool_in(dir, ["run", "m:build"])
+  exits(r, 0)
+  # The suite's own `cig` helper shadows the module here; the OS from the environment.
+  if env.get("OS", "") == "Windows_NT" {
+    says(r.out, "on-windows")
+  } else {
+    says(r.out, "unix-hello")
+  }
+  stick c = tool_in(dir, ["check"])
+  exits(c, 0)
+})
+
+test("cmds run in order and stop at the first failure; rm is journaled and undone", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(path.join(dir, "dist"))
+    fs.write_text(path.join(dir, "dist/out.txt"), "built\n")
+  }
+  edit_manifest(dir, pack(m) {
+    m.tasks["steps"] = {cmds: [["echo", "one"], ["bash", "-c", "echo two; exit 4"], ["echo", "three"]]}
+    m.tasks["clean"] = {rm: ["dist", "nothing-here"]}
+    m.tasks["clean-then-fail"] = {cmd: ["bash", "-c", "exit 9"], needs: ["clean"]}
+  })
+  stick s = tool_in(dir, ["show", "steps"])
+  exits(s, 0)
+  says(s.out, "echo one  &&  bash -c 'echo two; exit 4'  &&  echo three")
+  stick r = tool_in(dir, ["run", "steps"])
+  exits(r, 1)
+  says(r.out, "\n    one")
+  says(r.out, "\n    two")
+  never_says(r.out, "\n    three")
+  says(r.err, "exited 4")
+  stick c = tool_in(dir, ["run", "clean"])
+  exits(c, 0)
+  says(c.out, "removed dist")
+  assert(not there(dir, "dist"), "dist is still there")
+  stick u = cig(dir, ["unburn", last_run(dir).id])
+  exits(u, 0)
+  assert(read(dir, "dist/out.txt") == "built\n", "the removal was not undone")
+  stick f = tool_in(dir, ["run", "clean-then-fail"])
+  exits(f, 1)
+  assert(read(dir, "dist/out.txt") == "built\n", "the removal was not rolled back with the run")
+})
+
+test("each runs a command once per file; fail_on_output fails a check that prints", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(path.join(dir, "src"))
+    fs.mkdir(path.join(dir, "src/fixtures"))
+    fs.write_text(path.join(dir, "src/a.txt"), "A\n")
+    fs.write_text(path.join(dir, "src/b.txt"), "B\n")
+    fs.write_text(path.join(dir, "src/fixtures/c.txt"), "C\n")
+  }
+  edit_manifest(dir, pack(m) {
+    m.tasks["each-file"] = {cmd: ["cat", "{file}"], each: {files: ["src/**/*.txt"], skip: ["fixtures"]}}
+    m.tasks["quiet-ok"] = {cmd: ["true"], fail_on_output: true}
+    m.tasks["noisy"] = {cmd: ["echo", "src/a.txt"], fail_on_output: true}
+  })
+  stick s = tool_in(dir, ["show", "each-file"])
+  exits(s, 0)
+  says(s.out, "once per file: src/**/*.txt")
+  stick r = tool_in(dir, ["run", "each-file"])
+  exits(r, 0)
+  says(r.out, "A")
+  says(r.out, "B")
+  never_says(r.out, "C")
+  exits(tool_in(dir, ["run", "quiet-ok"]), 0)
+  stick n = tool_in(dir, ["run", "noisy"])
+  exits(n, 1)
+  says(n.err, "printed output it must not")
+})
+
+test("a var from a glob names the file a shell used to expand", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({
+      project: "gem",
+      toolchains: {gemmy: {language: "Gemmy", family: "ruby", detect: ["glob:*.gemspec"], tools: [],
+        vars: {gemspec: [{glob: "*.gemspec"}]},
+        stages: {package: [["echo", "build", "{gemspec}"]]}}},
+      components: {g: {path: ".", toolchain: "gemmy"}},
+    }, 2))
+    fs.write_text(path.join(dir, "thing.gemspec"), "Gem::Specification.new\n")
+  }
+  stick s = tool_in(dir, ["show", "g:package"])
+  exits(s, 0)
+  says(s.out, "echo build thing.gemspec")
 })
 
 # ----- the end --------------------------------------------------------------

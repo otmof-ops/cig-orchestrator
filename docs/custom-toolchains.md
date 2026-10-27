@@ -107,6 +107,7 @@ hold, checked in the component's directory. A list inside the list means
 | condition | holds when |
 |---|---|
 | `file:package-lock.json` | the file exists, under exactly that name (case counts, on every filesystem) |
+| `os:windows`, `os:macos`, `os:linux`, `os:bsd`, `os:unix` | the machine's operating system (`bsd` is any BSD, `unix` everything but Windows); with `not:`, everything else |
 | `dir:tests` | the directory exists |
 | `glob:*.csproj` | a file in the directory matches |
 | `grep:pyproject.toml:(?m)^\[tool\.ruff` | the file's text matches the regular expression; the file may be a glob (`requirements*.txt`) or a path |
@@ -136,6 +137,18 @@ that runs, and a stage with none that holds isn't there:
 An alternative is a list (a command with no conditions), or a map with
 `cmd` or `shell`, an optional `when`, and an optional `env`.
 
+Besides `cmd` and `shell`, an alternative can be:
+
+| form | runs |
+|---|---|
+| `{"cmds": [["{python}", "-m", "venv", ".venv"], ["{py}", "-m", "pip", "install", "-e", "."]]}` | several commands in a row, no shell between them; the first failure ends the stage |
+| `{"cmd": ["cig", "check", "{file}"], "each": {"files": ["**/*.cig"], "skip": ["fixtures"]}}` | the command once per file the globs name, `{file}` standing for each (`each` can also be a plain list of globs) |
+| `{"rm": ["dist", "build"]}` | removes those paths through cig itself, journaled, so a rollback or `cig unburn` puts them back |
+| `{"cmd": ["gofmt", "-l", "{go_files}"], "fail_on_output": true}` | a check that prints the files it would change and exits 0: printing anything is the failure |
+
+The built-in toolchains use these instead of `sh -c` lines, so every stage runs
+the same on Windows as on Unix.
+
 ### Vars
 
 A var is a value chosen by conditions, used as `{name}` in commands:
@@ -151,6 +164,14 @@ A list value spliced in as a whole word adds its items (none, here, without
 a lockfile); a text value is substituted anywhere. `{component}` and `{dir}`
 are always there. Give every var a last alternative without `when`: a var
 with no value for a component stops its tasks, and `cigo check` says which.
+
+Two more forms give a var a value from the project's files, so a command need
+not go through a shell to expand a glob:
+
+| form | value |
+|---|---|
+| `{"glob": "*.gemspec"}` | the first file the glob names, relative to the component |
+| `{"files": ["**/*.c", "**/*.h"], "skip": ["build", "vendor"]}` | every file the globs name, as separate arguments |
 
 ### Pins
 
