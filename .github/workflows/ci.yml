@@ -88,6 +88,8 @@ jobs:
       # and the shell component's `git ls-files` has nothing to list.
       - run: apk add --no-cache bash curl git python3 nodejs shellcheck coreutils
       - uses: actions/checkout@v7
+      # The workspace is mounted in from the host, owned by another uid.
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Install cig
         run: |
           mkdir -p /usr/local/bin && cd /tmp
