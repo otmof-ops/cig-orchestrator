@@ -5,7 +5,7 @@ SPDX-PackageSupplier = "Jay Taylor"
 SPDX-PackageDownloadLocation = "https://github.com/otmof-ops/cig-orchestrator"
 
 [[annotations]]
-path = ["orchestrate.cig", "bin/**", "install.sh", "tests/**", "cig-tasks.json", "REUSE.toml", ".gitignore", ".github/**"]
+path = ["orchestrate.cig", "bin/**", "install.sh", "install.ps1", ".gitattributes", "tests/**", "cig-tasks.json", "REUSE.toml", ".gitignore", ".github/**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)"
 SPDX-License-Identifier = "Apache-2.0"

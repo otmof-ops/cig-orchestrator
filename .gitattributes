@@ -1,0 +1,8 @@
+# Scripts and text are LF everywhere, so a Windows checkout with autocrlf
+# still runs bin/cigo, install.sh and the fixtures under Git Bash and WSL;
+# what Windows itself reads is CRLF.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.png binary

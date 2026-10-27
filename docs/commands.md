@@ -212,6 +212,18 @@ holds the before-bytes of what a task's `touches` named) under
 | `CIGO_UPDATE_MANIFEST`, `CIGO_YANKED_FILE` | a local releases list and YANKED file for `cigo update`, instead of GitHub's (the suite uses them) |
 | `CIGO_INTERNAL_PANIC=<command>` | crash on purpose at that command (`mid-run` for inside a run), for the suite |
 
+## On Windows
+
+`bin/cigo.ps1` is the launcher for PowerShell and `bin/cigo.cmd` the shim
+that runs it from cmd (through `pwsh` when it is installed, else Windows
+PowerShell); both split cig's flags, walk up to the manifest and check the
+cig they hand the tool to, the same as the `sh` launcher. `install.ps1`
+installs them with the tool into `%LOCALAPPDATA%\cig-orchestrator`
+(`-Prefix`, `-Name`) and adds its `bin` to the user PATH. Under Git Bash and
+MSYS2 the `sh` launcher works too, and keeps a task's arguments as typed
+(`MSYS2_ARG_CONV_EXCL`). The checkout carries a `.gitattributes`, so scripts
+are LF and the Windows files CRLF whatever `core.autocrlf` says.
+
 ## Without the launcher
 
 `cigo` is a small `sh` script. The tool itself is one CigScript file, so this

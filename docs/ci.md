@@ -83,6 +83,30 @@ ci:
     paths: [.cig-orchestrator/]
 ```
 
+## GitHub Actions on Windows and macOS
+
+The same two installs, with the shell each runner has. macOS has no
+`sha256sum`: use `shasum -a 256 -c`. On Windows, PowerShell runs CigScript's
+`install.ps1` and cig-orchestrator's `install.ps1`, and `cigo` is then on
+PATH for the following steps:
+
+```yaml
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: pwsh
+        run: |
+          irm https://raw.githubusercontent.com/otmof-ops/CigScript/main/install.ps1 | iex
+          $tag = 'v0.4.0'
+          irm "https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag/cig-orchestrator-$tag.tar.gz" -OutFile cigo.tar.gz
+          tar -xzf cigo.tar.gz
+          & ".\cig-orchestrator-$tag\install.ps1"
+          echo "$env:LOCALAPPDATA\Programs\cig;$env:LOCALAPPDATA\cig-orchestrator\bin" >> $env:GITHUB_PATH
+      - run: cigo doctor
+      - run: cigo --no-rollback run ci
+```
+
 ## Worth knowing
 
 - **`--no-rollback` in CI.** Locally, a failure puts back what the run
