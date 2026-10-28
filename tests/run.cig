@@ -64,7 +64,9 @@ pull hop_env(dir, program, words, more) {
   burn {
     r = proc.run(program, words, {
       cwd: dir,
-      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", DEMO_REMOTE: dir + "-remote"}.merge(more),
+      # CI is unset for the tool: a runner sets it, and the versions question
+      # is never asked under CI; the one test that wants that sets it back.
+      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CI: "", DEMO_REMOTE: dir + "-remote"}.merge(more),
       timeout_ms: 120000,
     })
   }
@@ -1683,6 +1685,12 @@ test("an os: condition names a system cig reports, in any case, or check says wh
 })
 
 test("doctor counts a python it cannot find as a missing tool", pack() {
+  if on_windows {
+    # cig searches the Windows directories after PATH, as CreateProcess does,
+    # and C:\Windows\py.exe is always there to be found.
+    exhale "      (skipped on Windows: py.exe lives in the Windows directory, which a program search always reaches)"
+    snuff
+  }
   stick dir = fresh("tests/fixtures/empty")
   burn {
     fs.write_text(path.join(dir, "requirements.txt"), "requests\n")

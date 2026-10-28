@@ -19,7 +19,7 @@ prefix=${prefix:-$HOME/.local}
 # A relative prefix is written into the launcher as it is, which only works
 # from this directory: make it absolute first.
 case "$prefix" in
-  /*) ;;
+  /*|[A-Za-z]:*|\\*) ;;
   *) prefix=$PWD/$prefix ;;
 esac
 name=${CIGO_NAME:-cigo}
