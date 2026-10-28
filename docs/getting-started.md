@@ -6,11 +6,11 @@ every language with one command.
 ## 1. Install cig and cigo
 
 cigo is written in [CigScript](https://github.com/otmof-ops/CigScript), so it
-needs the `cig` runtime, 1.4.0 or newer:
+needs the `cig` runtime, 1.4.2 or newer:
 
 ```sh
 # Review, then run (pinned to a release; never asks for sudo)
-curl -fsSL https://raw.githubusercontent.com/otmof-ops/CigScript/v1.4.0/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/otmof-ops/CigScript/v1.4.2/install.sh -o install.sh
 less install.sh && sh install.sh
 cig --version
 ```

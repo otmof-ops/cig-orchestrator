@@ -22,7 +22,7 @@ tool="$(CDPATH='' cd -- "$(dirname -- "$self")/.." && pwd)/orchestrate.cig"
 # tool, checked here for cigs too old to read the pin themselves.
 needs_major=1
 needs_minor=4
-needs_patch=0
+needs_patch=2
 
 if ! command -v cig >/dev/null 2>&1; then
   echo "cigo: cig is not on PATH; install CigScript first: https://github.com/otmof-ops/CigScript" >&2

@@ -141,12 +141,19 @@ no, and both are remembered until a pin changes; `cigo config versions
 always` switches without asking everywhere. Nothing global is ever changed.
 See [running on the pinned version](commands.md#running-on-the-pinned-version).
 
-**`` `deploy` is NOT undone: its undo `...` exited 7 ``**
+**`` deploy is NOT undone: its compensation failed: the undo `...` exited 7 ``**
 
 A task's `undo` failed during the rollback, so what the task did is still
 out there; the lines that follow list its op as `not undone`, never as
 compensated. Fix the undo (or do it by hand), then `cig unburn <run>` runs
 the rollback again.
+
+**`` announce: {{title}} reaches a `shell` line unquoted ``**, before a run, or **`` its value holds shell syntax (`;`) ``**, during one
+
+A value pasted into a `shell` line as text is shell code. Write
+`{{title|sh}}` so it reaches the shell as one word, or pass it through `env`
+and read `"$TITLE"`. `--strict`, and CI, stop the run on the warning; a
+value that actually holds shell syntax is refused unquoted either way.
 
 **`warn: web: node is 22.1.0, web/.nvmrc pins 20`**
 

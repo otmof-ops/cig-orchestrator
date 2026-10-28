@@ -5,6 +5,28 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 0.5.1 — 2026-10-28
+
+Needs cig 1.4.2 (a burn can carry a name; a `touches` glob may be optional).
+
+- **A value in a `shell` line is checked at run time too** (#47). `cigo run`
+  says before anything starts which values reach a `shell` or `undo_shell`
+  line unquoted, as `cigo check` does; with `--strict`, or under CI (where
+  values come from PR titles and commit messages), the run stops instead.
+  And at the moment of substitution a value holding shell syntax (`;`, `|`,
+  `&`, a backtick, `$(`, a newline, `<`, `>`) is refused unquoted, so a
+  value that would run as shell never reaches the shell; `|sh` makes it one
+  word.
+- **A new project's first `setup` no longer warns that its `touches` match
+  nothing** (#48). The built-in lists are a toolchain's guess at what might
+  change (every lockfile kind, every source extension), so they are passed
+  as optional globs (`?package-lock.json`), which cig 1.4.2 never counts as
+  a typo; a task's own `touches` stay as written, and may use the `?` too.
+- **A failed undo is named for its task by cig itself** (CigScript #80): the
+  burn carries the task's name, so the report reads `deploy is NOT undone:
+  its compensation failed: the undo … exited 7`, with no line of
+  `orchestrate.cig` in front of it.
+
 ## 0.5.0 — 2026-10-28
 
 Found by a debugging pass over 0.4.0 and an outside pass over 0.4.0 with cig

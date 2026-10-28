@@ -138,9 +138,11 @@ jq -r '.stats.total' "$CIG_OUTPUTS"
 `cmd` never goes through a shell: each word reaches the program as it is, so
 a value can't be misread as shell. `shell` is a command line for `sh -c` (on Windows too, through Git for Windows' `sh`; only a machine without any `sh` falls back to `cmd`), and
 a template in it is pasted in as text, so a value holding `;` or `$(...)`
-would run. Quote values you don't control with `|sh` (`cigo check` warns
-about every value in a `shell` or `undo_shell` line that isn't, and
-`--strict` makes that an error):
+would run. Quote values you don't control with `|sh`. `cigo check` warns
+about every value in a `shell` or `undo_shell` line that isn't, `cigo run`
+says the same before it starts (and stops under `--strict`, or under CI), and
+a value that turns out to hold shell syntax is refused at the moment of
+substitution unless `|sh` made it one word:
 
 ```json
 "notify": {"shell": "echo {{release.notes|sh}} | mail -s release team@example.com"}

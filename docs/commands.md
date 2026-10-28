@@ -47,7 +47,11 @@ cigo run scripts:seed -- --count 50    # arguments after -- go to the last task 
 A failure stops the run and puts back what it changed (see [cig's
 flags](#cigs-own-flags) to keep it instead). With `--only`, a task that
 reads another's output (`{{site.page}}`) needs that task named too, since
-values come from the tasks in this run.
+values come from the tasks in this run. Before anything starts, a value that
+reaches a `shell` or `undo_shell` line unquoted is said, as `cigo check` says
+it; `--strict`, or CI, stops the run on it, and a value holding shell syntax
+is refused unquoted at substitution either way ([shell lines and
+quoting](chaining-languages.md#shell-lines-and-quoting)).
 
 **`cigo plan`** prints the order a run would take and each command, and runs
 nothing. With no task names, it plans every task.
