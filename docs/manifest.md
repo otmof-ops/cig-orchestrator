@@ -31,7 +31,8 @@ after that it's yours, and `cigo check` reads it over before anything runs.
 |---|---|
 | `project` | the project's name, in the run's first line and as `{{project}}`; the directory's name when absent |
 | `cig` | the cig this project is written for, as cig reads a pin: `1.2` (any 1.2.x), `1.2.0` (exactly), `>=1.2.0`; every command warns when the installed cig does not satisfy it (`.cig-version` at the root says the same to cig itself) |
-| `defaults` | `timeout_ms`, `retries` and `retry_delay_ms` for every task that doesn't set its own |
+| `versions` | what to do when a toolchain's installed version disagrees with the project's pin: `ask`, `always`, `never` or `off` ([running on the pinned version](commands.md#running-on-the-pinned-version)) |
+| `defaults` | `timeout_ms`, `retries`, `retry_delay_ms` and `inputs_limit` for every task that doesn't set its own |
 | `toolchains` | this project's changes to built-in toolchains, and toolchains of its own ([your own toolchains](custom-toolchains.md)) |
 | `components` | a directory and the toolchain that builds it, one entry each |
 | `tasks` | commands of the project's own: the chain, the deploy, anything else |
@@ -104,7 +105,8 @@ group*), and `ci` runs format-check, lint, check, build and test everywhere.
 | `capture` | keep stdout as a value: `text`, `json`, `lines` or `kv` |
 | `stdin` | text for standard input (templates work) |
 | `stdin_from` | another task's stdout, as standard input |
-| `inputs` | files, directories or globs; unchanged since the last success, with the same command and values, means the task is skipped |
+| `inputs` | files, directories or globs; unchanged since the last success, with the same command and values, means the task is skipped. A fingerprint reads at most `inputs_limit` files (20,000); past that the task always runs and says so on its run line, in `cigo plan` and in `cigo show` |
+| `inputs_limit` | how many files `inputs` may cover before the task gives up on skipping; raise it for a large asset tree, or narrow `inputs` |
 | `produces` | paths or globs the task must leave behind, or it failed |
 | `timeout_ms` | how long before the task and everything it started are killed (the process group on Unix, a Job Object on Windows); ten minutes by default |
 | `retries`, `retry_delay_ms` | attempts after the first, and the pause between them |

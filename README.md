@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/otmof-ops/CigScript"><img alt="a CigScript tool" src="https://img.shields.io/badge/a-CigScript%20tool-f97316"></a>
-  <img alt="needs cig 1.3.1 or newer" src="https://img.shields.io/badge/needs-cig%201.3.1%2B-6b7280">
+  <img alt="needs cig 1.4.0 or newer" src="https://img.shields.io/badge/needs-cig%201.4.0%2B-6b7280">
   <a href="TOOLCHAINS.md"><img alt="60 toolchains" src="https://img.shields.io/badge/toolchains-60-6b7280"></a>
   <a href="docs/roadmap.md"><img alt="actively maintained" src="https://img.shields.io/badge/status-actively%20maintained-f97316"></a>
   <a href="LICENSE"><img alt="license Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6b7280"></a>
@@ -78,7 +78,7 @@ would have run and the chain would have put back what it created.
 | an undo for what cig cannot see | a task's `undo` (a deploy's teardown, say) runs on rollback and on `cig unburn` |
 | nothing done twice | a task with `inputs` is skipped while its files, and the values it was handed, are unchanged |
 | checked first | `cigo check` finds loops, typos, unknown toolchains, missing programs and broken templates before anything runs |
-| the tools themselves | `cigo doctor` finds each toolchain's tools and versions and compares them with the pins you already keep; every command warns where a version disagrees, the installed cig against the project's pins included, and `--strict` stops on one |
+| the tools themselves | `cigo doctor` finds each toolchain's tools and versions and compares them with the pins you already keep; every command warns where a version disagrees, the installed cig against the project's pins included, and `--strict` stops on one. `cigo versions switch` runs tasks on the pinned versions through the version manager already on the machine (mise, asdf, rustup, uv, fnm...), per task, never your default |
 | what a task rewrites | a format stage's sources and a setup stage's lockfiles are kept in the tin before the task runs, so they come back on rollback; `touches` names a task's own |
 | cigo itself | crash reports under your control, `cigo update` to a checksum- and attestation-verified release, `cigo version --json` |
 
@@ -162,7 +162,7 @@ your sanity.
 
 ## Install
 
-Needs `cig` 1.3.1 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
+Needs `cig` 1.4.0 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
 
 ```sh
 tag=v0.4.0
@@ -173,10 +173,11 @@ sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256" && tar -xzf "cig-orchestrator
 cigo version
 ```
 
-On Windows, PowerShell: extract the same tarball and run `.\install.ps1`
-(`-Prefix`, `-Name`); it installs `cigo.ps1` and a `cigo.cmd` shim into
-`%LOCALAPPDATA%\cig-orchestrator\bin` and puts that on your PATH. Git Bash
-and WSL use `install.sh` as above.
+On Windows, PowerShell: extract the same tarball and run
+`powershell -ExecutionPolicy Bypass -File .\install.ps1` (`-Prefix`,
+`-Name`); it installs the `cigo.cmd` shim, which `cigo` resolves to, and the
+`cigo.launch.ps1` it runs into `%LOCALAPPDATA%\cig-orchestrator\bin` and
+puts that on your PATH. Git Bash and WSL use `install.sh` as above.
 
 From then on `cigo update` installs the next release, checksum and build
 attestation verified, and `cigo update --check` only says whether there is
@@ -190,8 +191,8 @@ one file: `cig run path/to/orchestrate.cig -- run ci`.
 ## Where it runs
 
 Linux and macOS, on both architectures; FreeBSD, Alpine and Termux with
-`bash` installed; Windows, natively from PowerShell and cmd (`cigo.ps1`,
-`cigo.cmd`) and from Git Bash and WSL. The suite runs in CI on Ubuntu,
+`bash` installed; Windows, natively from PowerShell and cmd (`cigo.cmd` and
+the `cigo.launch.ps1` it runs) and from Git Bash and WSL. The suite runs in CI on Ubuntu,
 macOS, Windows and Alpine. cig itself runs the tasks: a `shell` line runs
 under `sh` wherever one exists, Git for Windows included, and under `cmd`
 only where it does not; a timeout ends the whole process tree on every

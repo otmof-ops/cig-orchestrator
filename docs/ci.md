@@ -27,11 +27,11 @@ jobs:
       - name: Install cig
         run: |
           mkdir -p "$HOME/.local/bin" && cd "$RUNNER_TEMP"
-          base=https://github.com/otmof-ops/CigScript/releases/download/v1.3.1
-          curl -fsSLO "$base/cig-v1.3.1-linux-x86_64"
-          curl -fsSLO "$base/cig-v1.3.1-linux-x86_64.sha256"
-          sha256sum -c cig-v1.3.1-linux-x86_64.sha256
-          install -m 755 cig-v1.3.1-linux-x86_64 "$HOME/.local/bin/cig"
+          base=https://github.com/otmof-ops/CigScript/releases/download/v1.4.0
+          curl -fsSLO "$base/cig-v1.4.0-linux-x86_64"
+          curl -fsSLO "$base/cig-v1.4.0-linux-x86_64.sha256"
+          sha256sum -c cig-v1.4.0-linux-x86_64.sha256
+          install -m 755 cig-v1.4.0-linux-x86_64 "$HOME/.local/bin/cig"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install cigo
@@ -71,9 +71,9 @@ ci:
   image: your-build-image
   before_script:
     - mkdir -p "$HOME/.local/bin" && export PATH="$HOME/.local/bin:$PATH"
-    - base=https://github.com/otmof-ops/CigScript/releases/download/v1.3.1
-    - curl -fsSLO "$base/cig-v1.3.1-linux-x86_64" && curl -fsSLO "$base/cig-v1.3.1-linux-x86_64.sha256"
-    - sha256sum -c cig-v1.3.1-linux-x86_64.sha256 && install -m 755 cig-v1.3.1-linux-x86_64 "$HOME/.local/bin/cig"
+    - base=https://github.com/otmof-ops/CigScript/releases/download/v1.4.0
+    - curl -fsSLO "$base/cig-v1.4.0-linux-x86_64" && curl -fsSLO "$base/cig-v1.4.0-linux-x86_64.sha256"
+    - sha256sum -c cig-v1.4.0-linux-x86_64.sha256 && install -m 755 cig-v1.4.0-linux-x86_64 "$HOME/.local/bin/cig"
     - tag=v0.4.0; base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
     - curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz" && curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
     - sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256" && tar -xzf "cig-orchestrator-$tag.tar.gz" && "cig-orchestrator-$tag/install.sh"
@@ -106,8 +106,11 @@ writes both directories to `GITHUB_PATH` for the steps that follow:
         run: |
           irm https://raw.githubusercontent.com/otmof-ops/CigScript/main/install.ps1 | iex
           $env:Path = "$env:LOCALAPPDATA\Programs\cig;$env:Path"
-          $tag = 'v0.4.0'
-          irm "https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag/cig-orchestrator-$tag.tar.gz" -OutFile cigo.tar.gz
+          $tag = 'v0.5.0'
+          $base = "https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
+          irm "$base/cig-orchestrator-$tag.tar.gz" -OutFile cigo.tar.gz
+          irm "$base/cig-orchestrator-$tag.tar.gz.sha256" -OutFile cigo.tar.gz.sha256
+          if ((Get-FileHash cigo.tar.gz -Algorithm SHA256).Hash.ToLower() -ne ((Get-Content cigo.tar.gz.sha256) -split '\s+')[0].ToLower()) { throw 'checksum mismatch' }
           tar -xzf cigo.tar.gz
           & ".\cig-orchestrator-$tag\install.ps1"
           echo "$env:LOCALAPPDATA\Programs\cig;$env:LOCALAPPDATA\cig-orchestrator\bin" >> $env:GITHUB_PATH

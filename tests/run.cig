@@ -1321,7 +1321,12 @@ pull fake_release(dir, version) {
     fs.cp(launcher, path.join(src, "bin", "cigo"))
     fs.cp(path.join(root, "LICENSES"), path.join(src, "LICENSES"))
     fs.cp(path.join(root, "docs"), path.join(src, "docs"))
-    fs.write_text(path.join(src, "orchestrate.cig"), fs.read_text(path.join(src, "orchestrate.cig")).replace('stick VERSION = "0.4.0"', 'stick VERSION = "' + version + '"'))
+    # Whatever version the tool says today, the fake release says `version`.
+    stick src_text = fs.read_text(path.join(src, "orchestrate.cig"))
+    stick at = src_text.find('stick VERSION = "')
+    assert(at >= 0, "no VERSION line in orchestrate.cig")
+    stick close = src_text.slice(at + 17).find('"')
+    fs.write_text(path.join(src, "orchestrate.cig"), src_text.slice(0, at + 17) + version + src_text.slice(at + 17 + close))
     stick t = proc.run("tar", ["-czf", name + ".tar.gz", name], {cwd: rel, timeout_ms: 60000})
     assert(t.code == 0, t.err)
     fs.write_text(path.join(rel, name + ".tar.gz.sha256"), hash.sha256_file(path.join(rel, name + ".tar.gz")) + "  " + name + ".tar.gz\n")
@@ -1383,7 +1388,7 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
   }
   stick old = launch_env(dir, launcher, ["version"], {PATH: fake + path_sep + env.get("PATH", "")})
   exits(old, 2)
-  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.3.1 or newer")
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.4.0 or newer")
   stick j = json.parse(launch(dir, launcher, ["version", "--json"]).out)
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
 })
@@ -1395,12 +1400,12 @@ test("a windows checkout runs the launcher: scripts are LF, the Windows files CR
   says(attrs, "* text=auto eol=lf")
   says(attrs, "*.ps1 text eol=crlf")
   says(attrs, "*.cmd text eol=crlf")
-  for f in ["bin/cigo", "install.sh", "bin/cigo.ps1", "bin/cigo.cmd", "install.ps1"] {
+  for f in ["bin/cigo", "install.sh", "bin/cigo.launch.ps1", "bin/cigo.cmd", "install.ps1"] {
     assert(fs.is_file(path.join(root, f)), "${f} is missing")
   }
   never_says(fs.read_text(launcher), "\r")
-  says(fs.read_text(path.join(root, "bin/cigo.ps1")), "CIGO_TOOL")
-  says(fs.read_text(path.join(root, "bin/cigo.cmd")), "%~dpn0.ps1")
+  says(fs.read_text(path.join(root, "bin/cigo.launch.ps1")), "CIGO_TOOL")
+  says(fs.read_text(path.join(root, "bin/cigo.cmd")), "%~dpn0.launch.ps1")
 })
 
 test("--max-steps without a number is an error, not a loop; --max-steps=N is accepted", pack() {
@@ -1628,6 +1633,425 @@ test("a var from a glob names the file a shell used to expand", pack() {
   stick s = tool_in(dir, ["show", "g:package"])
   exits(s, 0)
   says(s.out, "echo build thing.gemspec")
+})
+
+# ----- 0.4.1: what the debugging session found ------------------------------
+
+test("a python project with neither requirements nor a build system runs on the python found", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "pyproject.toml"), "[project]\nname = \"x\"\n")
+    fs.mkdir(path.join(dir, "tests"))
+    fs.write_text(path.join(dir, "tests/test_a.py"), "")
+  }
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick listed = tool_in(dir, ["list"]).out
+  never_says(listed, "{python}")
+  never_says(listed, "{py}")
+  says(listed, "-m unittest discover")
+  stick c = tool_in(dir, ["check"])
+  never_says(c.out + c.err, "has no value")
+})
+
+test("an os: condition names a system cig reports, in any case, or check says which", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  stick manifest = pack(cond) => json.stringify({
+    project: "oses",
+    toolchains: {mine: {language: "Mine", family: "mine", detect: ["file:mine.toml"], tools: [],
+      stages: {build: [{when: [cond], cmd: ["echo", "picked"]}, {cmd: ["echo", "other"]}]}}},
+    components: {m: {path: ".", toolchain: "mine"}},
+  }, 2)
+  burn {
+    fs.write_text(path.join(dir, "mine.toml"), "x = 1\n")
+    fs.write_text(path.join(dir, "cig-tasks.json"), manifest("os:darwin"))
+  }
+  stick c = tool_in(dir, ["check"])
+  exits(c, 1)
+  says(c.out + c.err, "`os:darwin` names no operating system cig reports")
+  says(c.out + c.err, "`macos` is the name for it")
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), manifest("os:UNIX"))
+  }
+  exits(tool_in(dir, ["check"]), 0)
+  stick r = tool_in(dir, ["run", "m:build"])
+  exits(r, 0)
+  if env.get("OS", "") == "Windows_NT" {
+    says(r.out, "other")
+  } else {
+    says(r.out, "picked")
+  }
+})
+
+test("doctor counts a python it cannot find as a missing tool", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "requirements.txt"), "requests\n")
+    fs.mkdir(path.join(dir, "tests"))
+    fs.write_text(path.join(dir, "tests/test_a.py"), "")
+  }
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  # A PATH with no python on it: the stubs alone.
+  # The hop's own PATH chooses its program (cig 1.4.0), so cig is named by its path.
+  stick bare = hop_env(dir, proc.which("cig"), ["run", tool, "--", "doctor"], {PATH: stub_dir})
+  exits(bare, 1)
+  says(bare.out, "missing  python: none of python, python3, py is on PATH")
+  says(bare.out, "https://www.python.org/downloads/")
+  says(bare.out, "1 missing tool(s)")
+})
+
+
+# ----- 0.5.0: toolchain versions, the switch (#31) -----------------------------
+#
+# The monorepo's web/.nvmrc pins node 20; the stubs answer 99.1.0 to every
+# version question, and the stub `mise` has every version (`mise where`
+# exits 0) and logs what it is asked to run.
+
+test("opening a project with a node pin mismatch asks once, and runs on the installed version meanwhile", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick r = tool_stubbed(dir, ["run", "web:build"])
+  exits(r, 0)
+  says(r.err, "1 language disagrees with this machine")
+  says(r.err, "node  20 pinned by web/.nvmrc   installed 99.1.0")
+  says(r.err, "Switch to the pinned versions for cigo's tasks? mise has it.")
+  says(r.err, "cigo versions switch")
+  says(r.err, "cigo versions keep")
+  never_says(stub_log(dir), "mise exec")
+  says(stub_log(dir), "pnpm run build")
+  # Asked once: the next run says one line, not the question again.
+  stick again = tool_stubbed(dir, ["run", "web:build"])
+  exits(again, 0)
+  never_says(again.err, "Switch to the pinned versions")
+  says(again.err, "`cigo versions` shows which")
+})
+
+test("yes runs the task through mise exec with the pinned version, and never touches the default", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick yes = tool_stubbed(dir, ["versions", "switch"])
+  exits(yes, 0)
+  says(yes.out, "remembered: cigo's tasks run on the pinned versions in this project (node 20)")
+  stick r = tool_stubbed(dir, ["run", "web:build"])
+  exits(r, 0)
+  says(r.err, "switching: node 20 (web/.nvmrc) via mise")
+  never_says(r.err, "web/.nvmrc pins 20")
+  never_says(r.err, "Switch to the pinned versions")
+  says(r.out, "pnpm run build   (in web)   on node 20 via mise (web/.nvmrc)")
+  says(stub_log(dir), "mise exec node@20 -- pnpm run build @" + norm(dir) + "/web")
+  never_says(stub_log(dir), "mise use")
+  never_says(stub_log(dir), "mise settings")
+  # The switch made the versions agree, so --strict passes.
+  exits(tool_stubbed(dir, ["run", "web:build", "--strict"]), 0)
+  # The run's record says which version each task ran on.
+  stick report = json.load(fs.glob(path.join(dir, ".cig-orchestrator/reports/*.json")).sort().last())
+  stick build = report.tasks.filter(pack(t) => t.task == "web:build").first()
+  assert(build.versions == ["node 20 via mise (web/.nvmrc)"], "the report does not say the version: ${json.stringify(build)}")
+})
+
+test("no runs on the installed version and is not asked again until a pin changes", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick no = tool_stubbed(dir, ["versions", "keep"])
+  exits(no, 0)
+  says(no.out, "remembered: cigo's tasks run on the installed versions")
+  stick r = tool_stubbed(dir, ["run", "web:build"])
+  exits(r, 0)
+  never_says(r.err, "Switch to the pinned versions")
+  says(r.err, "web: node is 99.1.0, web/.nvmrc pins 20")
+  never_says(stub_log(dir), "mise exec")
+  burn {
+    fs.write_text(path.join(dir, "web/.nvmrc"), "22\n")
+  }
+  stick changed = tool_stubbed(dir, ["run", "web:build"])
+  exits(changed, 0)
+  says(changed.err, "Switch to the pinned versions for cigo's tasks?")
+  says(changed.err, "node  22 pinned by web/.nvmrc")
+})
+
+test("always switches without asking and says so; never warns only; off looks at nothing", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick a = tool_stubbed(dir, ["run", "web:build", "--versions=always"])
+  exits(a, 0)
+  says(a.err, "switching: node 20 (web/.nvmrc) via mise")
+  never_says(a.err, "Switch to the pinned versions")
+  says(stub_log(dir), "mise exec node@20 -- pnpm run build")
+  stick n = tool_stubbed(dir, ["run", "web:build", "--versions=never"])
+  exits(n, 0)
+  never_says(n.err, "Switch to the pinned versions")
+  says(n.err, "web/.nvmrc pins 20")
+  stick o = tool_stubbed(dir, ["run", "web:build", "--versions=off"])
+  exits(o, 0)
+  never_says(o.err, "nvmrc")
+  stick bad = tool_stubbed(dir, ["run", "web:build", "--versions=maybe"])
+  exits(bad, 2)
+  says(bad.err, "--versions is one of ask, always, never, off")
+  # In CI nobody can answer, so nothing is asked.
+  stick ci = hop_env(dir, "cig", ["run", tool, "--", "run", "web:build"], stubbed(dir).merge({CI: "true"}))
+  exits(ci, 0)
+  never_says(ci.err, "Switch to the pinned versions")
+  says(ci.err, "web/.nvmrc pins 20")
+})
+
+test("the manifest's versions key and cigo config versions set the rule", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  edit_manifest(dir, pack(m) {
+    m.versions = "always"
+  })
+  stick r = tool_stubbed(dir, ["run", "web:build"])
+  exits(r, 0)
+  says(r.err, "switching: node 20 (web/.nvmrc) via mise")
+  edit_manifest(dir, pack(m) {
+    m.versions = "sometimes"
+  })
+  stick c = tool_stubbed(dir, ["check"])
+  exits(c, 1)
+  says(c.out, "`versions` is one of ask, always, never, off")
+  edit_manifest(dir, pack(m) {
+    m.remove("versions")
+  })
+  exits(tool_home(dir, ["config", "versions", "sometimes"]), 2)
+  stick set = tool_home(dir, ["config", "versions", "always"])
+  exits(set, 0)
+  says(set.err, "versions = always")
+  stick through = hop_env(dir, "cig", ["run", tool, "--", "run", "web:build"], stubbed(dir).merge({CIGO_HOME: cigo_home(dir)}))
+  exits(through, 0)
+  says(through.err, "switching: node 20 (web/.nvmrc) via mise")
+})
+
+test("a missing pinned version asks before downloading; --install=always installs it", pack() {
+  if on_windows {
+    exhale "      (skipped on Windows: the test's own mise is a shell script)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  # A mise that lacks every version: `where` says no, and everything is logged.
+  stick mgr = dir + "-mgr"
+  burn {
+    fs.mkdir(mgr)
+    fs.write_text(path.join(mgr, "mise"), "#!/bin/sh\necho \"mise $* @$PWD\" >> \"$STUB_LOG\"\n[ \"$1\" = where ] && exit 1\nexit 0\n")
+    proc.run("chmod", ["755", path.join(mgr, "mise")])
+  }
+  stick e = stubbed(dir)
+  e.PATH = mgr + path_sep + e.PATH
+  stick ask = hop_env(dir, "cig", ["run", tool, "--", "run", "web:build", "--versions=always"], e)
+  exits(ask, 0)
+  says(ask.err, "mise can install node 20 (mise install node@20); it downloads, so cigo does not do it on its own")
+  never_says(stub_log(dir), "mise install")
+  never_says(stub_log(dir), "mise exec")
+  stick always = hop_env(dir, "cig", ["run", tool, "--", "run", "web:build", "--versions=always", "--install=always"], e)
+  exits(always, 0)
+  says(always.err, "installing node 20 through mise: mise install node@20")
+  in_order(stub_log(dir), ["mise install node@20", "mise exec node@20 -- pnpm run build"])
+  stick never = hop_env(dir, "cig", ["run", tool, "--", "run", "web:build", "--versions=always", "--install=never"], e)
+  exits(never, 0)
+  says(never.err, "mise does not have node 20 and `install` is never")
+  # `cigo versions install` prints the commands; --yes runs them.
+  stick v = hop_env(dir, "cig", ["run", tool, "--", "versions", "install"], e)
+  exits(v, 0)
+  says(v.out, "node 20 (web/.nvmrc): mise install node@20")
+  says(v.out, "these download; `cigo versions install --yes` runs them")
+  stick vy = hop_env(dir, "cig", ["run", tool, "--", "versions", "install", "--yes"], e)
+  exits(vy, 0)
+  says(vy.out, "installing node 20: mise install node@20")
+})
+
+test("no manager explains what to install and carries on", pack() {
+  if on_windows {
+    exhale "      (skipped on Windows: the test's bare PATH is built from symlinks)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  # node and pnpm, and nothing that manages versions.
+  stick bare = dir + "-bare"
+  burn {
+    fs.mkdir(bare)
+    for name in ["node", "pnpm"] {
+      proc.run("ln", ["-s", path.join(stub_dir, "stub"), path.join(bare, name)])
+    }
+  }
+  stick e = {PATH: bare + path_sep + "/usr/bin:/bin", STUB_LOG: dir + "-stub.log"}
+  stick r = hop_env(dir, proc.which("cig"), ["run", tool, "--", "run", "web:build"], e)
+  exits(r, 0)
+  says(r.err, "node 20 is pinned by web/.nvmrc, 99.1.0 is installed, and no version manager was found. To let cigo switch for you: install mise or fnm")
+  says(stub_log(dir), "pnpm run build")
+})
+
+test("cigo versions lists each pin against this machine, and doctor names the manager", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick v = tool_stubbed(dir, ["versions"])
+  exits(v, 0)
+  says(v.out, ": versions = ask; 1 disagrees, answer: not yet")
+  says(v.out, "node       20             web/.nvmrc")
+  says(v.out, "installed 99.1.0")
+  says(v.out, "switch via mise (has 20)")
+  says(v.out, "at least 1.22")
+  says(v.out, "agrees")
+  says(v.out, "cigo versions switch | keep remembers the answer")
+  stick d = tool_stubbed(dir, ["doctor"])
+  exits(d, 0)
+  says(d.out, "manager  node: mise has 20; cigo versions switch runs tasks on it")
+  exits(tool_stubbed(dir, ["versions", "sideways"]), 2)
+})
+
+test("an unchanged project opens without a hop: the version probe is cached", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  exits(tool_stubbed(dir, ["check"]), 0)
+  stick asked = text.find_all(stub_log(dir), "node --version").len()
+  assert(asked >= 1, "the first check never asked node its version:\n" + stub_log(dir))
+  exits(tool_stubbed(dir, ["check"]), 0)
+  assert(text.find_all(stub_log(dir), "node --version").len() == asked, "the second check asked node again:\n" + stub_log(dir))
+  assert(there(dir, ".cig-orchestrator/state/versions.json"), "no versions.json was kept")
+})
+
+# ----- 0.5.0: what the outside pass found (#43, #44, #45, and three more) -------
+
+test("a captured value in a shell line is a check warning unless quoted with |sh, an error under --strict", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "TITLE"), "release v1.2\n")
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({
+      project: "t",
+      tasks: {
+        title: {cmd: ["cat", "TITLE"], capture: "text"},
+        announce: {shell: "echo announcing {{title}}", needs: ["title"]},
+        safe: {shell: "echo {{title|sh}}", needs: ["title"]},
+        listed: {cmd: ["echo", "{{title}}"], needs: ["title"]},
+        here: {shell: "echo {{root}}"},
+      },
+    }, 2))
+  }
+  stick c = tool_in(dir, ["check"])
+  exits(c, 0)
+  says(c.out, "warning: announce: {{title}} reaches a `shell` line unquoted, so a value holding shell syntax runs as shell; write {{title|sh}}, or put the value in `env` and read \"$TITLE\"")
+  never_says(c.out, "safe:")
+  never_says(c.out, "listed:")
+  never_says(c.out, "here:")
+  stick s = tool_in(dir, ["check", "--strict"])
+  exits(s, 1)
+  says(s.out, "error: announce: {{title}} reaches a `shell` line unquoted")
+})
+
+test("each as a plain list of globs runs once per file, and check refuses a malformed each", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(path.join(dir, "src"))
+    fs.write_text(path.join(dir, "src/a.py"), "print('A')\n")
+    fs.write_text(path.join(dir, "src/b.py"), "print('B')\n")
+  }
+  edit_manifest(dir, pack(m) {
+    m.tasks["every"] = {cmd: ["cat", "{file}"], each: ["src/*.py"]}
+    m.tasks["malformed"] = {cmd: ["echo"], each: {skip: ["x"]}}
+  })
+  stick r = tool_in(dir, ["run", "every"])
+  exits(r, 0)
+  says(r.out, "print('A')")
+  says(r.out, "print('B')")
+  stick c = tool_in(dir, ["check"])
+  exits(c, 1)
+  says(c.out, "error: malformed: `each` is a list of globs")
+  never_says(c.out, "error: every:")
+})
+
+test("a value read in cmds or rm is a need, and an unknown one is a check error", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({
+      project: "t",
+      tasks: {
+        producer: {cmd: ["echo", "hello"], capture: "text"},
+        "consumer-cmds": {cmds: [["echo", "got", "{{producer}}"]]},
+        "consumer-rm": {rm: ["out-{{producer}}"]},
+        bad: {rm: ["{{nothing}}"]},
+      },
+    }, 2))
+  }
+  stick p = tool_in(dir, ["plan", "consumer-cmds"])
+  exits(p, 0)
+  in_order(p.out, ["producer", "consumer-cmds"])
+  stick r = tool_in(dir, ["run", "consumer-cmds"])
+  exits(r, 0)
+  says(r.out, "got hello")
+  in_order(tool_in(dir, ["plan", "consumer-rm"]).out, ["producer", "consumer-rm"])
+  stick c = tool_in(dir, ["check"])
+  exits(c, 1)
+  says(c.out, "error: bad: {{nothing}} names no task")
+})
+
+test("a task whose exit code is outside ok says so, not that it printed output", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({project: "t", tasks: {"expect-fail": {cmd: ["cig", "--version"], ok: [1]}}}, 2))
+  }
+  stick r = tool_in(dir, ["run", "expect-fail"])
+  exits(r, 1)
+  says(r.err, "exited 0 (not in ok: 1)")
+  never_says(r.err, "printed output it must not")
+})
+
+test("inputs over the limit always run and say why; plan and show say it too", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.mkdir(path.join(dir, "assets"))
+    for i in [1, 2, 3, 4, 5] {
+      fs.write_text(path.join(dir, "assets/a${i}.txt"), "x\n")
+    }
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({
+      project: "t",
+      defaults: {inputs_limit: 3},
+      tasks: {build: {cmd: ["cig", "--version"], inputs: ["assets"]}},
+    }, 2))
+  }
+  stick first = tool_in(dir, ["run", "build"])
+  exits(first, 0)
+  says(first.out, "inputs cover more than 3 files, so this task always runs; narrow `inputs`")
+  stick second = tool_in(dir, ["run", "build"])
+  exits(second, 0)
+  says(second.out, "inputs cover more than 3 files")
+  never_says(second.out, "up to date")
+  says(tool_in(dir, ["plan", "build"]).out, "(inputs over 3 files: always runs)")
+  says(tool_in(dir, ["show", "build"]).out, "over 3 files, so the task always runs")
+  edit_manifest(dir, pack(m) {
+    m.tasks.build.inputs_limit = 10
+  })
+  exits(tool_in(dir, ["run", "build"]), 0)
+  says(tool_in(dir, ["run", "build"]).out, "up to date")
+  edit_manifest(dir, pack(m) {
+    m.tasks.build.inputs_limit = 0
+  })
+  stick c = tool_in(dir, ["check"])
+  exits(c, 1)
+  says(c.out, "`inputs_limit` is a whole number of files, 1 or more")
+})
+
+test("a failed undo is reported as not undone, by task name", pack() {
+  if on_windows {
+    exhale "      (skipped on Windows: the undo is an sh line)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({
+      project: "t",
+      tasks: {
+        deploy: {cmd: ["sh", "-c", "echo live > remote-site"], undo: ["sh", "-c", "echo undo-broke >&2; exit 7"]},
+        verify: {cmd: ["sh", "-c", "exit 1"], needs: ["deploy"]},
+      },
+    }, 2))
+  }
+  stick r = tool_in(dir, ["run", "verify"])
+  exits(r, 1)
+  says(r.err, "`deploy` is NOT undone: its undo `sh -c 'echo undo-broke >&2; exit 7'` exited 7; stderr: `undo-broke`; fix the undo, then `cig unburn <run>` runs it again")
+  says(r.err, "not undone run sh -c 'echo live > remote-site'")
+  never_says(r.err, "compensated run sh -c 'echo live")
+  # The file the hop made is the kernel's to remove (it was watched); the
+  # hop's effects beyond the pack are what the undo was for, and stand.
+  assert(not there(dir, "remote-site"), "the file the hop created was not rolled back")
 })
 
 # ----- the end --------------------------------------------------------------

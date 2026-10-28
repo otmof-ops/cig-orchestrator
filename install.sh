@@ -16,7 +16,18 @@ if [ -z "$prefix" ] && [ -n "${PREFIX:-}" ]; then
   case "$(uname -o 2>/dev/null || true)" in Android) ;; *) prefix=$PREFIX ;; esac
 fi
 prefix=${prefix:-$HOME/.local}
+# A relative prefix is written into the launcher as it is, which only works
+# from this directory: make it absolute first.
+case "$prefix" in
+  /*) ;;
+  *) prefix=$PWD/$prefix ;;
+esac
 name=${CIGO_NAME:-cigo}
+case "$name" in
+  *.ps1|*.cmd)
+    echo "install: CIGO_NAME=$name names a Windows launcher; install.ps1 installs those" >&2
+    exit 1 ;;
+esac
 share=$prefix/share/cig-orchestrator
 bin=$prefix/bin
 
@@ -26,8 +37,8 @@ if ! command -v cig >/dev/null 2>&1; then
 fi
 version=$(cig --version | awk '{print $2}')
 case "$version" in
-  0.*|1.0.*|1.1.*|1.2.*|1.3.0)
-    echo "install: cig $version is too old; cig-orchestrator needs 1.3.1 or newer (cig update)" >&2
+  ""|0.*|1.0.*|1.1.*|1.2.*|1.3.*)
+    echo "install: cig $version is too old; cig-orchestrator needs 1.4.0 or newer (cig update)" >&2
     exit 1 ;;
 esac
 

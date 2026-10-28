@@ -52,13 +52,13 @@ while ($i -lt $argsList.Count) {
         $run += $a
         $i++
     } elseif ($a -eq '--max-steps') {
-        $run += $a
         if ($i + 1 -lt $argsList.Count) {
+            $run += $a
             $run += [string]$argsList[$i + 1]
             $i += 2
         } else {
-            $run += ''
-            $i++
+            [Console]::Error.WriteLine('cigo: --max-steps needs a number (--max-steps N or --max-steps=N)')
+            exit 2
         }
     } elseif ($a -like '--max-steps=*') {
         $run += $a
@@ -81,13 +81,13 @@ if ($leaveDir -notcontains $cmd) {
     $startDir = (Get-Location).Path
     $dir = $startDir
     while ($dir) {
-        if (Test-Path (Join-Path $dir 'cig-tasks.json')) { break }
+        if (Test-Path -LiteralPath (Join-Path $dir 'cig-tasks.json')) { break }
         $parent = Split-Path -Parent $dir
         if (-not $parent -or $parent -eq $dir) { $dir = $null; break }
         $dir = $parent
     }
-    if ($dir -and (Test-Path (Join-Path $dir 'cig-tasks.json')) -and ($dir -ne $startDir)) {
-        Set-Location $dir
+    if ($dir -and (Test-Path -LiteralPath (Join-Path $dir 'cig-tasks.json')) -and ($dir -ne $startDir)) {
+        Set-Location -LiteralPath $dir
     }
 }
 

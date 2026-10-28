@@ -67,9 +67,18 @@ warning. `--strict` makes a disagreement an error. It changes nothing.
 are on `PATH`, which versions they are, and whether those match the pins the
 project keeps (`.nvmrc`, `.python-version`, `.tool-versions`, `mise.toml`,
 `rust-toolchain.toml`, `global.json`, and the minimums in `go.mod` and
-`build.zig.zon`, among others); then the cig this runs under against the
-range cigo supports and every cig pin the project carries. It exits 1 when a
-tool is missing, and with `--strict` when a version disagrees.
+`build.zig.zon`, among others), naming the version manager that would run
+tasks on a pinned version; then the cig this runs under against the range
+cigo supports and every cig pin the project carries. It exits 1 when a tool
+is missing, and with `--strict` when a version disagrees.
+
+**`cigo versions`** lists each language's pin against this machine: the
+pinned version and where it is pinned, the installed one, and the version
+manager that would run tasks on the pinned one. `cigo versions switch` says
+yes for this project (tasks run on the pinned versions), `cigo versions keep`
+says no, both remembered until a pin changes; `cigo versions install` prints
+the manager's install command for each pinned version it lacks, and `--yes`
+runs them. See [version checks](#version-checks-on-every-command).
 
 **`cigo version`** prints this cigo and the cig it runs on; `--json` adds
 the range of cig it supports, whether the installed cig is inside it, and
@@ -88,8 +97,9 @@ checkout is updated with `git pull` instead, and `update` says so.
 `delete <id>` (or `--all`). See [crash reports](#crash-reports).
 
 **`cigo config`** reads and writes `~/.cig-orchestrator/config`:
-`crash_reports` (`ask`, `always`, `never`), `issues_repo` and
-`update_channel` (`stable`, `prerelease`). `cigo config` lists them,
+`crash_reports` (`ask`, `always`, `never`), `issues_repo`, `update_channel`
+(`stable`, `prerelease`), `versions` (`ask`, `always`, `never`, `off`) and
+`install` (`ask`, `always`, `never`). `cigo config` lists them,
 `cigo config <key>` prints one, `cigo config <key> <value>` sets it,
 `--unset` removes it.
 
@@ -120,8 +130,50 @@ says, on stderr, where they disagree:
 The cig pins are files, so `list`, `plan` and `show` read them on every call.
 Asking a tool its version is a process, which cig journals as a hop, so
 `run` (for the components about to run), `check` and `doctor` ask; `list`,
-`plan` and `show` do not. `--strict` on `run`, `check` and `doctor` turns a
+`plan` and `show` do not. An answer is kept in
+`.cig-orchestrator/state/versions.json` with the program's path, size and
+time, so a tool is asked again only when it changed and an unchanged project
+opens without a hop. `--strict` on `run`, `check` and `doctor` turns a
 disagreement into a stop; `CIGO_VERSIONS=0` keeps the warnings quiet.
+
+### Running on the pinned version
+
+When a toolchain's installed version disagrees with the project's pin, cigo
+can run the task on the pinned one through a version manager already on the
+machine, per task and never by changing anyone's default (no `mise use`, no
+`rustup default`, no shell profile edited). The first manager found wins:
+
+| manager | how the task runs | covers |
+|---|---|---|
+| **mise** | `mise exec <tool>@<version> -- <command>` | whatever `mise.toml` names: node, python, ruby, go, java, bun, deno, rust, zig... |
+| **asdf** | `ASDF_<TOOL>_VERSION=<version>` in the task's environment (the shims read it) | whatever `.tool-versions` names |
+| **rustup** | `RUSTUP_TOOLCHAIN=<version>` (the proxies read it) | rust |
+| **uv** | `UV_PYTHON=<version>` | python |
+| **pyenv** | `PYENV_VERSION=<version>` | python |
+| **fnm** | `fnm exec --using <version> -- <command>` | node |
+| **volta** | `volta run --node <version> <command>` (volta fetches a version it lacks itself) | node |
+| **rbenv** | `RBENV_VERSION=<version>` | ruby |
+| **go** | `GOTOOLCHAIN=go<version>` (Go fetches the toolchain itself the first time) | go |
+
+What happens on a disagreement is the `versions` setting: `--versions=` on
+the command, the manifest's `"versions"`, `cigo config versions`, in that
+order; with nothing set it is `ask`, or `never` when `CI` is set.
+
+| value | on a disagreement |
+|---|---|
+| `ask` | prints the question with the two commands that answer it (`cigo versions switch`, `cigo versions keep`), since a script cannot wait at a prompt, and runs on the installed versions meanwhile; asked once per set of pins, and again when a pin changes |
+| `always` | switches without asking and says so in one line: `switching: node 22.11.0 (web/.nvmrc) via mise` |
+| `never` | warns only (what 0.4.0 did) |
+| `off` | does not look (the same as `CIGO_VERSIONS=0`) |
+
+A version the manager lacks is a separate question, because it downloads:
+`install` (`cigo config install`, or `--install=`) is `ask` (print the
+command; `cigo versions install --yes` runs them all), `always` or `never`.
+Each switched task's run line ends `on node 22.11.0 via mise (web/.nvmrc)`,
+the run's record in `.cig-orchestrator/reports/` carries the same, and
+`--strict` passes when the switch made the versions agree. A project with no
+manager hears which one to install (`mise`, or the one language's own) and
+carries on as today.
 
 ## Crash reports
 
@@ -187,6 +239,7 @@ Everything goes in `.cig-orchestrator/` at the project root; add it to
 | `run/outputs.json` | what the last run's tasks handed on (`cigo outputs` reads it) |
 | `run/<task>.out` | the `$CIG_OUTPUT` file a task wrote |
 | `state/<task>.json` | a task's inputs fingerprint and values, for skipping it when up to date |
+| `state/versions.json` | the version each tool answered (with its program's path, size and time), and the answer to the versions question, per set of pins |
 
 cig keeps its own run records (the journal, the snapshots, and the tin that
 holds the before-bytes of what a task's `touches` named) under
@@ -195,7 +248,7 @@ holds the before-bytes of what a task's `touches` named) under
 
 | path | holds |
 |---|---|
-| `config` | `crash_reports`, `issues_repo`, `update_channel` (`cigo config`) |
+| `config` | `crash_reports`, `issues_repo`, `update_channel`, `versions`, `install` (`cigo config`) |
 | `crashes/<id>.json` | crash reports, yours until you send them (`cigo crash`) |
 | `update/<tag>/` | the last release `cigo update` downloaded and verified |
 
@@ -208,18 +261,22 @@ holds the before-bytes of what a task's `touches` named) under
 | `CIG_DOCTOR=0` | the same as `--no-doctor` |
 | `CIGSCRIPT_HOME` | where cig keeps run records, instead of `~/.cigscript` |
 | `CIGO_HOME` | where cigo keeps its config, crash reports and downloads, instead of `~/.cig-orchestrator` |
+| `CIGO_PREFIX`, `CIGO_NAME` | for `install.sh`: the install root (`~/.local`) and the command's name (`cigo`); `install.ps1` takes `-Prefix` and `-Name` |
 | `CIGO_VERSIONS=0` | no version warnings |
 | `CIGO_UPDATE_MANIFEST`, `CIGO_YANKED_FILE` | a local releases list and YANKED file for `cigo update`, instead of GitHub's (the suite uses them) |
 | `CIGO_INTERNAL_PANIC=<command>` | crash on purpose at that command (`mid-run` for inside a run), for the suite |
 
 ## On Windows
 
-`bin/cigo.ps1` is the launcher for PowerShell and `bin/cigo.cmd` the shim
-that runs it from cmd (through `pwsh` when it is installed, else Windows
-PowerShell); both split cig's flags, walk up to the manifest and check the
-cig they hand the tool to, the same as the `sh` launcher. `install.ps1`
-installs them with the tool into `%LOCALAPPDATA%\cig-orchestrator`
-(`-Prefix`, `-Name`) and adds its `bin` to the user PATH. Under Git Bash and
+`bin/cigo.cmd` is what `cigo` resolves to, at a cmd prompt and a PowerShell
+one alike; it runs `bin/cigo.launch.ps1` beside it (through `pwsh` when it
+is installed, else Windows PowerShell, with the execution policy bypassed),
+which splits cig's flags, walks up to the manifest and checks the cig it
+hands the tool to, the same as the `sh` launcher. The launcher is not named
+`cigo.ps1` on purpose: PowerShell would run that in-process before the shim
+and eat the task's `--`. `install.ps1` installs both with the tool into
+`%LOCALAPPDATA%\cig-orchestrator` (`-Prefix`, `-Name`) and adds its `bin`
+to the user PATH. Under Git Bash and
 MSYS2 the `sh` launcher works too, and keeps a task's arguments as typed
 (`MSYS2_ARG_CONV_EXCL`). The checkout carries a `.gitattributes`, so scripts
 are LF and the Windows files CRLF whatever `core.autocrlf` says.

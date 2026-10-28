@@ -67,8 +67,8 @@ tool and a slow one look the same until the timeout, which is what
 **`ran longer than 600000 ms`**, then `exited -1`
 
 The task hit its timeout (ten minutes by default) and was killed with its
-whole process group. Raise `timeout_ms` on the task or component, or in
-`defaults`.
+whole process group (its Job Object on Windows). Raise `timeout_ms` on the
+task or component, or in `defaults`.
 
 **`` {{stats.total}} in task `site`: no task by that name has produced output in this run ``**
 
@@ -131,6 +131,22 @@ hands the run to a matching version from its humidor when it has one (`cig
 versions`); for the project, change the pin or `cig update`. `cigo doctor`
 prints every version side by side; `--strict` on `run` and `check` makes a
 disagreement a stop, and `CIGO_VERSIONS=0` keeps the warning quiet.
+
+**`web: 1 language disagrees with this machine`**, then **`Switch to the pinned versions for cigo's tasks?`**
+
+The project pins a version (`web/.nvmrc`) that is not the one installed, and
+a version manager on this machine could run the task on the pinned one.
+`cigo versions switch` says yes for this project, `cigo versions keep` says
+no, and both are remembered until a pin changes; `cigo config versions
+always` switches without asking everywhere. Nothing global is ever changed.
+See [running on the pinned version](commands.md#running-on-the-pinned-version).
+
+**`` `deploy` is NOT undone: its undo `...` exited 7 ``**
+
+A task's `undo` failed during the rollback, so what the task did is still
+out there; the lines that follow list its op as `not undone`, never as
+compensated. Fix the undo (or do it by hand), then `cig unburn <run>` runs
+the rollback again.
 
 **`warn: web: node is 22.1.0, web/.nvmrc pins 20`**
 

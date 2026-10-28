@@ -1,7 +1,7 @@
 #!/usr/bin/env cig
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
-# cig >=1.3.1
+# cig >=1.4.0
 # cig-orchestrator: every language in the project, one chain, no glue script.
 #
 # Most projects are several languages in a row: a Python step that makes
@@ -29,13 +29,20 @@
 
 pack { "." }
 
-stick VERSION = "0.4.0"
+stick VERSION = "0.5.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
-stick CIG_NEEDS = ">=1.3.1"
+stick CIG_NEEDS = ">=1.4.0"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
 stick ROOT = fs.cwd()
+# The `versions` and `install` settings (the switch to pinned toolchain
+# versions, below) and where the answer and the version probes are kept.
+stick VERSION_SETTINGS = ["ask", "always", "never", "off"]
+stick INSTALL_SETTINGS = ["ask", "always", "never"]
+stick VERSIONS_FILE = path.join(STATE, "state", "versions.json")
+# Set for the run by `apply_switches`: component -> the switches its tasks run under.
+roll SWITCHES = {}
 
 # ----- stages -----------------------------------------------------------------
 
@@ -1216,15 +1223,16 @@ pull holds(dir, cond) {
   }
   if kind == "os" {
     # windows, macos, linux, freebsd...: cig.os(); bsd is any of them, unix
-    # is everything but Windows.
+    # is everything but Windows. Spelled in any case.
     stick here = cig.os()
-    if arg == "unix" {
+    stick want = arg.lower()
+    if want == "unix" {
       snuff here != "windows"
     }
-    if arg == "bsd" {
+    if want == "bsd" {
       snuff here.ends_with("bsd")
     }
-    snuff here == arg
+    snuff here == want
   }
   if kind == "grep" or kind == "json" {
     stick sep = arg.find(":")
@@ -1295,6 +1303,37 @@ pull vars_for(dir, tc, component) {
         v[name] = found
       } else {
         v[name] = alt.get("value", "")
+      }
+    }
+  }
+  # A value may name another var: `{py}` falls back to `{python}` when the
+  # project has no venv. Values are filled from the others until nothing
+  # changes, so the order the vars are declared in decides nothing; a value
+  # that is exactly another var takes that var's value, a list included.
+  roll names = []
+  for name in v {
+    names.push(name)
+  }
+  roll rounds = 0
+  roll settled = false
+  while not settled and rounds < 4 {
+    settled = true
+    rounds += 1
+    for name in names {
+      stick val = v[name]
+      if type_of(val) != "string" or not val.contains("{") {
+        continue
+      }
+      stick bare = pick(val.starts_with("{") and val.ends_with("}") and not val.starts_with("{{"), val.slice(1, val.len() - 1), "")
+      if bare != "" and bare != name and v.has(bare) {
+        v[name] = v[bare]
+        settled = false
+      } else {
+        stick filled = fill_text(val, v)
+        if filled != val {
+          v[name] = filled
+          settled = false
+        }
       }
     }
   }
@@ -1838,14 +1877,18 @@ pull stage_deps(present, stage, order) {
 
 # ----- the manifest ---------------------------------------------------------------
 
-stick TOP_KEYS = ["project", "cig", "defaults", "components", "toolchains", "tasks"]
-stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms"]
+stick TOP_KEYS = ["project", "cig", "versions", "defaults", "components", "toolchains", "tasks"]
+stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms", "inputs_limit"]
 stick COMPONENT_KEYS = ["path", "toolchain", "after", "stages", "env", "env_file", "groups", "timeout_ms", "retries", "retry_delay_ms", "desc"]
-stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces", "touches", "encoding", "cmds", "rm", "each", "fail_on_output"]
+stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "inputs_limit", "produces", "touches", "encoding", "cmds", "rm", "each", "fail_on_output"]
 stick CAPTURES = ["text", "json", "lines", "kv"]
 stick TOOLCHAIN_KEYS = ["language", "short", "extends", "detect", "family", "priority", "auto", "kind", "workspace", "claims_subtree",
   "stages", "extras", "order", "vars", "scripts", "targets", "targets_run", "tools", "versions", "pins", "touches", "install", "note"]
 stick CONDITION_KINDS = ["file", "dir", "glob", "grep", "json", "tool", "os", "not"]
+# What cig.os() reports, plus the two groups; any other word matches no
+# machine, and a stage behind it would vanish without a word.
+stick OS_NAMES = ["windows", "macos", "linux", "freebsd", "netbsd", "openbsd", "dragonfly", "android", "ios", "solaris", "illumos", "bsd", "unix"]
+stick OS_NEAR = {darwin: "macos", osx: "macos", mac: "macos", macosx: "macos", win: "windows", win32: "windows", win64: "windows", windows_nt: "windows", posix: "unix", gnu: "linux"}
 
 # The first condition in `c` (a condition, or a list of them, nested for
 # "any of") that is not one cigo knows how to check, or null.
@@ -1872,6 +1915,9 @@ pull bad_condition(c) {
     snuff s
   }
   if (kind == "grep" or kind == "json") and s.slice(at + 1).find(":") <= 0 {
+    snuff s
+  }
+  if kind == "os" and not OS_NAMES.contains(s.slice(at + 1).lower()) {
     snuff s
   }
   snuff null
@@ -1948,7 +1994,7 @@ pull component_task(comp_name, r, stage, spec, needs) {
       t[key] = c[key]
     }
   }
-  for key in ["ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "produces", "touches", "desc", "unresolved", "cmds", "rm", "each", "fail_on_output"] {
+  for key in ["ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "inputs_limit", "produces", "touches", "desc", "unresolved", "cmds", "rm", "each", "fail_on_output"] {
     if spec.has(key) {
       t[key] = spec[key]
     }
@@ -2009,6 +2055,16 @@ roll PROJECT_NAME = path.base(ROOT)
 pull strings_of(t) {
   roll out = []
   for w in as_list(t.get("cmd", null)) {
+    out.push(str(w))
+  }
+  # Every word of every command in `cmds`, and every path in `rm`: a value
+  # read there is a need and a reference like any other.
+  for c in as_list(t.get("cmds", null)) {
+    for w in argv_of(c) ?? [] {
+      out.push(str(w))
+    }
+  }
+  for w in as_list(t.get("rm", null)) {
     out.push(str(w))
   }
   for key in ["shell", "stdin", "cwd", "undo_shell"] {
@@ -2513,11 +2569,53 @@ pull glob_under(cwd, pattern) {
 # from an earlier task that changed runs it again), its environment and stdin,
 # and every input file's size and time. Inputs can be files, directories or
 # globs (`src/**/*.ts`).
-pull fingerprint(cwd, inputs, salt) {
+# The most files an inputs fingerprint reads before it gives up. Past it the
+# task always runs, and says so; `inputs_limit` on the task or in `defaults`
+# raises it.
+stick INPUTS_LIMIT = 20000
+# Set by `fingerprint` when its inputs covered more than the limit.
+roll FINGERPRINT_OVER = false
+
+# How many files the inputs name, counted up to `limit` + 1, without hashing.
+pull inputs_count(cwd, inputs, limit) {
+  roll count = 0
+  pull walk(p) {
+    if count > limit {
+      snuff
+    }
+    if fs.is_dir(p) {
+      for child in fs.list(p).sort() {
+        if not FINGERPRINT_SKIP.contains(path.base(child)) {
+          walk(child)
+        }
+      }
+    } else if fs.is_file(p) {
+      count += 1
+    }
+  }
+  for i in inputs {
+    stick pattern = str(i)
+    if pattern.contains("*") or pattern.contains("?") or pattern.contains("[") {
+      for m in glob_under(cwd, pattern) {
+        walk(m)
+      }
+    } else {
+      walk(path.join(cwd, pattern))
+    }
+  }
+  snuff count
+}
+
+pull inputs_limit_of(t, defaults) {
+  snuff int(t.get("inputs_limit", defaults.get("inputs_limit", INPUTS_LIMIT)))
+}
+
+pull fingerprint(cwd, inputs, salt, limit) {
   roll parts = [salt]
   roll count = 0
+  FINGERPRINT_OVER = false
   pull walk(p, rel) {
-    if count > 20000 {
+    if count > limit {
       snuff
     }
     if fs.is_dir(p) {
@@ -2548,7 +2646,8 @@ pull fingerprint(cwd, inputs, salt) {
       walk(path.join(cwd, pattern), pattern)
     }
   }
-  if count > 20000 {
+  if count > limit {
+    FINGERPRINT_OVER = true
     snuff null
   }
   snuff hash.sha256(parts.join("\n"))
@@ -2675,19 +2774,26 @@ pull attempt(name, t, cmd, opts, n) {
   # A formatter's check prints the files it would change and exits 0:
   # with fail_on_output, printing anything is the failure.
   roll ok = ok_codes(t).contains(r.code)
+  roll printed = false
   if ok and t.get("fail_on_output", false) and not simulated and r.out.trim() != "" {
     ok = false
+    printed = true
     exhale "    (the task printed output, which it must not; the lines above are the reason)"
   }
-  snuff {code: r.code, ok: ok, ms: time.now_ms() - started, out: r.out, err: r.err, simulated: simulated}
+  snuff {code: r.code, ok: ok, printed: printed, ok_codes: ok_codes(t), ms: time.now_ms() - started, out: r.out, err: r.err, simulated: simulated}
 }
 
 pull failure(name, cmd, result, n) {
+  stick why = pick(result.get("printed", false), "printed output it must not", "exited ${result.code}" + pick(result.code == 0, " (not in ok: ${ok_text(result)})", ""))
   snuff {
-    message: "task `${name}` failed: ${clip(cmd.label, 100)} " + pick(result.code == 0, "printed output it must not", "exited ${result.code}") + pick(n > 1, " after ${n} attempts", ""),
+    message: "task `${name}` failed: ${clip(cmd.label, 100)} " + why + pick(n > 1, " after ${n} attempts", ""),
     task: name,
     exit_code: result.code,
   }
+}
+
+pull ok_text(result) {
+  snuff as_list(result.get("ok_codes", [])).join(", ")
 }
 
 pull run_task(ctx, name, index, total) {
@@ -2723,8 +2829,15 @@ pull run_task(ctx, name, index, total) {
       # One command per file the globs name, {file} standing for each:
       # `each: ["**/*.cig"]`, or `each: {files: [...], skip: ["fixtures"]}`.
       stick spec_each = t.each
-      stick globs = pick(type_of(spec_each) == "map", as_list(spec_each.get("files", [])), as_list(spec_each))
-      stick skip = pick(type_of(spec_each) == "map", as_list(spec_each.get("skip", [])), [])
+      # Not pick(): both arms would run, and a list has no `get("files")`.
+      roll globs = []
+      roll skip = []
+      if type_of(spec_each) == "map" {
+        globs = as_list(spec_each.get("files", []))
+        skip = as_list(spec_each.get("skip", []))
+      } else {
+        globs = as_list(spec_each)
+      }
       roll files = []
       for g in globs {
         for hit in glob_under(cwd, str(g)) {
@@ -2746,13 +2859,37 @@ pull run_task(ctx, name, index, total) {
   } else if t.has("stdin") {
     opts.stdin = render(str(t.stdin), where)
   }
-  exhale "[${index}/${total}] ${name}: ${cmd.label}" + pick(cwd == ".", "", "   (in ${cwd})")
+  # On the pinned version, through the manager: words before the command,
+  # or variables the tool's own shims and proxies read. The command as the
+  # task wrote it stays on the line; the version note follows it.
+  roll on_versions = []
+  for sw in SWITCHES.get(t.get("component", ""), []) {
+    for k in sw.how.env {
+      opts.env[k] = sw.how.env[k]
+    }
+    if not sw.how.wrap.is_empty() {
+      if cmd.has("argv") {
+        cmd.plain = cmd.argv
+        cmd.argv = sw.how.wrap + cmd.argv
+      } else if cmd.has("argvs") {
+        cmd.argvs = cmd.argvs.map(pack(a) => sw.how.wrap + a)
+      } else if cmd.has("shell") {
+        cmd = {argv: sw.how.wrap + shell_words(cmd.shell), label: cmd.label, plain: shell_words(cmd.shell)}
+      }
+    }
+    on_versions.push("${sw.var} ${sw.version} via ${sw.how.manager} (${sw.source})")
+  }
+  exhale "[${index}/${total}] ${name}: ${cmd.label}" + pick(cwd == ".", "", "   (in ${cwd})") + pick(on_versions.is_empty(), "", "   on ${on_versions.join(", ")}")
   # Up to date: its inputs are as they were after its last success, and what
   # it produces is still there.
   roll before = null
   stick salt = json.stringify({cmd: cmd.label, env: opts.env, stdin: opts.get("stdin", null)})
+  stick limit = inputs_limit_of(t, d)
   if t.has("inputs") {
-    before = fingerprint(cwd, as_list(t.inputs), salt)
+    before = fingerprint(cwd, as_list(t.inputs), salt, limit)
+    if FINGERPRINT_OVER {
+      exhale "    inputs cover more than ${limit} files, so this task always runs; narrow `inputs` (\"assets/**/*.png\") or raise `inputs_limit`"
+    }
     stick st = state_of(name)
     if not FORCE and before != null and st != null and st.get("fingerprint", "") == before and produced(cwd, t) {
       remember(name, st.get("value", null), st.get("named", {}), st.get("raw", ""))
@@ -2784,7 +2921,8 @@ pull run_task(ctx, name, index, total) {
   # `cig unburn <id>` at this task's place in the newest-first order, so the
   # inner burns are undone by the inner run and hop watching has nothing left
   # to remove for it.
-  stick nested_cig = undo == null and cmd.has("argv") and not cmd.argv.is_empty() and path.stem(cmd.argv.first()).lower() == "cig" and cmd.argv.get(1, "") == "run"
+  stick plain_argv = cmd.get("plain", cmd.get("argv", []))
+  stick nested_cig = undo == null and cmd.has("argv") and not plain_argv.is_empty() and path.stem(plain_argv.first()).lower() == "cig" and plain_argv.get(1, "") == "run"
   if undo == null and not nested_cig {
     attempts()
     if not result.ok {
@@ -2818,7 +2956,7 @@ pull run_task(ctx, name, index, total) {
         snuff null
       }
       log.warn("undoing ${s.task}: ${s.undo.label}")
-      stick how = {cwd: s.cwd, env: s.env, timeout_ms: s.timeout_ms, check: true}
+      stick how = {cwd: s.cwd, env: s.env, timeout_ms: s.timeout_ms}
       roll done = null
       if s.undo.has("shell") {
         done = proc.shell(s.undo.shell, how)
@@ -2827,6 +2965,18 @@ pull run_task(ctx, name, index, total) {
       }
       for line in (done.out + done.err).trim_end().lines() {
         exhale "    " + line
+      }
+      if done.code != 0 {
+        # Named for the task, not for a line of this file: what is still out
+        # there is the task's work, and the retry is `cig unburn <run>`. (A
+        # compensation sees its state, modules and builtins only, so no
+        # helper of this file is called here.)
+        stick tail = done.err.trim_end().lines().last() ?? ""
+        roll said = "`${s.task}` is NOT undone: its undo `${s.undo.label}` exited ${done.code}"
+        if tail != "" {
+          said = said + "; stderr: `${tail}`"
+        }
+        cough said + "; fix the undo, then `cig unburn <run>` runs it again"
       }
     }
   }
@@ -2845,7 +2995,7 @@ pull run_task(ctx, name, index, total) {
   remember(name, value, named, result.out)
   roll after = null
   if before != null and not result.simulated {
-    after = fingerprint(cwd, as_list(t.inputs), salt)
+    after = fingerprint(cwd, as_list(t.inputs), salt, limit)
   }
   if EXPOSED.has(name) or after != null {
     burn {
@@ -2860,11 +3010,11 @@ pull run_task(ctx, name, index, total) {
     said = "; output: " + tidy(to_text(EXPOSED[name])).slice(0, 60)
   }
   exhale "    ok, ${duration(result.ms)}" + pick(n > 1, " (attempt ${n})", "") + said
-  snuff {task: name, exit_code: result.code, ms: result.ms, attempts: n, skipped: false, simulated: result.simulated}
+  snuff {task: name, exit_code: result.code, ms: result.ms, attempts: n, skipped: false, simulated: result.simulated, versions: on_versions}
 }
 
 pull do_run(g, wanted) {
-  expect_flags(["--only", "--force", "--strict"])
+  expect_flags(["--only", "--force", "--strict", "--versions", "--install"])
   if wanted.is_empty() {
     fail("run what? `cigo run <task>`, or one stage everywhere: `cigo run test`; `cigo list` shows them")
   }
@@ -2891,7 +3041,19 @@ pull do_run(g, wanted) {
       fail("task `${n}` cannot run: ${tasks[n].unresolved}; `cigo check` lists every problem")
     }
   }
-  warn_versions(g, components_of(tasks, names), flags.contains("--strict"), true)
+  # Versions: where the project's pins and this machine disagree, switch
+  # through a manager when the answer is yes, and warn about the rest.
+  stick comps = components_of(tasks, names)
+  stick setting = versions_setting(g)
+  roll switched = []
+  if setting != "off" {
+    stick found = disagreements(g, comps)
+    stick answer = versions_answer(g, found, setting)
+    if answer == "switch" {
+      switched = apply_switches(found)
+    }
+    warn_versions_except(g, comps, flags.contains("--strict"), true, switched)
+  }
   stick ctx = {tasks: tasks, defaults: g.manifest.get("defaults", {}), last: last}
   burn {
     fs.mkdir(RUN_DIR)
@@ -3201,7 +3363,7 @@ pull do_help() {
   exhale "                              find every language, task runner and script folder here;"
   exhale "                              propose ${MANIFEST}"
   exhale "  cigo list [--all]           components, stage groups and tasks"
-  exhale "  cigo run <task>... [--only] [--force] [--strict] [-- <args for the last task named>]"
+  exhale "  cigo run <task>... [--only] [--force] [--strict] [--versions=ask|always|never|off] [-- <args for the last task named>]"
   exhale "                              `cigo run test` tests every language, `cigo run ci` does"
   exhale "                              format-check, lint, check, build and test everywhere"
   exhale "  cigo plan [<task>...] [--only]"
@@ -3209,6 +3371,9 @@ pull do_help() {
   exhale "  cigo show <task>            where a task comes from and everything it will do"
   exhale "  cigo check [--strict]       the manifest, checked before anything runs"
   exhale "  cigo doctor [--strict]      each toolchain: installed, which version, against the project's pins"
+  exhale "  cigo versions [switch|keep|install [--yes]]"
+  exhale "                              each language's pin against this machine, and whether tasks run on"
+  exhale "                              the pinned version through mise, asdf, rustup, uv, fnm... (never your default)"
   exhale "  cigo outputs [<task>...]    what the last run's tasks handed on"
   exhale "  cigo toolchains [<name>] [--markdown]"
   exhale "                              the toolchains this knows"
@@ -3218,11 +3383,12 @@ pull do_help() {
   exhale "  cigo crash [list|show|send|delete <id>]"
   exhale "                              crash reports, under your control; never sent unless you say so"
   exhale "  cigo config [<key> [<value>|--unset]]"
-  exhale "                              crash_reports, issues_repo, update_channel in ~/.cig-orchestrator/config"
+  exhale "                              crash_reports, issues_repo, update_channel, versions, install in ~/.cig-orchestrator/config"
   exhale ""
   exhale "Every command that opens a project says where versions disagree: the installed cig against"
   exhale "the project's pins (.cig-version, the manifest's `cig`, a script's `# cig` header) and each"
-  exhale "toolchain against its pins (.nvmrc, go.mod...). `--strict` on check and run stops on one."
+  exhale "toolchain against its pins (.nvmrc, go.mod...). `--strict` on check and run stops on one; `cigo versions`"
+  exhale "runs tasks on the pinned versions through a version manager already here, per task, never your default."
   exhale "Stages: ${STAGES.join(", ")}."
   exhale "cig's own flags go before the command: `cigo --dry-run run ci`, `cigo --no-rollback run build`."
   exhale "Afterwards: `cig runs` lists every run, `cig unburn <run>` undoes one."
@@ -3373,6 +3539,12 @@ pull do_show(g) {
       exhale "  ${key.pad_right(10)} ${to_text(t[key])}"
     }
   }
+  if t.has("inputs") {
+    stick limit = inputs_limit_of(t, g.manifest.get("defaults", {}))
+    if inputs_count(str(t.get("cwd", ".")), as_list(t.inputs), limit) > limit {
+      exhale "             over ${limit} files, so the task always runs; narrow `inputs` or raise `inputs_limit`"
+    }
+  }
   stick globs = touches_of(t)
   if not globs.is_empty() {
     exhale "  touches    ${globs.join(" ")}"
@@ -3404,7 +3576,14 @@ pull do_plan(g, wanted) {
   for pair in order.enumerate() {
     stick t = tasks[pair[1]]
     stick globs = touches_of(t)
-    exhale "  ${str(pair[0] + 1).pad_left(2)}. ${pair[1].pad_right(width)}  ${label_of(t)}" + pick(t.get("cwd", ".") == ".", "", "   (in ${t.cwd})") + pick(globs.is_empty(), "", "   touches ${globs.join(" ")}")
+    roll always = ""
+    if t.has("inputs") {
+      stick limit = inputs_limit_of(t, g.manifest.get("defaults", {}))
+      if inputs_count(str(t.get("cwd", ".")), as_list(t.inputs), limit) > limit {
+        always = "   (inputs over ${limit} files: always runs)"
+      }
+    }
+    exhale "  ${str(pair[0] + 1).pad_left(2)}. ${pair[1].pad_right(width)}  ${label_of(t)}" + pick(t.get("cwd", ".") == ".", "", "   (in ${t.cwd})") + pick(globs.is_empty(), "", "   touches ${globs.join(" ")}") + always
   }
 }
 
@@ -3443,11 +3622,18 @@ pull do_check(g) {
     }
     snuff ""
   }
-  stick CONDITIONS_ARE = "conditions are file:, dir:, glob:, grep:FILE:REGEX, json:FILE:key, tool:, os:(windows|macos|linux|bsd|unix) and not:"
+  stick CONDITIONS_ARE = "conditions are file:, dir:, glob:, grep:FILE:REGEX, json:FILE:key, tool:, os:(windows|macos|linux|freebsd|netbsd|openbsd|android|bsd|unix) and not:"
   pull check_conditions(where, key, conds) {
     stick b = bad_condition(as_list(conds))
     if b != null {
-      problem("error", where, "`${key}`: `${b}` is not a condition; ${CONDITIONS_ARE}")
+      stick bare = str(b).replace("not:", "")
+      if bare.starts_with("os:") {
+        stick word = bare.slice(3).lower()
+        stick near = pick(OS_NEAR.has(word), "; `${OS_NEAR.get(word, "")}` is the name for it", "")
+        problem("error", where, "`${key}`: `${b}` names no operating system cig reports, so it matches no machine; os: takes ${OS_NAMES.join(", ")}${near}")
+      } else {
+        problem("error", where, "`${key}`: `${b}` is not a condition; ${CONDITIONS_ARE}")
+      }
     }
   }
   pull check_toolchain(where, tc) {
@@ -3572,6 +3758,12 @@ pull do_check(g) {
         problem("warning", "defaults", "unknown key `${key}`; defaults can set ${DEFAULT_KEYS.join(", ")}")
       }
     }
+    if defaults.has("inputs_limit") and (type_of(defaults.inputs_limit) != "int" or defaults.inputs_limit < 1) {
+      problem("error", "defaults", "`inputs_limit` is a whole number of files, 1 or more")
+    }
+  }
+  if m.has("versions") and not VERSION_SETTINGS.contains(str(m.versions)) {
+    problem("error", MANIFEST, "`versions` is one of ${VERSION_SETTINGS.join(", ")}: what to do when a toolchain's installed version disagrees with the project's pin")
   }
   stick own_tc = m.get("toolchains", {})
   if type_of(own_tc) != "map" {
@@ -3666,6 +3858,17 @@ pull do_check(g) {
       stick ways = ["cmd", "shell", "cmds", "rm"].filter(pack(k) => t.has(k))
       if t.has("each") and not t.has("cmd") {
         problem("error", name, "`each` runs `cmd` once per file, so it needs `cmd`")
+      }
+      if t.has("each") {
+        stick e = t.each
+        stick list_ok = type_of(e) == "list" and not e.is_empty() and e.all(pack(x) => type_of(x) == "string")
+        stick map_ok = type_of(e) == "map" and e.has("files") and type_of(e.files) == "list" and not e.files.is_empty() and e.files.all(pack(x) => type_of(x) == "string") and (not e.has("skip") or (type_of(e.skip) == "list" and e.skip.all(pack(x) => type_of(x) == "string")))
+        if not list_ok and not map_ok {
+          problem("error", name, "`each` is a list of globs, like [\"src/**/*.py\"], or a map {\"files\": [...], \"skip\": [\"fixtures\"]}")
+        }
+      }
+      if t.has("inputs_limit") and (type_of(t.inputs_limit) != "int" or t.inputs_limit < 1) {
+        problem("error", name, "`inputs_limit` is a whole number of files, 1 or more")
       }
       if t.has("cmds") and (type_of(t.cmds) != "list" or t.cmds.is_empty() or not t.cmds.all(pack(c) => argv_of(c) != null and not argv_of(c).is_empty())) {
         problem("error", name, "`cmds` is a list of commands, each a list like [\"go\", \"vet\", \"./...\"]")
@@ -3768,6 +3971,22 @@ pull do_check(g) {
         }
         if not is_builtin_ref(base) and task_named(base, tasks) == null {
           problem("error", name, "{{${expr}}} names no task; ${known(tasks, base.split(".").first())}. A literal {{ for the program itself is written with four braces: {{{{...}}}}")
+        }
+      }
+    }
+    # A value pasted into a shell line as text is shell code: a captured
+    # title holding `; rm -rf` runs. `|sh` makes it one word; `cmd` lists
+    # never reach a shell. A warning, an error under --strict.
+    for key in ["shell", "undo_shell"] {
+      if t.has(key) and type_of(t[key]) == "string" {
+        for expr in template_exprs(t[key]) {
+          stick bar = expr.find("|")
+          stick filter = pick(bar < 0, "", expr.slice(bar + 1).trim())
+          stick base = expr_base(expr)
+          if filter != "sh" and base != "root" and base != "project" and base != "home" {
+            stick var_name = base.split(".").last().upper().replace("-", "_")
+            problem(pick(flags.contains("--strict"), "error", "warning"), name, "{{${expr}}} reaches a `${key}` line unquoted, so a value holding shell syntax runs as shell; write {{${expr_base(expr)}|sh}}, or put the value in `env` and read \"$${var_name}\" (a `cmd` list never reaches a shell)")
+          }
         }
       }
     }
@@ -3926,7 +4145,10 @@ pull cig_pins(g) {
   snuff pins
 }
 
-# One `tool --version` per tool per command, however many components share it.
+# One `tool --version` per tool per command, however many components share it,
+# and across commands while the tool's file is the same: the answer is kept in
+# .cig-orchestrator/state/versions.json with the program's path, size and
+# time, so a project whose tools have not changed opens without a hop.
 roll PROBED = {}
 pull probe_version(argv) {
   stick key = argv.join(" ")
@@ -3934,7 +4156,15 @@ pull probe_version(argv) {
     snuff PROBED[key]
   }
   roll v = null
-  if which(argv.first()) != null {
+  stick at = which(argv.first())
+  if at != null {
+    stick stamp = "${fs.size(at)}:${fs.modified_ms(at)}"
+    stick st = versions_state()
+    stick kept = st.probes.get(key, null)
+    if type_of(kept) == "map" and kept.get("path", "") == at and kept.get("stamp", "") == stamp {
+      PROBED[key] = kept.get("version", null)
+      snuff PROBED[key]
+    }
     roll said = ""
     roll simulated = false
     burn {
@@ -3948,6 +4178,10 @@ pull probe_version(argv) {
     }
     if not simulated {
       v = version_in(said)
+      if v != null {
+        st.probes[key] = {path: at, stamp: stamp, version: v}
+        save_versions_state(st)
+      }
     }
   }
   PROBED[key] = v
@@ -4015,7 +4249,7 @@ pull version_findings(g, comp_names, probe) {
       seen.push(mark)
       stick v = probe_version(fill(versions[vname], vars_for(comp.dir, tc, comp.name)))
       if pin_matches(pin.value, v, pin.minimum) == false {
-        found.push({where: cname, message: "${cname}: ${vname} is ${v}, ${pin.from} " + pick(pin.minimum, "needs at least", "pins") + " ${pin.value} (`cigo doctor`)"})
+        found.push({where: cname, mark: mark, message: "${cname}: ${vname} is ${v}, ${pin.from} " + pick(pin.minimum, "needs at least", "pins") + " ${pin.value} (`cigo doctor`, `cigo versions`)"})
       }
     }
   }
@@ -4024,10 +4258,16 @@ pull version_findings(g, comp_names, probe) {
 
 # Say where the versions disagree, on stderr; with `strict`, stop instead.
 pull warn_versions(g, comp_names, strict, probe) {
+  snuff warn_versions_except(g, comp_names, strict, probe, [])
+}
+
+# `warn_versions`, quiet about the toolchain vars in `except` (their marks):
+# the ones a switch made agree.
+pull warn_versions_except(g, comp_names, strict, probe, except) {
   if env.get("CIGO_VERSIONS", "1") == "0" {
     snuff 0
   }
-  stick found = version_findings(g, comp_names, probe)
+  stick found = version_findings(g, comp_names, probe).filter(pack(f) => not except.contains(f.get("mark", "")))
   for f in found {
     log.warn(f.message)
   }
@@ -4047,6 +4287,439 @@ pull components_of(tasks, names) {
     }
   }
   snuff out
+}
+
+# ----- toolchain versions: the switch (0.5.0) ------------------------------------------
+#
+# A project pins its languages (.nvmrc, .python-version, rust-toolchain.toml,
+# go.mod...). When the installed version disagrees, cigo can run the task on
+# the pinned one through a version manager already on the machine, per task
+# and never by changing anyone's default: mise or asdf for whatever they
+# manage; rustup, uv or pyenv, fnm or volta, rbenv, and Go's own GOTOOLCHAIN
+# for one language each. The `versions` setting (--versions=, the manifest's
+# `versions`, `cigo config versions`) says what to do on a disagreement: ask
+# (the default) prints the question and the two commands that answer it,
+# since a script cannot read a prompt, and runs on the installed versions
+# meanwhile; always switches and says so; never warns only; off does not look.
+# In CI, with nothing set, it is never. The answer is remembered per project
+# in .cig-orchestrator/state/versions.json, keyed by the pins and versions it
+# was asked about, so a changed pin asks again.
+
+pull versions_state() {
+  roll st = null
+  if fs.is_file(VERSIONS_FILE) {
+    try {
+      st = json.load(VERSIONS_FILE)
+    } ashtray e {
+      st = null
+    }
+  }
+  if type_of(st) != "map" {
+    st = {}
+  }
+  if type_of(st.get("asked", null)) != "map" {
+    st.asked = {}
+  }
+  if type_of(st.get("probes", null)) != "map" {
+    st.probes = {}
+  }
+  snuff st
+}
+
+pull save_versions_state(st) {
+  burn {
+    fs.mkdir(path.join(STATE, "state"))
+    json.save(VERSIONS_FILE, st, 2)
+  }
+}
+
+pull versions_setting(g) {
+  stick given = flag_value("--versions", null)
+  if given != null {
+    if not VERSION_SETTINGS.contains(given) {
+      fail("--versions is one of ${VERSION_SETTINGS.join(", ")}, not `${given}`")
+    }
+    snuff given
+  }
+  if env.get("CIGO_VERSIONS", "1") == "0" {
+    snuff "off"
+  }
+  stick m = g.manifest
+  if m.has("versions") and VERSION_SETTINGS.contains(str(m.versions)) {
+    snuff str(m.versions)
+  }
+  if config_sets("versions") {
+    stick c = str(config().versions)
+    if VERSION_SETTINGS.contains(c) {
+      snuff c
+    }
+  }
+  # Nobody said: a CI run cannot answer a question, so it never switches.
+  if env.get("CI", "") != "" {
+    snuff "never"
+  }
+  snuff "ask"
+}
+
+pull install_setting() {
+  stick given = flag_value("--install", null)
+  if given != null {
+    if not INSTALL_SETTINGS.contains(given) {
+      fail("--install is one of ${INSTALL_SETTINGS.join(", ")}, not `${given}`")
+    }
+    snuff given
+  }
+  stick c = str(config().get("install", "ask"))
+  snuff pick(INSTALL_SETTINGS.contains(c), c, "ask")
+}
+
+# The version managers on this machine, in the order one is chosen per tool.
+pull managers_here() {
+  snuff ["mise", "asdf", "rustup", "uv", "pyenv", "fnm", "volta", "rbenv"].filter(pack(m) => which(m) != null)
+}
+
+# The name a manager calls a tool, from the toolchain's pin sources:
+# `mise.toml:node` names it for mise, `.tool-versions:nodejs` for asdf.
+pull manager_name(tc, vname, manager) {
+  stick prefix = pick(manager == "mise", "mise.toml:", ".tool-versions:")
+  for source in as_list(tc.get("pins", {}).get(vname, [])) {
+    if str(source).starts_with(prefix) {
+      snuff str(source).slice(prefix.len())
+    }
+  }
+  snuff null
+}
+
+# How a task runs on `version` of `vname` through `manager`: the words put
+# before the command (`wrap`), the variables set (`env`), the command that
+# says whether the version is installed (`has`, exit 0), the one that installs
+# it, and whether the manager fetches a version on first use by itself. null
+# when this manager has no way for this tool.
+pull switch_via(manager, tc, vname, version) {
+  stick name = manager_name(tc, vname, manager)
+  roll e = {}
+  if manager == "mise" and name != null {
+    snuff {manager: "mise", wrap: ["mise", "exec", "${name}@${version}", "--"], env: {}, has: ["mise", "where", "${name}@${version}"], install: ["mise", "install", "${name}@${version}"], fetches: false, site: "https://mise.jdx.dev"}
+  }
+  if manager == "asdf" and name != null {
+    e["ASDF_" + name.upper().replace("-", "_") + "_VERSION"] = version
+    snuff {manager: "asdf", wrap: [], env: e, has: ["asdf", "where", name, version], install: ["asdf", "install", name, version], fetches: false, site: "https://asdf-vm.com"}
+  }
+  if manager == "rustup" and (vname == "rustc" or vname == "cargo") {
+    e.RUSTUP_TOOLCHAIN = version
+    snuff {manager: "rustup", wrap: [], env: e, has: ["rustup", "run", version, "rustc", "--version"], install: ["rustup", "toolchain", "install", version], fetches: false, site: "https://rustup.rs"}
+  }
+  if manager == "uv" and vname == "python" {
+    e.UV_PYTHON = version
+    snuff {manager: "uv", wrap: [], env: e, has: ["uv", "python", "find", version], install: ["uv", "python", "install", version], fetches: false, site: "https://docs.astral.sh/uv/"}
+  }
+  if manager == "pyenv" and vname == "python" {
+    e.PYENV_VERSION = version
+    snuff {manager: "pyenv", wrap: [], env: e, has: ["pyenv", "prefix", version], install: ["pyenv", "install", "-s", version], fetches: false, site: "https://github.com/pyenv/pyenv"}
+  }
+  if manager == "fnm" and vname == "node" {
+    snuff {manager: "fnm", wrap: ["fnm", "exec", "--using", version, "--"], env: {}, has: ["fnm", "exec", "--using", version, "node", "--version"], install: ["fnm", "install", version], fetches: false, site: "https://github.com/Schniz/fnm"}
+  }
+  if manager == "volta" and vname == "node" {
+    # volta fetches a version it lacks on first use, by its own design.
+    snuff {manager: "volta", wrap: ["volta", "run", "--node", version], env: {}, has: null, install: null, fetches: true, site: "https://volta.sh"}
+  }
+  if manager == "rbenv" and vname == "ruby" {
+    e.RBENV_VERSION = version
+    snuff {manager: "rbenv", wrap: [], env: e, has: ["rbenv", "prefix", version], install: ["rbenv", "install", "-s", version], fetches: false, site: "https://github.com/rbenv/rbenv"}
+  }
+  snuff null
+}
+
+# The first manager here with a way to run `vname` on `version`; Go runs its
+# own toolchains (GOTOOLCHAIN) and needs none.
+pull switch_for(tc, vname, version) {
+  for m in managers_here() {
+    stick how = switch_via(m, tc, vname, version)
+    if how != null {
+      snuff how
+    }
+  }
+  if vname == "go" and which("go") != null {
+    roll e = {}
+    e.GOTOOLCHAIN = "go" + version
+    snuff {manager: "go", wrap: [], env: e, has: null, install: null, fetches: true, site: "https://go.dev/doc/toolchain"}
+  }
+  snuff null
+}
+
+# The managers that would do for `vname`, for the line that says what to install.
+pull managers_for(vname) {
+  stick by_tool = {node: ["mise", "fnm"], python: ["mise", "uv"], ruby: ["mise", "rbenv"], rustc: ["rustup"], cargo: ["rustup"]}
+  snuff by_tool.get(vname, ["mise", "asdf"])
+}
+
+# Does the manager have this version? A manager that fetches on first use
+# always does; a dry run takes every answer as yes.
+pull manager_has(how) {
+  if how.has == null {
+    snuff true
+  }
+  roll ok = false
+  burn {
+    try {
+      stick r = proc.run(how.has.first(), how.has.slice(1), {timeout_ms: 30000})
+      ok = r.code == 0 or r.get("simulated", false)
+    } ashtray e {
+      ok = false
+    }
+  }
+  snuff ok
+}
+
+# Every pinned toolchain version in these components: one row per (var, pin
+# source), with the installed version, whether they agree, and the way to
+# switch when a manager here has one.
+pull pin_rows(g, comp_names) {
+  roll out = []
+  roll seen = []
+  for cname in comp_names {
+    stick comp = g.components[cname]
+    stick id = to_text(comp.toolchain)
+    if not g.kb.has(id) {
+      continue
+    }
+    stick tc = g.kb[id]
+    stick versions = tc.get("versions", {})
+    if versions.is_empty() {
+      continue
+    }
+    stick vars = vars_for(comp.dir, tc, comp.name)
+    for vname in versions {
+      stick pin = pin_of(tc, vname, comp.dir)
+      if pin == null {
+        continue
+      }
+      stick mark = "${vname} ${pin.from}"
+      if seen.contains(mark) {
+        continue
+      }
+      seen.push(mark)
+      stick installed = probe_version(fill(versions[vname], vars))
+      stick ok = pin_matches(pin.value, installed, pin.minimum)
+      out.push({component: cname, toolchain: id, var: vname, pinned: pin.value, source: pin.from, minimum: pin.minimum, installed: installed, agrees: ok != false, mark: mark, how: switch_for(tc, vname, pin.value)})
+    }
+  }
+  snuff out
+}
+
+pull disagreements(g, comp_names) {
+  snuff pin_rows(g, comp_names).filter(pack(r) => not r.agrees)
+}
+
+# The manager a row would switch through, or "none".
+pull manager_of(r) {
+  if r.how == null {
+    snuff "none"
+  }
+  snuff r.how.manager
+}
+
+# The disagreements as one key: the same pins and versions ask once.
+pull disagreement_key(found) {
+  stick lines = found.map(pack(r) => "${r.var}\t${r.pinned}\t${r.installed ?? "none"}\t${r.source}\t${manager_of(r)}").sort()
+  snuff hash.sha256(lines.join("\n")).slice(0, 16)
+}
+
+pull pinned_text(r) {
+  snuff pick(r.minimum, "at least ${r.pinned}", r.pinned)
+}
+
+# The question, printed on stderr; a script cannot wait for the answer, so
+# the two commands that give it are printed with it.
+pull ask_about(found, first_time) {
+  stick n = found.len()
+  if not first_time {
+    log.warn("${PROJECT_NAME}: ${n} language" + pick(n == 1, " disagrees", "s disagree") + " with this machine; `cigo versions` shows which, `cigo versions switch` or `cigo versions keep` answers")
+    snuff
+  }
+  stick width = found.map(pack(r) => r.var.len()).max()
+  stick swidth = found.map(pack(r) => pinned_text(r).len()).max()
+  log.warn("${PROJECT_NAME}: ${n} language" + pick(n == 1, " disagrees", "s disagree") + " with this machine")
+  for r in found {
+    log.warn("  ${r.var.pad_right(width)}  ${pinned_text(r).pad_right(swidth)} pinned by ${r.source}   installed ${r.installed ?? "none"}")
+  }
+  stick with = found.filter(pack(r) => r.how != null)
+  stick without = found.filter(pack(r) => r.how == null)
+  if not with.is_empty() {
+    stick managers = []
+    for r in with {
+      if not managers.contains(r.how.manager) {
+        managers.push(r.how.manager)
+      }
+    }
+    log.warn("Switch to the pinned versions for cigo's tasks? ${managers.join(" and ")} " + pick(with.len() == found.len(), pick(with.len() == 1, "has it", "has them all"), "has ${with.len()} of them") + ".")
+    log.warn("  cigo versions switch         yes: run them on the pinned versions, and remember it for this project")
+    log.warn("  cigo versions keep           no: run on the installed versions, and remember it")
+    log.warn("  cigo config versions always  switch without asking, in every project")
+  }
+  for r in without {
+    stick names = managers_for(r.var)
+    log.warn("${r.var} ${pinned_text(r)} is pinned by ${r.source}, ${r.installed ?? "none"} is installed, and no version manager was found. To let cigo switch for you: install ${names.join(" or ")} (mise: https://mise.jdx.dev), then run cigo again.")
+  }
+}
+
+# What to do about these disagreements: "switch", "keep" or "off".
+pull versions_answer(g, found, setting) {
+  if setting == "off" {
+    snuff "off"
+  }
+  if found.is_empty() or setting == "never" {
+    snuff "keep"
+  }
+  if setting == "always" {
+    snuff "switch"
+  }
+  stick st = versions_state()
+  stick key = disagreement_key(found)
+  stick remembered = st.asked.get(key, null)
+  if remembered == "switch" or remembered == "keep" {
+    snuff remembered
+  }
+  ask_about(found, remembered == null)
+  if remembered == null {
+    st.asked[key] = "asked"
+    save_versions_state(st)
+  }
+  snuff "keep"
+}
+
+# Set the run's switches from the disagreements a manager can act on, and say
+# so. A version the manager lacks is installed, offered or left as the
+# `install` setting says. Returns the marks of the vars that are switched.
+pull apply_switches(found) {
+  roll marks = []
+  roll said = []
+  stick install = install_setting()
+  for r in found {
+    if r.how == null {
+      log.warn("${r.var} ${pinned_text(r)} is pinned by ${r.source}, ${r.installed ?? "none"} is installed, and no version manager was found; install ${managers_for(r.var).join(" or ")} to let cigo switch")
+      continue
+    }
+    roll ready = manager_has(r.how)
+    if not ready and r.how.install != null {
+      stick cmd_text = r.how.install.map(quote).join(" ")
+      if install == "always" {
+        log.warn("installing ${r.var} ${r.pinned} through ${r.how.manager}: ${cmd_text}")
+        roll ok = false
+        burn {
+          try {
+            stick ran = proc.run(r.how.install.first(), r.how.install.slice(1), {timeout_ms: 900000})
+            ok = ran.code == 0 or ran.get("simulated", false)
+            if not ok {
+              log.warn((ran.out + ran.err).trim_end().lines().last() ?? "")
+            }
+          } ashtray e {
+            log.warn(e.message)
+          }
+        }
+        ready = ok
+      } else if install == "ask" {
+        log.warn("${r.how.manager} can install ${r.var} ${r.pinned} (${cmd_text}); it downloads, so cigo does not do it on its own: `cigo versions install --yes` runs it, or `cigo config install always`")
+      } else {
+        log.warn("${r.how.manager} does not have ${r.var} ${r.pinned} and `install` is never; ${r.var} runs on ${r.installed ?? "what is installed"}")
+      }
+    }
+    if not ready {
+      continue
+    }
+    if not SWITCHES.has(r.component) {
+      SWITCHES[r.component] = []
+    }
+    SWITCHES[r.component].push({var: r.var, version: r.pinned, source: r.source, how: r.how})
+    marks.push(r.mark)
+    said.push("${r.var} ${r.pinned} (${r.source}) via ${r.how.manager}" + pick(r.how.fetches, " (it fetches the version itself the first time)", ""))
+  }
+  if not said.is_empty() {
+    log.warn("switching: ${said.join(", ")}")
+  }
+  snuff marks
+}
+
+# The command line `sh -c <line>` as words, for a shell task a manager wraps.
+pull shell_words(line) {
+  if which("sh") != null {
+    snuff ["sh", "-c", line]
+  }
+  snuff ["cmd", "/d", "/s", "/c", line]
+}
+
+pull do_versions(g) {
+  expect_flags(["--yes", "--versions", "--install"])
+  stick sub = targets.get(0, "")
+  if not ["", "switch", "keep", "install"].contains(sub) {
+    fail("`cigo versions` takes switch, keep or install; got `${sub}`")
+  }
+  stick rows = pin_rows(g, g.components.keys())
+  stick found = rows.filter(pack(r) => not r.agrees)
+  if sub == "switch" or sub == "keep" {
+    if found.is_empty() {
+      exhale "every pinned version agrees with this machine; nothing to remember"
+      snuff
+    }
+    stick st = versions_state()
+    st.asked[disagreement_key(found)] = sub
+    save_versions_state(st)
+    exhale pick(sub == "switch", "remembered: cigo's tasks run on the pinned versions in this project (${found.map(pack(r) => r.var + " " + r.pinned).join(", ")}); a changed pin asks again", "remembered: cigo's tasks run on the installed versions in this project; a changed pin asks again")
+    snuff
+  }
+  if sub == "install" {
+    stick todo = found.filter(pack(r) => r.how != null and r.how.install != null and not manager_has(r.how))
+    if todo.is_empty() {
+      exhale "every pinned version a manager here can run is installed already"
+      snuff
+    }
+    for r in todo {
+      stick cmd_text = r.how.install.map(quote).join(" ")
+      if flags.contains("--yes") {
+        exhale "installing ${r.var} ${r.pinned}: ${cmd_text}"
+        burn {
+          stick ran = proc.run(r.how.install.first(), r.how.install.slice(1), {timeout_ms: 900000})
+          for line in (ran.out + ran.err).trim_end().lines() {
+            exhale "    " + line
+          }
+          if ran.code != 0 and not ran.get("simulated", false) {
+            fail("${cmd_text} exited ${ran.code}")
+          }
+        }
+      } else {
+        exhale "${r.var} ${r.pinned} (${r.source}): ${cmd_text}"
+      }
+    }
+    if not flags.contains("--yes") {
+      exhale "these download; `cigo versions install --yes` runs them"
+    }
+    snuff
+  }
+  if rows.is_empty() {
+    exhale "no toolchain in ${MANIFEST} keeps a version pin this knows (.nvmrc, .python-version, rust-toolchain.toml, go.mod, .tool-versions, mise.toml...)"
+    snuff
+  }
+  stick setting = versions_setting(g)
+  stick st = versions_state()
+  stick answer = pick(found.is_empty(), "", str(st.asked.get(disagreement_key(found), "not yet")))
+  exhale "${PROJECT_NAME}: versions = ${setting}" + pick(found.is_empty(), "; every pin agrees with this machine", "; ${found.len()} disagree" + pick(found.len() == 1, "s", "") + ", answer: ${answer}")
+  for r in rows {
+    roll tail = "agrees"
+    if not r.agrees {
+      if r.how == null {
+        tail = "no version manager found (${managers_for(r.var).join(" or ")} would do)"
+      } else if manager_has(r.how) {
+        tail = "switch via ${r.how.manager} (has ${r.pinned})"
+      } else {
+        tail = "switch via ${r.how.manager} (does not have ${r.pinned}; cigo versions install)"
+      }
+    }
+    exhale "  ${r.var.pad_right(10)} ${pinned_text(r).pad_right(14)} ${r.source.pad_right(28)} installed ${(r.installed ?? "none").pad_right(12)} " + tail
+  }
+  if not found.is_empty() {
+    exhale "cigo versions switch | keep remembers the answer for this project; --versions=always|never|off, the manifest's \"versions\" or `cigo config versions` sets the rule"
+  }
 }
 
 # ----- doctor: the toolchains themselves -----------------------------------------------
@@ -4135,6 +4808,62 @@ pull pin_matches(pin, actual, minimum) {
   snuff true
 }
 
+# The programs named by `tool:` conditions in `c` (a condition, or a list of
+# them, nested for "any of").
+pull tool_words(c) {
+  roll out = []
+  if type_of(c) == "list" {
+    for x in c {
+      for w in tool_words(x) {
+        out.push(w)
+      }
+    }
+    snuff out
+  }
+  stick s = str(c)
+  if s.starts_with("tool:") {
+    out.push(s.slice(5))
+  }
+  snuff out
+}
+
+# The program a var's value starts: the first word of a list, the string
+# itself, or "" when the value is neither.
+pull program_of(val) {
+  if type_of(val) == "list" {
+    snuff str(val.get(0, ""))
+  }
+  if type_of(val) == "string" {
+    snuff val
+  }
+  snuff ""
+}
+
+# The programs a var's alternatives ask for, in order, once each: those
+# behind `tool:` conditions, and the one a fallback without `when` runs.
+pull tools_named(alts) {
+  roll out = []
+  for alt in as_list(alts) {
+    if type_of(alt) != "map" {
+      continue
+    }
+    roll words = tool_words(alt.get("when", []))
+    if as_list(alt.get("when", [])).is_empty() and alt.has("value") {
+      # A fallback that is another var (`{python}`) answers for that var.
+      stick p = program_of(alt.value)
+      if not p.starts_with("{") {
+        words.push(p)
+      }
+    }
+    for w in words {
+      if w != "" and not out.contains(w) {
+        out.push(w)
+      }
+    }
+  }
+  snuff out
+}
+
 pull do_doctor(g) {
   expect_flags(["--strict"])
   expect_no_targets()
@@ -4171,6 +4900,23 @@ pull do_doctor(g) {
       }
     }
     stick vars = vars_for(first.dir, tc, first.name)
+    # A var that picks a program (python3, python or py) is a tool too:
+    # the one it settled on has to be on PATH, or nothing it runs can.
+    stick defs = tc.get("vars", {})
+    for vname in defs {
+      stick wanted = tools_named(defs[vname])
+      if wanted.is_empty() {
+        continue
+      }
+      stick program = program_of(vars.get(vname, null))
+      stick at = pick(program == "", null, which(program))
+      if at == null {
+        missing += 1
+        exhale "    missing  ${vname}: none of ${wanted.join(", ")} is on PATH" + pick(tc.has("install"), "   install: ${tc.get("install", "")}", "")
+      } else {
+        exhale "    found    ${program}  ${at}"
+      }
+    }
     stick versions = tc.get("versions", {})
     for vname in versions {
       stick v = probe_version(fill(versions[vname], vars))
@@ -4184,6 +4930,14 @@ pull do_doctor(g) {
           }
           stick what = pick(pin.minimum, "needs at least", "pinned")
           exhale "    pin      ${vname} ${what} ${pin.value} (${pin.from})" + pick(ok == null, ": not a version number, not compared", pick(ok, ": satisfied by ${v}", ": does not match ${v ?? "unknown"}"))
+          if ok == false {
+            stick how = switch_for(tc, vname, pin.value)
+            if how == null {
+              exhale "    manager  none found for ${vname}; ${managers_for(vname).join(" or ")} would let cigo run tasks on ${pin.value} (cigo versions)"
+            } else {
+              exhale "    manager  ${vname}: ${how.manager}" + pick(manager_has(how), " has ${pin.value}", " does not have ${pin.value} (cigo versions install)") + "; cigo versions switch runs tasks on it"
+            }
+          }
         }
       }
     }
@@ -4338,6 +5092,16 @@ stick CONFIG_KEYS = {
   crash_reports: ["ask", "what to do with a crash report: ask (print how to look at it and send it), always (file it without asking), never (keep it local only)"],
   issues_repo: [REPO, "GitHub repository that receives crash reports (owner/name)"],
   update_channel: ["stable", "which releases `cigo update` considers: stable, or prerelease"],
+  versions: ["ask", "when a toolchain's installed version disagrees with the project's pin: ask (print the question and the commands that answer it; never in CI), always (run tasks on the pinned version through the version manager found), never (warn only), off (do not look)"],
+  install: ["ask", "when the version manager lacks the pinned version: ask (print the install command), always (install it), never"],
+}
+
+# Is `key` set in the config file itself (not a default)?
+pull config_sets(key) {
+  if not fs.is_file(CONFIG_FILE) {
+    snuff false
+  }
+  snuff fs.read_text(CONFIG_FILE).lines().any(pack(l) => text.matches(l, '^\s*' + key + '\s*='))
 }
 
 pull config() {
@@ -4362,11 +5126,31 @@ pull config() {
 
 # Write a file outside the pack: a hop, so the journal does not see it and a
 # rollback leaves it. Private to the user (umask 077). False when it could not.
+# The PowerShell on this machine, for the few things done outside the
+# project (its own files, an update) where sh is missing: a Windows box
+# without Git.
+pull powershell() {
+  if which("pwsh") != null {
+    snuff "pwsh"
+  }
+  if which("powershell") != null {
+    snuff "powershell"
+  }
+  snuff null
+}
+
 pull write_outside(file, content) {
   roll r = null
   burn {
     try {
-      r = proc.run("sh", ["-c", 'umask 077 && mkdir -p "$(dirname "$1")" && cat > "$1"', "sh", file], {stdin: content, timeout_ms: 10000})
+      if which("sh") != null {
+        r = proc.run("sh", ["-c", 'umask 077 && mkdir -p "$(dirname "$1")" && cat > "$1"', "sh", file], {stdin: content, timeout_ms: 10000})
+      } else if powershell() != null {
+        # The path travels in the environment, so no quoting can go wrong.
+        r = proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "$f = $env:CIGO_FILE; New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f) | Out-Null; [IO.File]::WriteAllText($f, [Console]::In.ReadToEnd())"], {stdin: content, env: {CIGO_FILE: file}, timeout_ms: 20000})
+      } else {
+        r = {code: -1, err: "neither sh nor PowerShell is on PATH"}
+      }
     } ashtray e {
       r = {code: -1, err: e.message}
     }
@@ -4378,7 +5162,13 @@ pull remove_outside(file) {
   roll r = null
   burn {
     try {
-      r = proc.run("rm", ["-f", "--", file], {timeout_ms: 10000})
+      if which("rm") != null {
+        r = proc.run("rm", ["-f", "--", file], {timeout_ms: 10000})
+      } else if powershell() != null {
+        r = proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "Remove-Item -LiteralPath $env:CIGO_FILE -Force -ErrorAction SilentlyContinue; exit 0"], {env: {CIGO_FILE: file}, timeout_ms: 20000})
+      } else {
+        r = {code: -1}
+      }
     } ashtray e {
       r = {code: -1}
     }
@@ -4642,6 +5432,12 @@ pull do_config() {
   if key == "update_channel" and value != null and not ["stable", "prerelease"].contains(value) {
     fail("update_channel must be stable or prerelease, not `${value}`")
   }
+  if key == "versions" and value != null and not VERSION_SETTINGS.contains(value) {
+    fail("versions must be one of ${VERSION_SETTINGS.join(", ")}, not `${value}`")
+  }
+  if key == "install" and value != null and not INSTALL_SETTINGS.contains(value) {
+    fail("install must be one of ${INSTALL_SETTINGS.join(", ")}, not `${value}`")
+  }
   roll kept = []
   if fs.is_file(CONFIG_FILE) {
     kept = fs.read_text(CONFIG_FILE).lines().filter(pack(l) => not text.matches(l, '^\s*' + key + '\s*='))
@@ -4683,6 +5479,11 @@ pull fetch_text(url, what) {
   burn {
     if which("gh") != null and url.starts_with("https://api.github.com/") {
       r = proc.run("gh", ["api", url.slice("https://api.github.com/".len())], {timeout_ms: 60000})
+      # gh installed but not logged in (a fresh machine, a CI runner):
+      # curl reads a public repository just as well.
+      if r.code != 0 and which("curl") != null {
+        r = proc.run("curl", ["-sS", "-f", "-L", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "--retry", "3", "--max-time", "120", "-H", "Accept: application/vnd.github+json", url], {timeout_ms: 130000})
+      }
     } else if which("curl") != null {
       r = proc.run("curl", ["-sS", "-f", "-L", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "--retry", "3", "--max-time", "120", "-H", "Accept: application/vnd.github+json", url], {timeout_ms: 130000})
     } else {
@@ -4725,7 +5526,9 @@ pull yanked() {
   stick local = env.get("CIGO_YANKED_FILE", "")
   roll textv = ""
   if local != "" {
-    textv = pick(fs.is_file(local), fs.read_text(local), "")
+    if fs.is_file(local) {
+      textv = fs.read_text(local)
+    }
   } else if env.get("CIGO_UPDATE_MANIFEST", "") == "" and which("curl") != null {
     roll r = null
     burn {
@@ -4735,9 +5538,13 @@ pull yanked() {
         r = {code: -1, out: ""}
       }
     }
-    textv = pick(r.code == 0, r.out, "")
+    if r.code == 0 {
+      textv = r.out
+    } else {
+      log.warn("the list of yanked releases could not be read (${str(r.get("err", "")).trim().slice(0, 120)}); going on without it")
+    }
   }
-  snuff textv.lines().map(pack(l) => l.trim()).filter(pack(l) => l != "" and not l.starts_with("#")).map(pack(l) => l.split(" ")[0].replace("v", ""))
+  snuff textv.lines().map(pack(l) => l.trim()).filter(pack(l) => l != "" and not l.starts_with("#")).map(pack(l) => l.split(" ")[0].split("\t")[0].replace("v", ""))
 }
 
 # The newest release the channel allows, as {version, tag, url, asset, sha, published}.
@@ -4852,11 +5659,26 @@ pull do_update() {
   # ~/.local/share/cig-orchestrator/orchestrate.cig -> ~/.local
   stick prefix = path.dir(path.dir(path.dir(tool)))
   stick name = path.base(launcher)
+  # The PowerShell launcher (cigo.launch.ps1, or cigo.ps1 from 0.4.0) is
+  # put back by the release's install.ps1 under its stem; the sh launcher
+  # by install.sh under its name.
+  stick on_powershell = name.lower().ends_with(".ps1")
+  stick stem = pick(name.lower().ends_with(".launch.ps1"), name.slice(0, name.len() - 11), pick(on_powershell, name.slice(0, name.len() - 4), name))
+  if which("sh") == null and powershell() == null {
+    fail("`cigo update` needs sh, or PowerShell on Windows, to unpack and install the release")
+  }
+  if which("tar") == null {
+    fail("`cigo update` needs tar on PATH to unpack the release")
+  }
   stick work = path.join(CIGO_HOME, "update", rel.tag)
   stick tarball = path.join(work, "cig-orchestrator-${rel.tag}.tar.gz")
   stick sidecar = tarball + ".sha256"
   burn {
-    proc.run("sh", ["-c", 'rm -rf -- "$1" && mkdir -p -- "$1"', "sh", work], {timeout_ms: 10000})
+    if which("sh") != null {
+      proc.run("sh", ["-c", 'rm -rf -- "$1" && mkdir -p -- "$1"', "sh", work], {timeout_ms: 10000})
+    } else {
+      proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "if (Test-Path -LiteralPath $env:CIGO_DIR) { Remove-Item -Recurse -Force -LiteralPath $env:CIGO_DIR }; New-Item -ItemType Directory -Force -Path $env:CIGO_DIR | Out-Null"], {env: {CIGO_DIR: work}, timeout_ms: 20000})
+    }
   }
   download(rel.asset, tarball)
   download(rel.sha, sidecar)
@@ -4875,21 +5697,37 @@ pull do_update() {
     if att.code == 0 {
       trust = "attested"
     } else {
-      log.warn("the build attestation for ${rel.tag} did not verify (${att.err.trim().slice(0, 120)}); the checksum did")
+      log.warn("the build attestation for ${rel.tag} could not be verified (${att.err.trim().slice(0, 120)}); the checksum matched. `gh auth login` lets gh check it")
     }
   }
   roll r = null
   burn {
-    # By name, from inside work (GNU tar reads the D: of a Windows path as a
-    # host), then into the one directory the glob matches: with the tarball
-    # beside it, `cd cig-orchestrator-*` is two arguments, which bash 4.4
-    # refuses and older shells silently took the first of.
-    r = proc.run("sh", ["-c", 'cd "$1" && tar -xzf "$2" && p=$3 n=$4 && set -- cig-orchestrator-*/ && cd "$1" && PREFIX="$p" CIGO_NAME="$n" sh ./install.sh', "sh", work, path.base(tarball), prefix, name], {timeout_ms: 120000})
+    # By name, from inside work: GNU tar reads the D: of a Windows path as
+    # a host.
+    r = proc.run("tar", ["-xzf", path.base(tarball)], {cwd: work, timeout_ms: 120000})
   }
   if r.code != 0 {
-    fail("the release's install.sh failed: ${(r.out + r.err).trim()}")
+    fail("could not unpack ${path.base(tarball)}: ${r.err.trim()}")
   }
-  for line in r.out.trim_end().lines() {
+  stick unpacked = fs.list(work).filter(pack(p) => fs.is_dir(p) and path.base(p).starts_with("cig-orchestrator-"))
+  if unpacked.len() != 1 {
+    fail("the tarball unpacked into ${unpacked.len()} cig-orchestrator-* directories, not one")
+  }
+  stick unpacked_dir = unpacked.first()
+  roll inst = null
+  burn {
+    if on_powershell {
+      inst = proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "install.ps1", "-Prefix", prefix, "-Name", stem], {cwd: unpacked_dir, timeout_ms: 120000})
+    } else {
+      # CIGO_PREFIX as well as PREFIX: under Termux install.sh reads only
+      # the first (PREFIX is the system's own there).
+      inst = proc.run("sh", ["./install.sh"], {cwd: unpacked_dir, env: {CIGO_PREFIX: prefix, PREFIX: prefix, CIGO_NAME: stem}, timeout_ms: 120000})
+    }
+  }
+  if inst.code != 0 {
+    fail("the release's installer failed: ${(inst.out + inst.err).trim()}")
+  }
+  for line in inst.out.trim_end().lines() {
     exhale "  " + line
   }
   exhale "updated: cig-orchestrator ${VERSION} -> ${rel.version} (${trust}); the release notes are at ${rel.url}"
@@ -4923,10 +5761,12 @@ pull dispatch() {
     do_adopt()
   } else if command == "outputs" {
     do_outputs()
-  } else if ["list", "show", "plan", "check", "doctor", "run"].contains(command) {
+  } else if ["list", "show", "plan", "check", "doctor", "run", "versions"].contains(command) {
     stick g = build_graph(load())
     if command == "list" {
       do_list(g)
+    } else if command == "versions" {
+      do_versions(g)
     } else if command == "show" {
       do_show(g)
     } else if command == "plan" {

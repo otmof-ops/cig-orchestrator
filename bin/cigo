@@ -5,13 +5,24 @@
 # this finds it, finds the project (the nearest directory up that has a
 # cig-tasks.json), checks the cig it is about to hand the tool to, and passes
 # cig the flags that are cig's own.
+# A symlink to this file (ln -s <checkout>/bin/cigo ~/.local/bin/cigo) is
+# followed to the checkout, hop by hop, with no readlink -f (macOS and the
+# BSDs lack it). The installed copy has its tool= line rewritten below.
+self=$0
+while [ -h "$self" ]; do
+  link=$(readlink -- "$self")
+  case "$link" in
+    /*) self=$link ;;
+    *) self=$(dirname -- "$self")/$link ;;
+  esac
+done
 # CDPATH= : with CDPATH exported, cd prints the directory and would land in tool=.
-tool="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)/orchestrate.cig"
+tool="$(CDPATH='' cd -- "$(dirname -- "$self")/.." && pwd)/orchestrate.cig"
 # The cig this cigo is written for: the same floor as the `# cig` pin in the
 # tool, checked here for cigs too old to read the pin themselves.
 needs_major=1
-needs_minor=3
-needs_patch=1
+needs_minor=4
+needs_patch=0
 
 if ! command -v cig >/dev/null 2>&1; then
   echo "cigo: cig is not on PATH; install CigScript first: https://github.com/otmof-ops/CigScript" >&2
@@ -51,12 +62,16 @@ run=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run|--no-check|--no-rollback) run="$run $1"; shift ;;
-    --max-steps=*) run="$run $1"; shift ;;
+    --max-steps=*)
+      case "${1#--max-steps=}" in
+        ''|*[!0-9]*) echo "cigo: --max-steps needs a number (--max-steps N or --max-steps=N)" >&2; exit 2 ;;
+      esac
+      run="$run $1"; shift ;;
     --max-steps)
-      if [ $# -lt 2 ]; then
-        echo "cigo: --max-steps needs a number (--max-steps N or --max-steps=N)" >&2
-        exit 2
-      fi
+      # A number and nothing else: the flag list is split into words below.
+      case "${2:-}" in
+        ''|*[!0-9]*) echo "cigo: --max-steps needs a number (--max-steps N or --max-steps=N)" >&2; exit 2 ;;
+      esac
       run="$run $1 $2"; shift 2 ;;
     --json|--no-color|--no-doctor|--plain) global="$global $1"; shift ;;
     *) break ;;
