@@ -6,11 +6,11 @@ every language with one command.
 ## 1. Install cig and cigo
 
 cigo is written in [CigScript](https://github.com/otmof-ops/CigScript), so it
-needs the `cig` runtime, 1.3.1 or newer:
+needs the `cig` runtime, 1.4.0 or newer:
 
 ```sh
 # Review, then run (pinned to a release; never asks for sudo)
-curl -fsSL https://raw.githubusercontent.com/otmof-ops/CigScript/v1.3.1/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/otmof-ops/CigScript/v1.4.0/install.sh -o install.sh
 less install.sh && sh install.sh
 cig --version
 ```
@@ -24,9 +24,10 @@ cigo version
 ```
 
 On Windows, PowerShell: install cig with CigScript's `install.ps1`, then run
-`.\install.ps1` from the extracted cig-orchestrator release (or the checkout);
-`cigo` then works from PowerShell and cmd, and the `sh` launcher from Git
-Bash and WSL.
+`powershell -ExecutionPolicy Bypass -File .\install.ps1` from the extracted
+cig-orchestrator release (or the checkout); `cigo` then works from PowerShell
+and cmd through the `cigo.cmd` shim, whatever the execution policy. Git Bash
+and WSL get the `sh` launcher from `install.sh`.
 
 cigo runs the tools your project already uses (`npm`, `cargo`, `uv`,
 `go`...), so those need to be installed as they are today. `cigo doctor`

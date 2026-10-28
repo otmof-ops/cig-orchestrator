@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
 # Install cig-orchestrator on Windows: orchestrate.cig into
-# <prefix>\share\cig-orchestrator and the cigo launcher (.ps1 plus a .cmd shim)
-# into <prefix>\bin. Run again to update a checkout; an installed cigo updates
-# itself with `cigo update`.
+# <prefix>\share\cig-orchestrator, and into <prefix>\bin the cigo.cmd shim
+# that `cigo` resolves to, beside the cigo.launch.ps1 it runs. Run again to
+# update a checkout; an installed cigo updates itself with `cigo update`.
 #
-#   .\install.ps1
-#   .\install.ps1 -Prefix C:\opt\cig
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1
+#   .\install.ps1 -Prefix C:\opt\cig       (where scripts may run)
 #   .\install.ps1 -Name orch
 
 param(
@@ -17,6 +17,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (-not $Prefix) { $Prefix = Join-Path $env:LOCALAPPDATA 'cig-orchestrator' }
+# A relative prefix is read from here and written into the launcher as it
+# is, which only works from this directory: make it absolute first.
+$Prefix = [IO.Path]::GetFullPath($Prefix)
 
 $here = Split-Path -Parent $PSCommandPath
 $share = Join-Path $Prefix 'share\cig-orchestrator'
@@ -24,7 +27,7 @@ $bin = Join-Path $Prefix 'bin'
 
 if (-not (Get-Command cig -ErrorAction SilentlyContinue)) {
     [Console]::Error.WriteLine('install: cig is not on PATH. Install CigScript first:')
-    [Console]::Error.WriteLine('  irm https://raw.githubusercontent.com/otmof-ops/CigScript/v1.3.1/install.ps1 | iex')
+    [Console]::Error.WriteLine('  irm https://raw.githubusercontent.com/otmof-ops/CigScript/v1.4.0/install.ps1 | iex')
     exit 1
 }
 
@@ -43,7 +46,7 @@ if ($version -match '^(\d+)\.(\d+)\.(\d+)') {
     elseif ($major -eq 1 -and $minor -lt 3) { $tooOld = $true }
     elseif ($major -eq 1 -and $minor -eq 3 -and $patch -lt 1) { $tooOld = $true }
     if ($tooOld) {
-        [Console]::Error.WriteLine("install: cig $version is too old; cig-orchestrator needs 1.3.1 or newer (cig update)")
+        [Console]::Error.WriteLine("install: cig $version is too old; cig-orchestrator needs 1.4.0 or newer (cig update)")
         exit 1
     }
 } else {
@@ -56,55 +59,79 @@ New-Item -ItemType Directory -Force -Path $bin | Out-Null
 
 $toolSrc = Join-Path $here 'orchestrate.cig'
 $toolDst = Join-Path $share 'orchestrate.cig'
-if (-not (Test-Path $toolSrc)) {
+if (-not (Test-Path -LiteralPath $toolSrc)) {
     [Console]::Error.WriteLine("install: orchestrate.cig not found beside the installer at $toolSrc")
     exit 1
 }
-Copy-Item -Force $toolSrc $toolDst
+Copy-Item -LiteralPath $toolSrc -Destination $toolDst -Force
 
-$launcherSrc = Join-Path $here 'bin\cigo.ps1'
+$launcherSrc = Join-Path $here 'bin\cigo.launch.ps1'
 $cmdSrc = Join-Path $here 'bin\cigo.cmd'
-if (-not (Test-Path $launcherSrc)) {
-    [Console]::Error.WriteLine("install: cigo.ps1 not found at $launcherSrc")
+if (-not (Test-Path -LiteralPath $launcherSrc)) {
+    [Console]::Error.WriteLine("install: cigo.launch.ps1 not found at $launcherSrc")
     exit 1
 }
-if (-not (Test-Path $cmdSrc)) {
+if (-not (Test-Path -LiteralPath $cmdSrc)) {
     [Console]::Error.WriteLine("install: cigo.cmd not found at $cmdSrc")
     exit 1
 }
-$launcherDst = Join-Path $bin ("$Name.ps1")
+$launcherDst = Join-Path $bin ("$Name.launch.ps1")
 $cmdDst = Join-Path $bin ("$Name.cmd")
 
-# Rewrite the one $tool line at the top of cigo.ps1 to the installed path.
-# A MatchEvaluator delegate stops the regex engine from re-expanding `$` in the
-# replacement string, so paths with a literal `$` survive intact.
-$content = Get-Content -Raw $launcherSrc
-$targetLine = "`$tool = '" + ($toolDst -replace "'", "''") + "'"
-$content = [regex]::Replace($content, '(?m)^\$tool = .*$', { param($m) $targetLine })
-Set-Content -Path $launcherDst -Value $content -NoNewline
+# Rewrite the one $tool line at the top of the launcher to the installed path.
+# The path travels as base64 of its UTF-8 bytes: no apostrophe (the curly
+# ones included), `$`, backtick or non-ASCII letter can break the line,
+# whichever PowerShell edition wrote it or reads it. A MatchEvaluator
+# delegate keeps the regex engine from expanding `$` in the replacement.
+$content = Get-Content -Raw -LiteralPath $launcherSrc
+$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($toolDst))
+$targetLine = "`$tool = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))"
+$content = [regex]::Replace($content, '(?m)^\$tool = [^\r\n]*', { param($m) $targetLine })
+[IO.File]::WriteAllText($launcherDst, $content, (New-Object Text.UTF8Encoding $false))
 
-# The .cmd shim uses %~dpn0.ps1 (its own name), so no rewriting; a plain copy.
-Copy-Item -Force $cmdSrc $cmdDst
+# The .cmd shim uses %~dpn0.launch.ps1 (its own name), so no rewriting; a
+# plain copy.
+Copy-Item -LiteralPath $cmdSrc -Destination $cmdDst -Force
 
-Write-Host "installed $launcherDst (the tool itself: $toolDst)"
+# 0.4.0 installed the launcher as <name>.ps1, which PowerShell ran before
+# the shim; one left beside the shim would still win.
+$stale = Join-Path $bin ("$Name.ps1")
+if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Force }
 
-# PATH check. Add <prefix>\bin to the USER PATH if it is not already there.
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-$parts = @()
-if ($userPath) { $parts = $userPath -split ';' | Where-Object { $_ } }
-$already = $false
-$binFull = $null
-try { $binFull = [IO.Path]::GetFullPath($bin) } catch { $binFull = $bin }
-foreach ($p in $parts) {
+Write-Host "installed $cmdDst and $launcherDst (the tool itself: $toolDst)"
+
+# PATH: <prefix>\bin goes on the user PATH as the registry holds it, so
+# entries written as %VAR% stay unexpanded (reading them through .NET
+# expands them, and writing them back would freeze them), and the change
+# is announced to the desktop so a new terminal sees it.
+function Add-UserPath([string]$dir) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if (-not $key) { $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment') }
     try {
-        if ([IO.Path]::GetFullPath($p) -ieq $binFull) {
-            $already = $true
-            break
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $full = [IO.Path]::GetFullPath($dir).TrimEnd('\')
+        foreach ($p in ($raw -split ';' | Where-Object { $_ })) {
+            $q = [Environment]::ExpandEnvironmentVariables($p)
+            try { $q = [IO.Path]::GetFullPath($q).TrimEnd('\') } catch { }
+            if ($q -ieq $full) { return $false }
         }
+        $new = if ($raw) { "$raw;$dir" } else { $dir }
+        $key.SetValue('Path', $new, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    } finally {
+        $key.Close()
+    }
+    try {
+        $sig = '[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
+        $u = Add-Type -MemberDefinition $sig -Name 'Broadcast' -Namespace 'CigoInstall' -PassThru
+        $out = [UIntPtr]::Zero
+        $u::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$out) | Out-Null
     } catch { }
+    return $true
 }
-if (-not $already) {
-    if ($userPath) { $new = "$userPath;$bin" } else { $new = $bin }
-    [Environment]::SetEnvironmentVariable('Path', $new, 'User')
-    Write-Host "added $bin to the user PATH; open a new terminal for the change to take effect"
+try {
+    if (Add-UserPath $bin) {
+        Write-Host "added $bin to the user PATH; open a new terminal for the change to take effect"
+    }
+} catch {
+    Write-Host "note: $bin is not on your PATH and could not be added ($($_.Exception.Message)); add it yourself"
 }

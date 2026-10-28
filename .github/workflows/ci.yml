@@ -22,7 +22,7 @@ jobs:
           - { os: macos-15-intel,   asset: macos-x86_64,   ext: "" }
           - { os: windows-latest,   asset: windows-x86_64, ext: ".exe" }
     env:
-      CIG_VERSION: v1.3.1
+      CIG_VERSION: v1.4.0
     defaults:
       run:
         shell: bash
@@ -82,7 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     container: alpine:latest
     env:
-      CIG_VERSION: v1.3.1
+      CIG_VERSION: v1.4.0
     steps:
       # git first: without it, checkout downloads a tarball and leaves no .git,
       # and the shell component's `git ls-files` has nothing to list.
@@ -127,12 +127,64 @@ jobs:
       - run: cigo doctor
       - run: cigo check
       - run: cigo --no-rollback run ci
+      # `cigo` at a PowerShell prompt is the cmd shim (the launcher is
+      # cigo.launch.ps1, a name PowerShell does not pick), so the task's
+      # own `--` arrives whole. The same from cmd.exe and from Windows
+      # PowerShell 5.1, which a hosted runner never reaches on its own.
+      - name: the task keeps its `--` arguments through the shim
+        run: |
+          $p = Join-Path $env:RUNNER_TEMP 'dashdash'
+          New-Item -ItemType Directory -Force -Path $p | Out-Null
+          Set-Content -LiteralPath (Join-Path $p 'cig-tasks.json') -Value '{"tasks": {"say": {"cmd": ["cmd", "/c", "echo", "got"]}}}'
+          Set-Location -LiteralPath $p
+          $out = cigo run say -- --tag v2 2>&1 | Out-String
+          Write-Host $out
+          if ($out -notmatch 'got --tag v2') { throw 'the task did not get -- --tag v2' }
+      - name: the shim from cmd.exe
+        shell: cmd
+        run: |
+          cigo version --json
+          cigo --dry-run run ci
+          cd /d "%RUNNER_TEMP%\dashdash"
+          cigo run say -- --tag v2 | findstr /C:"got --tag v2"
+      - name: Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          cigo version
+          Set-Location -LiteralPath (Join-Path $env:RUNNER_TEMP 'dashdash')
+          # stdout alone: under 5.1 a redirected stderr line ("burned 4 ops")
+          # becomes an error record, and the step's Stop preference throws it.
+          $out = cigo run say -- --tag v2 | Out-String
+          if ($out -notmatch 'got --tag v2') { throw "5.1: the task did not get -- --tag v2: $out" }
+      # `cigo update` from a PowerShell install puts back a PowerShell
+      # install: a fake 9.0.0 release, as the release job builds one.
+      - name: cigo update through the PowerShell launcher
+        run: |
+          $rel = Join-Path $env:RUNNER_TEMP 'rel'
+          $n = 'cig-orchestrator-v9.0.0'
+          New-Item -ItemType Directory -Force -Path "$rel\$n\bin" | Out-Null
+          Copy-Item orchestrate.cig,install.sh,install.ps1,LICENSE,NOTICE,README.md,CHANGELOG.md,TOOLCHAINS.md,YANKED "$rel\$n\"
+          Copy-Item bin\cigo,bin\cigo.launch.ps1,bin\cigo.cmd "$rel\$n\bin\"
+          Copy-Item -Recurse LICENSES,docs "$rel\$n\"
+          $src = Get-Content -Raw "$rel\$n\orchestrate.cig"
+          if ($src -notmatch 'stick VERSION = "') { throw 'no VERSION line' }
+          [IO.File]::WriteAllText("$rel\$n\orchestrate.cig", ($src -replace 'stick VERSION = "[0-9.]+"', 'stick VERSION = "9.0.0"'))
+          & "$env:SystemRoot\System32\tar.exe" -C $rel -czf "$rel\$n.tar.gz" $n
+          "$((Get-FileHash -Algorithm SHA256 "$rel\$n.tar.gz").Hash.ToLower())  $n.tar.gz" | Set-Content "$rel\$n.tar.gz.sha256"
+          $r = @(@{tag_name = 'v9.0.0'; draft = $false; prerelease = $false; html_url = 'https://example.invalid'; published_at = '2026-10-28T00:00:00Z'; assets = @(@{name = "$n.tar.gz"; browser_download_url = "file://$rel\$n.tar.gz"}, @{name = "$n.tar.gz.sha256"; browser_download_url = "file://$rel\$n.tar.gz.sha256"})})
+          ConvertTo-Json -InputObject $r -Depth 5 | Set-Content "$rel\releases.json"
+          $env:CIGO_UPDATE_MANIFEST = "$rel\releases.json"
+          cigo update
+          $v = cigo version --json | ConvertFrom-Json
+          if ($v.version -ne '9.0.0') { throw "cigo version says $($v.version) after the update" }
+          if (-not (Test-Path -LiteralPath "$env:LOCALAPPDATA\cig-orchestrator\bin\cigo.launch.ps1")) { throw 'the PowerShell launcher is gone' }
+          if (Test-Path -LiteralPath "$env:LOCALAPPDATA\cig-orchestrator\bin\cigo.ps1") { throw 'a cigo.ps1 was written' }
 
   # A tag vX.Y.Z is a release: one tarball, its checksum, a build attestation,
   # and the licence beside them. `cigo update` reads these.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [ci]
+    needs: [ci, ci-alpine, ci-windows-installers]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -147,7 +199,7 @@ jobs:
           dir="cig-orchestrator-$tag"
           mkdir -p "$dir/bin"
           cp orchestrate.cig install.sh install.ps1 LICENSE NOTICE README.md CHANGELOG.md TOOLCHAINS.md YANKED "$dir/"
-          cp bin/cigo bin/cigo.ps1 bin/cigo.cmd "$dir/bin/"
+          cp bin/cigo bin/cigo.launch.ps1 bin/cigo.cmd "$dir/bin/"
           cp -r LICENSES docs "$dir/"
           tar -czf "$dir.tar.gz" "$dir"
           sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"

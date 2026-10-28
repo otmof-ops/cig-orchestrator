@@ -5,6 +5,91 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 0.5.0 — 2026-10-28
+
+Found by a debugging pass over 0.4.0 and an outside pass over 0.4.0 with cig
+1.3.1; every fix has a test. Needs cig 1.4.0 (its rollback reports an op whose
+compensation failed as not undone, and lets a cig a task starts share the
+project's pack).
+
+- **Tasks run on the pinned versions** (#31). When a language's installed
+  version disagrees with the project's pin (.nvmrc, .python-version,
+  rust-toolchain.toml, go.mod, .tool-versions, mise.toml...), cigo can run
+  the task on the pinned one through a version manager already on the
+  machine, per task, never by changing anyone's default: mise or asdf for
+  whatever they manage; rustup, uv or pyenv, fnm or volta, rbenv, and Go's
+  own GOTOOLCHAIN for one language each. The `versions` setting says what
+  happens on a disagreement: `ask` (the default) prints the question and the
+  two commands that answer it (`cigo versions switch`, `cigo versions keep`),
+  since a script cannot wait at a prompt, and runs on the installed versions
+  meanwhile; `always` switches and says so; `never` warns, as 0.4.0 did;
+  `off` does not look. In CI, with nothing set, it is `never`. It is set by
+  `--versions=`, the manifest's `versions`, or `cigo config versions`; the
+  answer is remembered per project in `.cig-orchestrator/state/versions.json`
+  and asked again when a pin changes. A version the manager lacks is
+  installed, offered or left alone as `install` says (`ask` by default,
+  since it downloads); `cigo versions install --yes` installs them all.
+  `cigo versions` lists every pin against this machine, each run line and
+  the run's record say which version a task ran on, `cigo doctor` names the
+  manager, and `--strict` passes when the switch made the versions agree.
+- **An unchanged project opens without a hop.** A tool's version is kept
+  with its program's path, size and time, so `check`, `run` and `doctor` ask
+  a tool only when it changed.
+- **A captured value in a `shell` line is a check warning unless it is
+  quoted with `|sh`** (#43), an error under `--strict`: pasted in as text, a
+  value holding `;` runs as shell. `cmd` lists never reach a shell.
+- **A task whose inputs cover more than 20,000 files says so** (#44): it
+  always runs, and the run line, `cigo plan` and `cigo show` say why;
+  `inputs_limit` on the task or in `defaults` raises the limit.
+- **A failed undo is reported as not undone, by task name** (#45). The undo
+  that failed names its task and quotes its stderr; the op it covered is
+  listed as `not undone`, never `compensated`; the deploy is still out there
+  and the line says so.
+- **`each` as a plain list of globs works** (both arms of a `pick` ran, and a
+  list has no `get("files")`); `cigo check` refuses a malformed `each`.
+- **A value read in `cmds` or `rm` is a need**, and an unknown one is a
+  check error, as it is in `cmd`.
+- **A task whose exit code is outside `ok`** says `exited 0 (not in ok: 1)`,
+  not that it printed output it must not.
+- The `sh` launcher refuses a `--max-steps` that is not a number, instead of
+  splitting its value into flags.
+
+- **`cigo` at a PowerShell prompt is the cmd shim now** (#40, #42). The PowerShell
+  launcher is installed as `cigo.launch.ps1`, a name PowerShell does not pick
+  for `cigo`, so the shim runs first: the task's own `--` arrives whole
+  (`cigo run deploy -- --tag v2` lost it before), stdin reaches the task, the
+  session is not left in the project directory, and no execution policy
+  stands in the way. `install.ps1` removes the `cigo.ps1` 0.4.0 installed.
+- **`cigo update` from a PowerShell install puts back a PowerShell install** (#40, #41).
+  It ran the release's `install.sh`, which wrote the `sh` launcher into
+  `cigo.ps1`. It now runs `install.ps1` for a `.ps1` launcher and
+  `install.sh` for the `sh` one, unpacks with `tar` itself (no shell between
+  the steps), passes `CIGO_PREFIX` as well as `PREFIX` so a Termux prefix
+  holds, and falls back to `curl` when `gh` is installed but not logged in.
+  Without `sh` on PATH, the config file, crash reports and the update use
+  PowerShell. A yanked list that cannot be read is said, not taken as empty.
+- **`{py}` resolves when a Python project has neither `requirements.txt` nor
+  a build system** (#37). Its fallback `{python}` was never filled, so the tasks
+  ran the literal text. A var's value may name another var now.
+- **`os:` takes a name cig reports, in any case** (#38). `os:darwin` or `os:macOS`
+  matched no machine and silently dropped the stage; `cigo check` says so
+  and names `macos`, and `os:LINUX` is `os:linux`.
+- **`cigo doctor` counts a Python it cannot find** as a missing tool (exit
+  1, with the install link), where it said `python unknown` and passed (#39).
+- **Installers and launchers** (#40). A path with `[` or `]` is taken literally by
+  `cigo.launch.ps1` and `install.ps1`; a relative prefix is made absolute
+  before it is written into a launcher; the installed path travels as base64,
+  so an apostrophe (the curly ones too) or a non-ASCII letter in it cannot
+  break the launcher; the user `PATH` is written through the registry so
+  `%VAR%` entries stay unexpanded, and the change is announced to the
+  desktop; the checkout's `bin/cigo` follows a symlink to itself;
+  `install.sh` refuses an empty cig version and a Windows launcher name;
+  `--max-steps` without a number stops the PowerShell launcher as it does the
+  `sh` one.
+- **CI** (#42). The cmd shim and Windows PowerShell 5.1 run in the installers job,
+  with a task that must keep its `--` arguments, and `cigo update` from a
+  PowerShell install is proven there; a release waits for every job.
+
 ## 0.4.0 — 2026-10-27
 
 - **A Windows launcher and installer.** `bin/cigo.ps1` for PowerShell and
