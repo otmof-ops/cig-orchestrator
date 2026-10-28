@@ -5,6 +5,13 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## Unreleased
+
+- cigo's own `test` task runs on the tin (`box: false`): the suite starts
+  cigs of its own whose boxed hops could not be made inside a box, since
+  overlayfs does not layer over an overlay. The manifest doc says so for
+  any task of that shape.
+
 ## 1.0.0 — 2026-10-29
 
 Needs cig 1.6.2 (the box, `touches_sealed`, the hash chain, the parcel; and
