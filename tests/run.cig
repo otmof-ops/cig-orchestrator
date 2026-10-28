@@ -66,7 +66,7 @@ pull hop_env(dir, program, words, more) {
       cwd: dir,
       # CI is unset for the tool: a runner sets it, and the versions question
       # is never asked under CI; the one test that wants that sets it back.
-      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CI: "", DEMO_REMOTE: dir + "-remote"}.merge(more),
+      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CIG_SEAL_KEY: "file", CI: "", DEMO_REMOTE: dir + "-remote"}.merge(more),
       timeout_ms: 120000,
     })
   }
@@ -463,7 +463,8 @@ test("--only skips the dependencies", pack() {
 
 test("files a script creates are rolled back when a later task fails", pack() {
   stick dir = fresh("tests/fixtures/edge")
-  stick r = tool_in(dir, ["run", "after-files"])
+  # On the tin (--no-box): this is the watch's path under test.
+  stick r = tool_in(dir, ["run", "after-files", "--no-box"])
   exits(r, 1)
   says(r.err, "hop created")
   assert(not there(dir, "out/file.txt"), "out/file.txt survived")
@@ -1191,7 +1192,8 @@ test("toolchain pins are flagged before a run and in check, not only by doctor",
 test("a task's touches are kept in the tin, so a file it rewrote comes back after a later failure", pack() {
   stick dir = fresh("tests/fixtures/chain")
   edit_manifest(dir, pack(m) {
-    m.tasks["rewrite"] = {cmd: ["bash", "-c", "echo changed > in.txt"], touches: ["in.txt"]}
+    # On the tin, not in the box: this is the tin's path under test.
+    m.tasks["rewrite"] = {cmd: ["bash", "-c", "echo changed > in.txt"], touches: ["in.txt"], box: false}
     m.tasks["then-fail"] = {cmd: ["bash", "-c", "exit 7"], needs: ["rewrite"]}
   })
   stick before = read(dir, "in.txt")
@@ -1391,7 +1393,7 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
   }
   stick old = launch_env(dir, launcher, ["version"], {PATH: fake + path_sep + env.get("PATH", "")})
   exits(old, 2)
-  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.4.2 or newer")
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.6.2 or newer")
   stick j = json.parse(launch(dir, launcher, ["version", "--json"]).out)
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
 })
@@ -2138,6 +2140,105 @@ test("a new npm project sets up without a touches warning", pack() {
   stick s = tool_in(dir, ["show", "web:setup"])
   exits(s, 0)
   says(s.out, "?package-lock.json")
+})
+
+# ----- 1.0.0: the box, touches_sealed, cig 1.6.2 ------------------------------------
+
+# `cig` is this suite's helper, not the module: Linux is told by its kernel.
+stick on_linux = fs.is_file("/proc/sys/kernel/osrelease")
+
+pull box_fell_back(err) {
+  snuff err.contains("the box cannot be made here") or err.contains("the box could not be made here")
+}
+
+test("on Linux a task runs in cig's box: a file it rewrote without touches comes back after a later failure", pack() {
+  if not on_linux {
+    exhale "      (skipped: the box is Linux only; elsewhere the default is off)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  edit_manifest(dir, pack(m) {
+    m.tasks["rewrite"] = {cmd: ["bash", "-c", "echo changed > in.txt; echo made > made.txt"]}
+    m.tasks["then-fail"] = {cmd: ["bash", "-c", "exit 7"], needs: ["rewrite"]}
+  })
+  stick before = read(dir, "in.txt")
+  stick r = tool_in(dir, ["run", "then-fail"])
+  exits(r, 1)
+  if box_fell_back(r.err) {
+    exhale "      (the box could not be made on this machine; cig fell back and said so)"
+    says(r.err, "E763")
+    snuff
+  }
+  says(r.err, "box: `bash -c")
+  says(r.err, "applied: 2 paths written, 0 removed")
+  assert(read(dir, "in.txt") == before, "in.txt was not put back: ${read(dir, "in.txt")}")
+  assert(not there(dir, "made.txt"), "made.txt survived the rollback")
+  stick s = tool_in(dir, ["show", "rewrite"])
+  exits(s, 0)
+  says(s.out, "box        on")
+})
+
+test("box: false in defaults, --no-box and CIGO_BOX=0 keep a task on the tin; box: true on the task turns it back on", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  edit_manifest(dir, pack(m) {
+    m.defaults = {box: false}
+    m.tasks["plain"] = {cmd: ["bash", "-c", "echo changed > in.txt"]}
+    m.tasks["boxed"] = {cmd: ["bash", "-c", "echo changed > in.txt"], box: true}
+  })
+  stick s = tool_in(dir, ["show", "plain"])
+  exits(s, 0)
+  never_says(s.out, "box        on")
+  stick b = tool_in(dir, ["show", "boxed"])
+  exits(b, 0)
+  says(b.out, "box        on")
+  # The flag and the variable, on a manifest that says nothing.
+  edit_manifest(dir, pack(m) {
+    m.defaults = {}
+  })
+  stick r = tool_in(dir, ["run", "plain", "--no-box"])
+  exits(r, 0)
+  never_says(r.err, "box: `")
+  stick e = hop_env(dir, "cig", ["run", tool, "--", "run", "plain"], {CIGO_BOX: "0"})
+  exits(e, 0)
+  never_says(e.err, "box: `")
+  if on_linux {
+    stick y = tool_in(dir, ["run", "plain", "--box"])
+    exits(y, 0)
+    if not box_fell_back(y.err) {
+      says(y.err, "box: `bash -c echo changed > in.txt` applied")
+    }
+  }
+})
+
+test("touches_sealed reaches cig: the before-bytes of a file under it are kept sealed", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.write_text(path.join(dir, "customers.db"), "rows-before-the-task\n")
+  }
+  edit_manifest(dir, pack(m) {
+    m.tasks["rewrite"] = {cmd: ["bash", "-c", "echo rows-after > customers.db"], touches_sealed: ["customers.db"], box: false}
+    m.tasks["then-fail"] = {cmd: ["bash", "-c", "exit 7"], needs: ["rewrite"]}
+  })
+  stick r = tool_in(dir, ["run", "then-fail"])
+  exits(r, 1)
+  says(r.err, "(sealed)")
+  assert(read(dir, "customers.db") == "rows-before-the-task\n", "customers.db was not put back: ${read(dir, "customers.db")}")
+  stick s = tool_in(dir, ["show", "rewrite"])
+  exits(s, 0)
+  says(s.out, "sealed     customers.db")
+})
+
+test("check refuses a box that is not true or false, and touches_sealed that are not globs", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  edit_manifest(dir, pack(m) {
+    m.defaults = {box: "yes"}
+    m.tasks["bad"] = {cmd: ["true"], box: "yes", touches_sealed: 7}
+  })
+  stick c = tool_in(dir, ["check"])
+  assert(c.code != 0, "check passed a bad box: ${c.out}")
+  says(c.out, "error: bad: `box` is true or false")
+  says(c.out, "error: bad: `touches_sealed` is a glob or a list of globs")
+  says(c.out, "error: defaults: `box` is true or false")
 })
 
 # ----- the end --------------------------------------------------------------

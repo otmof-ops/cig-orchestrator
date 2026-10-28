@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/otmof-ops/CigScript"><img alt="a CigScript tool" src="https://img.shields.io/badge/a-CigScript%20tool-f97316"></a>
-  <img alt="needs cig 1.4.2 or newer" src="https://img.shields.io/badge/needs-cig%201.4.2%2B-6b7280">
+  <img alt="needs cig 1.6.2 or newer" src="https://img.shields.io/badge/needs-cig%201.6.2%2B-6b7280">
   <a href="TOOLCHAINS.md"><img alt="60 toolchains" src="https://img.shields.io/badge/toolchains-60-6b7280"></a>
   <a href="docs/roadmap.md"><img alt="actively maintained" src="https://img.shields.io/badge/status-actively%20maintained-f97316"></a>
   <a href="LICENSE"><img alt="license Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6b7280"></a>
@@ -79,7 +79,7 @@ would have run and the chain would have put back what it created.
 | nothing done twice | a task with `inputs` is skipped while its files, and the values it was handed, are unchanged |
 | checked first | `cigo check` finds loops, typos, unknown toolchains, missing programs and broken templates before anything runs |
 | the tools themselves | `cigo doctor` finds each toolchain's tools and versions and compares them with the pins you already keep; every command warns where a version disagrees, the installed cig against the project's pins included, and `--strict` stops on one. `cigo versions switch` runs tasks on the pinned versions through the version manager already on the machine (mise, asdf, rustup, uv, fnm...), per task, never your default |
-| what a task rewrites | a format stage's sources and a setup stage's lockfiles are kept in the tin before the task runs, so they come back on rollback; `touches` names a task's own |
+| what a task rewrites | on Linux every task runs in cig's box, over a copy-on-write layer on the project: a task that cannot start leaves nothing, and every change one that ran made comes back on rollback, named or not. Elsewhere a format stage's sources and a setup stage's lockfiles are kept in the tin before the task runs; `touches` names a task's own, `touches_sealed` what to keep encrypted |
 | cigo itself | crash reports under your control, `cigo update` to a checksum- and attestation-verified release, `cigo version --json` |
 
 ## One stage, every language
@@ -162,7 +162,7 @@ your sanity.
 
 ## Install
 
-Needs `cig` 1.4.2 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
+Needs `cig` 1.6.2 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
 
 ```sh
 tag=v0.4.0
@@ -204,10 +204,12 @@ platform. Keep a WSL project in the Linux filesystem: hop watching on
 - A task's output is shown when the task finishes, not as it runs. Long
   builds are quiet until they are done.
 - Tasks run one at a time.
-- Files a task *creates* inside the project are undone, and the files it
-  *modifies* or deletes come back when the task said it might touch them
-  (`touches`; format and setup stages say so on their own). Anything else it
-  modifies is listed as irreversible, with the detail. What a task puts in
+- On Linux, where tasks run in cig's box, everything a task changes inside
+  the project comes back on rollback. On macOS and Windows, files a task
+  *creates* inside the project are undone, and the files it *modifies* or
+  deletes come back when the task said it might touch them (`touches`;
+  format and setup stages say so on their own); anything else it modifies is
+  listed as irreversible, with the detail. Everywhere, what a task puts in
   `.git`, `node_modules`, `target`, `.venv` and the other build and
   dependency trees stays, and is never journaled.
 - The knowledge base holds each ecosystem's documented defaults. A build that
@@ -238,10 +240,10 @@ are at [otmof-ops/CigScript](https://github.com/otmof-ops/CigScript).
   [CC BY 4.0](LICENSES/CC-BY-4.0.txt). Reuse and adapt with credit.
 - **Examples** (`examples/`): [CC0 1.0](LICENSES/CC0-1.0.txt). Paste them
   into your own projects; no attribution needed.
-- **The name.** CigScript is a trademark of Jay Taylor, and cigo carries it
-  as the maker's own tool. A fork needs a name of its own; CigScript's
-  [trademark policy](https://github.com/otmof-ops/CigScript/blob/main/TRADEMARKS.md)
-  says what is free to do and what to ask about first.
+- **The name.** cig-orchestrator and cigo are trademarks of Jay Taylor, as
+  CigScript is, and cigo carries that name as the maker's own tool. A fork
+  needs a name of its own; [TRADEMARKS.md](TRADEMARKS.md) says what is free
+  to do and what to ask about first.
 - **Your project is yours.** Nothing about running cigo gives this project
   any rights in your manifest, your scripts or what your tools build.
 

@@ -11,7 +11,7 @@ SPDX-FileCopyrightText = "2026 Jay Taylor (https://github.com/otmof-ops/cig-orch
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
-path = ["docs/**", "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "SUPPORT.md", "TOOLCHAINS.md", "FINDINGS.md", "NOTICE"]
+path = ["docs/**", "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "SUPPORT.md", "TOOLCHAINS.md", "FINDINGS.md", "TRADEMARKS.md", "NOTICE"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)"
 SPDX-License-Identifier = "CC-BY-4.0"

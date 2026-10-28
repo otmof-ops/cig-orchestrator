@@ -1,6 +1,6 @@
 # Toolchains
 
-The 60 toolchains cig-orchestrator 0.5.1 knows, written by `cigo toolchains --markdown`
+The 60 toolchains cig-orchestrator 1.0.0 knows, written by `cigo toolchains --markdown`
 from the knowledge base in `orchestrate.cig`; regenerate it with `cigo run toolchains-doc`
 rather than editing it.
 

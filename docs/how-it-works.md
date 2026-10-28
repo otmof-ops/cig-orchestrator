@@ -18,8 +18,11 @@ the whole tool reads as ordinary code; if you don't, this page is the map.
    a chain built at run time and lit with `light(steps, {names, quiet})`.
 4. **Each task is a hop.** Its command goes through `proc.run` (never a
    shell) or `proc.shell` (by name), with its environment, stdin and timeout.
-   A task with an `undo` runs inside `burn (s) { ... } unburn { ... }`, so
-   the undo is journaled with the state it needs.
+   On Linux the hop is boxed (`{box: true}`): it writes into a copy-on-write
+   layer over the project, which cig applies as journaled burns when the
+   task has run and drops when it could not start or was killed. A task with
+   an `undo` runs inside `burn (s) { ... } unburn { ... }`, so the undo is
+   journaled with the state it needs.
 5. **A failure is a cough.** When a step fails, cigo coughs, and cig rolls
    the run back newest first: created files removed, compensations run. That
    is the rollback nobody wrote.
