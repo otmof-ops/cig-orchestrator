@@ -21,7 +21,7 @@ tool="$(CDPATH='' cd -- "$(dirname -- "$self")/.." && pwd)/orchestrate.cig"
 # The cig this cigo is written for: the same floor as the `# cig` pin in the
 # tool, checked here for cigs too old to read the pin themselves.
 needs_major=1
-needs_minor=4
+needs_minor=6
 needs_patch=2
 
 if ! command -v cig >/dev/null 2>&1; then

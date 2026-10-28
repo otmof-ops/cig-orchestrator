@@ -5,6 +5,52 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.0.0 — 2026-10-29
+
+Needs cig 1.6.2 (the box, `touches_sealed`, the hash chain, the parcel; and
+the debugging pass that made the box hold).
+
+**What 1.0 means.** The manifest format (`cig-tasks.json`: the top level,
+components, stage overrides, tasks and their keys, toolchains, templates),
+the commands and their flags, the exit codes, the environment variables and
+the state cigo keeps under `.cig-orchestrator/` are stable: a change that
+would break a manifest or a script that drives `cigo` is a 2.0, and anything
+added from here is additive and says so in this file. The knowledge base
+(the toolchains and what each stage runs) keeps growing in minor versions;
+a toolchain's command changing is a minor version with a note in
+`TOOLCHAINS.md`. `cigo update` keeps installing every version, and `YANKED`
+keeps listing the ones it must not.
+
+- **Tasks run in cig's box on Linux.** Each task's hop is boxed: it writes
+  into a copy-on-write layer over the project (overlayfs in a user
+  namespace), which cig applies as journaled burns once the task has run,
+  with the before-bytes of every file it changed, and drops when the task
+  could not start or was killed. So a failing run puts back *everything* a
+  task changed inside the project, whether or not `touches` named it, where
+  0.5 restored only what `touches` covered and listed the rest as
+  irreversible; and nothing of a task that never ran reaches the tree. The
+  build and dependency trees (`target`, `node_modules`, `.venv`, `.git`...)
+  pass through the box untouched, as they always passed the watch. A task's
+  `box: false`, the manifest's `defaults.box`, `CIGO_BOX=0` or
+  `cigo run --no-box` keep a task on the tin; `box: true`, `CIGO_BOX=1` or
+  `--box` ask for the box where the default is off. On macOS and Windows the
+  default is off, since cig has no box there yet; asked for, cig runs the
+  task on the tin and says so (`E763`). `cigo show` says `box on` for a task
+  that will run boxed.
+- **`touches_sealed`** on a task: globs, as `touches`, of files whose
+  before-bytes are kept sealed (encrypted at rest) in the tin and the run's
+  record: a database with customer rows, a config holding a token. Files
+  with secret-shaped names are sealed without being named, as cig always
+  did since 1.5. `cigo show` lists them under `sealed`.
+- **`cigo check`** refuses a `box` that is not `true` or `false` (on a task
+  or in `defaults`) and a `touches_sealed` that is not a glob or a list of
+  them, with the same words as for `touches`.
+- The test suite's cig never touches the OS keyring (`CIG_SEAL_KEY=file` in
+  its environment), and CI lets cig make its box on the Ubuntu runners
+  (AppArmor restricts unprivileged user namespaces there by default).
+- `TRADEMARKS.md`: what the names cig-orchestrator and cigo may be used for
+  without asking, and what to ask about first.
+
 ## 0.5.1 — 2026-10-28
 
 Needs cig 1.4.2 (a burn can carry a name; a `touches` glob may be optional).

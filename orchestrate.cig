@@ -1,7 +1,7 @@
 #!/usr/bin/env cig
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
-# cig >=1.4.2
+# cig >=1.6.2
 # cig-orchestrator: every language in the project, one chain, no glue script.
 #
 # Most projects are several languages in a row: a Python step that makes
@@ -29,9 +29,9 @@
 
 pack { "." }
 
-stick VERSION = "0.5.1"
+stick VERSION = "1.0.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
-stick CIG_NEEDS = ">=1.4.2"
+stick CIG_NEEDS = ">=1.6.2"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
@@ -1883,9 +1883,9 @@ pull stage_deps(present, stage, order) {
 # ----- the manifest ---------------------------------------------------------------
 
 stick TOP_KEYS = ["project", "cig", "versions", "defaults", "components", "toolchains", "tasks"]
-stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms", "inputs_limit"]
+stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms", "inputs_limit", "box"]
 stick COMPONENT_KEYS = ["path", "toolchain", "after", "stages", "env", "env_file", "groups", "timeout_ms", "retries", "retry_delay_ms", "desc"]
-stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "inputs_limit", "produces", "touches", "encoding", "cmds", "rm", "each", "fail_on_output"]
+stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "inputs_limit", "produces", "touches", "touches_sealed", "box", "encoding", "cmds", "rm", "each", "fail_on_output"]
 stick CAPTURES = ["text", "json", "lines", "kv"]
 stick TOOLCHAIN_KEYS = ["language", "short", "extends", "detect", "family", "priority", "auto", "kind", "workspace", "claims_subtree",
   "stages", "extras", "order", "vars", "scripts", "targets", "targets_run", "tools", "versions", "pins", "touches", "install", "note"]
@@ -1999,7 +1999,7 @@ pull component_task(comp_name, r, stage, spec, needs) {
       t[key] = c[key]
     }
   }
-  for key in ["ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "inputs_limit", "produces", "touches", "desc", "unresolved", "cmds", "rm", "each", "fail_on_output"] {
+  for key in ["ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "inputs_limit", "produces", "touches", "touches_sealed", "box", "desc", "unresolved", "cmds", "rm", "each", "fail_on_output"] {
     if spec.has(key) {
       t[key] = spec[key]
     }
@@ -2554,7 +2554,44 @@ pull hop_options(name, t, cwd, defaults, where) {
   if not globs.is_empty() {
     o.touches = globs.map(pack(x) => touch_under(cwd, x))
   }
+  stick sealed = globs_of(t, "touches_sealed")
+  if not sealed.is_empty() {
+    o.touches_sealed = sealed.map(pack(x) => touch_under(cwd, x))
+  }
+  # The box (cig 1.6): the task runs over a copy-on-write layer on the
+  # project, so a task that cannot start or is killed leaves nothing, and
+  # one that ran has every change it made journaled with its before-bytes,
+  # `touches` or not. Linux only; elsewhere cig would fall back to the tin
+  # and say so at every task, so the default there is off.
+  if boxed(t, defaults) {
+    o.box = true
+  }
   snuff o
+}
+
+# Does this task run in the box? Its own `box`, then `--box` or `--no-box`,
+# then CIGO_BOX, then the manifest's `defaults.box`, then the platform.
+pull boxed(t, defaults) {
+  if t.has("box") {
+    snuff t.box == true
+  }
+  if flags.contains("--no-box") {
+    snuff false
+  }
+  if flags.contains("--box") {
+    snuff true
+  }
+  stick e = env.get("CIGO_BOX", "")
+  if e == "0" {
+    snuff false
+  }
+  if e == "1" {
+    snuff true
+  }
+  if defaults.has("box") {
+    snuff defaults.box == true
+  }
+  snuff cig.os() == "linux"
 }
 
 # A touches glob under the task's directory; a leading `?` (may match
@@ -2567,10 +2604,14 @@ pull touch_under(cwd, g) {
 }
 
 pull touches_of(t) {
-  if not t.has("touches") {
+  snuff globs_of(t, "touches")
+}
+
+pull globs_of(t, key) {
+  if not t.has(key) {
     snuff []
   }
-  snuff as_list(t.touches).map(pack(x) => str(x)).filter(pack(x) => x != "")
+  snuff as_list(t[key]).map(pack(x) => str(x)).filter(pack(x) => x != "")
 }
 
 pull captured(kind, out, name) {
@@ -3077,7 +3118,7 @@ pull run_task(ctx, name, index, total) {
 }
 
 pull do_run(g, wanted) {
-  expect_flags(["--only", "--force", "--strict", "--versions", "--install"])
+  expect_flags(["--only", "--force", "--strict", "--versions", "--install", "--box", "--no-box"])
   if wanted.is_empty() {
     fail("run what? `cigo run <task>`, or one stage everywhere: `cigo run test`; `cigo list` shows them")
   }
@@ -3446,7 +3487,7 @@ pull do_help() {
   exhale "                              find every language, task runner and script folder here;"
   exhale "                              propose ${MANIFEST}"
   exhale "  cigo list [--all]           components, stage groups and tasks"
-  exhale "  cigo run <task>... [--only] [--force] [--strict] [--versions=ask|always|never|off] [-- <args for the last task named>]"
+  exhale "  cigo run <task>... [--only] [--force] [--strict] [--box|--no-box] [--versions=ask|always|never|off] [-- <args for the last task named>]"
   exhale "                              `cigo run test` tests every language, `cigo run ci` does"
   exhale "                              format-check, lint, check, build and test everywhere"
   exhale "  cigo plan [<task>...] [--only]"
@@ -3633,6 +3674,14 @@ pull do_show(g) {
     exhale "  touches    ${globs.join(" ")}"
     exhale "             kept in the tin before the task runs: a file it modifies or deletes comes back on rollback"
   }
+  stick sealed = globs_of(t, "touches_sealed")
+  if not sealed.is_empty() {
+    exhale "  sealed     ${sealed.join(" ")}"
+    exhale "             kept sealed (encrypted at rest) in the tin and the run's record"
+  }
+  if boxed(t, g.manifest.get("defaults", {})) {
+    exhale "  box        on: the task runs over a copy-on-write layer on the project; a task that cannot start or is killed leaves nothing, and every change one that ran made comes back on rollback, `touches` or not"
+  }
   if type_of(t.get("env", null)) == "map" and not t.env.is_empty() {
     exhale "  env        ${t.env.keys().join(", ")}"
   }
@@ -3794,12 +3843,19 @@ pull do_check(g) {
     }
   }
   pull check_touches(name, t) {
-    if not t.has("touches") {
+    check_globs(name, t, "touches")
+    check_globs(name, t, "touches_sealed")
+    if t.has("box") and type_of(t.box) != "bool" {
+      problem("error", name, "`box` is true or false: whether the task runs over a copy-on-write layer on the project (cig's box, Linux)")
+    }
+  }
+  pull check_globs(name, t, key) {
+    if not t.has(key) {
       snuff
     }
-    stick tv = t.touches
+    stick tv = t[key]
     if type_of(tv) != "string" and (type_of(tv) != "list" or not tv.all(pack(x) => type_of(x) == "string")) {
-      problem("error", name, "`touches` is a glob or a list of globs, relative to the task's directory, like [\"src/**\", \"package.json\"]")
+      problem("error", name, "`${key}` is a glob or a list of globs, relative to the task's directory, like [\"src/**\", \"package.json\"]")
       snuff
     }
     for given in as_list(tv) {
@@ -3807,7 +3863,7 @@ pull do_check(g) {
       stick g = pick(given.starts_with("?"), given.slice(1), given)
       stick rooted = g.starts_with("/") or g.starts_with("\\") or (g.len() >= 2 and g.slice(1, 2) == ":")
       if g.trim() == "" or path.is_abs(g) or rooted or g.starts_with("~") or g.replace("\\", "/").split("/").contains("..") {
-        problem("error", name, "`touches`: `${given}` must be a relative glob inside the project; cig keeps what a task may change under its own directory")
+        problem("error", name, "`${key}`: `${given}` must be a relative glob inside the project; cig keeps what a task may change under its own directory")
       }
     }
   }
@@ -3845,6 +3901,9 @@ pull do_check(g) {
     }
     if defaults.has("inputs_limit") and (type_of(defaults.inputs_limit) != "int" or defaults.inputs_limit < 1) {
       problem("error", "defaults", "`inputs_limit` is a whole number of files, 1 or more")
+    }
+    if defaults.has("box") and type_of(defaults.box) != "bool" {
+      problem("error", "defaults", "`box` is true or false: whether tasks run over a copy-on-write layer on the project (cig's box, Linux; on by default there)")
     }
   }
   if m.has("versions") and not VERSION_SETTINGS.contains(str(m.versions)) {

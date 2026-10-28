@@ -42,10 +42,18 @@ cigo run ci                    # format-check, lint, check, build and test, ever
 cigo run release --force       # run tasks that are up to date as well
 cigo run --only deploy         # just deploy: its dependencies don't run, so it can't read their values
 cigo run scripts:seed -- --count 50    # arguments after -- go to the last task named
+cigo run build --no-box        # on the tin instead of in the box, this once
 ```
 
 A failure stops the run and puts back what it changed (see [cig's
-flags](#cigs-own-flags) to keep it instead). With `--only`, a task that
+flags](#cigs-own-flags) to keep it instead). On Linux each task runs in
+cig's box: over a copy-on-write layer on the project, so a task that cannot
+start or is killed leaves nothing behind, and every change a task that ran
+made comes back on rollback whether or not `touches` named it. `--no-box`
+runs the tasks on the tin instead (`--box` asks for the box where the
+default is off); a task's `box`, the manifest's `defaults.box` and
+`CIGO_BOX` set the same thing more lastingly ([the
+manifest](manifest.md#tasks)). With `--only`, a task that
 reads another's output (`{{site.page}}`) needs that task named too, since
 values come from the tasks in this run. Before anything starts, a value that
 reaches a `shell` or `undo_shell` line unquoted is said, as `cigo check` says
@@ -267,6 +275,7 @@ holds the before-bytes of what a task's `touches` named) under
 | `CIGO_HOME` | where cigo keeps its config, crash reports and downloads, instead of `~/.cig-orchestrator` |
 | `CIGO_PREFIX`, `CIGO_NAME` | for `install.sh`: the install root (`~/.local`) and the command's name (`cigo`); `install.ps1` takes `-Prefix` and `-Name` |
 | `CIGO_VERSIONS=0` | no version warnings |
+| `CIGO_BOX=0`, `CIGO_BOX=1` | tasks on the tin, or in the box, where the manifest and the task say nothing (the default is the box on Linux and the tin elsewhere) |
 | `CIGO_UPDATE_MANIFEST`, `CIGO_YANKED_FILE` | a local releases list and YANKED file for `cigo update`, instead of GitHub's (the suite uses them) |
 | `CIGO_INTERNAL_PANIC=<command>` | crash on purpose at that command (`mid-run` for inside a run), for the suite |
 
