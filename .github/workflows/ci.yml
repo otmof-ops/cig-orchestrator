@@ -152,7 +152,9 @@ jobs:
         run: |
           cigo version
           Set-Location -LiteralPath (Join-Path $env:RUNNER_TEMP 'dashdash')
-          $out = cigo run say -- --tag v2 2>&1 | Out-String
+          # stdout alone: under 5.1 a redirected stderr line ("burned 4 ops")
+          # becomes an error record, and the step's Stop preference throws it.
+          $out = cigo run say -- --tag v2 | Out-String
           if ($out -notmatch 'got --tag v2') { throw "5.1: the task did not get -- --tag v2: $out" }
       # `cigo update` from a PowerShell install puts back a PowerShell
       # install: a fake 9.0.0 release, as the release job builds one.
