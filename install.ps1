@@ -27,7 +27,7 @@ $bin = Join-Path $Prefix 'bin'
 
 if (-not (Get-Command cig -ErrorAction SilentlyContinue)) {
     [Console]::Error.WriteLine('install: cig is not on PATH. Install CigScript first:')
-    [Console]::Error.WriteLine('  irm https://raw.githubusercontent.com/otmof-ops/CigScript/v1.4.0/install.ps1 | iex')
+    [Console]::Error.WriteLine('  irm https://raw.githubusercontent.com/otmof-ops/CigScript/v1.4.2/install.ps1 | iex')
     exit 1
 }
 
@@ -46,7 +46,7 @@ if ($version -match '^(\d+)\.(\d+)\.(\d+)') {
     elseif ($major -eq 1 -and $minor -lt 3) { $tooOld = $true }
     elseif ($major -eq 1 -and $minor -eq 3 -and $patch -lt 1) { $tooOld = $true }
     if ($tooOld) {
-        [Console]::Error.WriteLine("install: cig $version is too old; cig-orchestrator needs 1.4.0 or newer (cig update)")
+        [Console]::Error.WriteLine("install: cig $version is too old; cig-orchestrator needs 1.4.2 or newer (cig update)")
         exit 1
     }
 } else {

@@ -1224,7 +1224,8 @@ test("touches must be relative globs inside the project; a stage's come from the
   exits(tool_in(mono, ["adopt", "--write"]), 0)
   stick s = tool_stubbed(mono, ["show", "ml:setup"])
   exits(s, 0)
-  says(s.out, "touches    uv.lock poetry.lock pdm.lock Pipfile.lock")
+  # The family's guesses are optional globs: a lockfile the project may not have yet.
+  says(s.out, "touches    ?uv.lock ?poetry.lock ?pdm.lock ?Pipfile.lock")
   # A stage override's touches win over the family's.
   edit_manifest(mono, pack(m) {
     m.components.ml.stages = {setup: {touches: ["uv.lock"]}}
@@ -1390,7 +1391,7 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
   }
   stick old = launch_env(dir, launcher, ["version"], {PATH: fake + path_sep + env.get("PATH", "")})
   exits(old, 2)
-  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.4.0 or newer")
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.4.2 or newer")
   stick j = json.parse(launch(dir, launcher, ["version", "--json"]).out)
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
 })
@@ -2054,12 +2055,89 @@ test("a failed undo is reported as not undone, by task name", pack() {
   }
   stick r = tool_in(dir, ["run", "verify"])
   exits(r, 1)
-  says(r.err, "`deploy` is NOT undone: its undo `sh -c 'echo undo-broke >&2; exit 7'` exited 7; stderr: `undo-broke`; fix the undo, then `cig unburn <run>` runs it again")
+  says(r.err, "deploy is NOT undone: its compensation failed: the undo `sh -c 'echo undo-broke >&2; exit 7'` exited 7; stderr: `undo-broke`; fix the undo, then `cig unburn <run>` runs it again")
+  never_says(r.err, "at line")
   says(r.err, "not undone run sh -c 'echo live > remote-site'")
   never_says(r.err, "compensated run sh -c 'echo live")
   # The file the hop made is the kernel's to remove (it was watched); the
   # hop's effects beyond the pack are what the undo was for, and stand.
   assert(not there(dir, "remote-site"), "the file the hop created was not rolled back")
+})
+
+# ----- 0.5.1: what re-testing 0.5.0 found (#47, #48) -------------------------------
+
+pull shell_values_project(dir, title) {
+  burn {
+    fs.write_text(path.join(dir, "TITLE"), title)
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({
+      project: "t",
+      tasks: {
+        title: {cmd: ["cat", "TITLE"], capture: "text"},
+        announce: {shell: "echo announcing {{title}}", needs: ["title"]},
+        safe: {shell: "echo announcing {{title|sh}}", needs: ["title"]},
+      },
+    }, 2))
+  }
+}
+
+test("run warns about an unquoted value in a shell line, and refuses it with --strict or under CI", pack() {
+  if on_windows {
+    exhale "      (skipped on Windows: the shell line is for sh)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  shell_values_project(dir, "release v1.2\n")
+  stick r = tool_in(dir, ["run", "announce"])
+  exits(r, 0)
+  says(r.err, "announce: {{title}} reaches a `shell` line unquoted")
+  says(r.err, "write {{title|sh}}")
+  says(r.out, "announcing release v1.2")
+  stick strict = tool_in(dir, ["run", "announce", "--strict"])
+  exits(strict, 2)
+  says(strict.err, "1 value reach a shell line unquoted and --strict given; nothing ran")
+  stick ci = hop_env(dir, "cig", ["run", tool, "--", "run", "announce"], {CI: "true"})
+  exits(ci, 2)
+  says(ci.err, "CI is set, so nothing ran")
+  # Quoted with |sh, nothing is said and the value is one word.
+  stick quoted = tool_in(dir, ["run", "safe", "--strict"])
+  exits(quoted, 0)
+  never_says(quoted.err, "unquoted")
+})
+
+test("a value holding shell syntax is refused unquoted at substitution", pack() {
+  if on_windows {
+    exhale "      (skipped on Windows: the shell line is for sh)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  shell_values_project(dir, "release v1.2; touch PWNED #\n")
+  stick r = tool_in(dir, ["run", "announce"])
+  exits(r, 1)
+  says(r.err, "{{title}} in task `announce`: its value holds shell syntax (`;`) and reaches a `shell` line unquoted, so it would run as shell")
+  assert(not there(dir, "PWNED"), "the injected command ran")
+  # The same value, quoted: one word, no harm.
+  stick safe = tool_in(dir, ["run", "safe"])
+  exits(safe, 0)
+  says(safe.out, "announcing release v1.2; touch PWNED #")
+  assert(not there(dir, "PWNED"), "the quoted value ran as shell")
+})
+
+test("a new npm project sets up without a touches warning", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.mkdir(path.join(dir, "web"))
+    fs.write_text(path.join(dir, "web/package.json"), "{\"name\":\"w\",\"version\":\"1.0.0\",\"scripts\":{\"test\":\"node -e 1\"}}\n")
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({project: "v", components: {web: {path: "web", toolchain: "node-npm"}}}, 2))
+  }
+  stick r = tool_stubbed(dir, ["run", "web:setup"])
+  exits(r, 0)
+  never_says(r.err, "match no file")
+  never_says(r.err, "matches no file")
+  says(stub_log(dir), "npm install")
+  # The built-in guesses are optional globs; a task's own stay as written.
+  stick s = tool_in(dir, ["show", "web:setup"])
+  exits(s, 0)
+  says(s.out, "?package-lock.json")
 })
 
 # ----- the end --------------------------------------------------------------

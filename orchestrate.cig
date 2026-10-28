@@ -1,7 +1,7 @@
 #!/usr/bin/env cig
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
-# cig >=1.4.0
+# cig >=1.4.2
 # cig-orchestrator: every language in the project, one chain, no glue script.
 #
 # Most projects are several languages in a row: a Python step that makes
@@ -29,9 +29,9 @@
 
 pack { "." }
 
-stick VERSION = "0.5.0"
+stick VERSION = "0.5.1"
 # The cigs this version runs on; the header pin above says the same to cig itself.
-stick CIG_NEEDS = ">=1.4.0"
+stick CIG_NEEDS = ">=1.4.2"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
@@ -1830,9 +1830,14 @@ pull resolve_component(name, comp, kb) {
   stick fam = FAMILY_TOUCHES.get(str(tc.get("family", "")), {})
   for s in stages {
     if not stages[s].has("touches") {
-      stick given_t = pick(type_of(tc_touches) == "map", tc_touches.get(s, null), null) ?? fam.get(s, null)
-      if given_t != null {
-        stages[s].touches = given_t
+      stick own_t = pick(type_of(tc_touches) == "map", tc_touches.get(s, null), null)
+      if own_t != null {
+        stages[s].touches = own_t
+      } else if fam.get(s, null) != null {
+        # The family's list is a guess at what might change (every lockfile
+        # kind, every source extension), not a promise: a glob that matches
+        # nothing yet (`?package-lock.json`) is no typo, and cig stays quiet.
+        stages[s].touches = as_list(fam[s]).map(pack(g) => pick(str(g).starts_with("?"), str(g), "?" + str(g)))
       }
     }
   }
@@ -2048,6 +2053,11 @@ pull show_escapes(s) {
 stick EXPOSED = {}
 stick RAW = {}
 roll DRY = false
+# Set while a `shell` or `undo_shell` line is rendered: a value pasted into
+# one is shell code, so a value holding shell syntax is refused unless `|sh`
+# made it one word.
+roll RENDER_SHELL = false
+stick SHELL_SYNTAX = [";", "|", "&", "`", "$(", "\n", "<", ">"]
 # `cigo run --only`: the tasks a template reads from may not have run.
 roll ONLY = false
 roll PROJECT_NAME = path.base(ROOT)
@@ -2164,6 +2174,14 @@ pull lookup(expr, where) {
     }
   }
   if filter == "" {
+    if RENDER_SHELL and not is_builtin_ref(base) or (RENDER_SHELL and base.starts_with("env.")) {
+      # Unquoted in a shell line: a value that holds shell syntax would run.
+      stick textv = to_text(value)
+      stick found = SHELL_SYNTAX.filter(pack(c) => textv.contains(c))
+      if not found.is_empty() {
+        cough "{{${expr}}} in ${where}: its value holds shell syntax (`${found.first().replace("\n", "\\n")}`) and reaches a `shell` line unquoted, so it would run as shell; write {{${base}|sh}} to make it one word, or put the value in `env` and read it as \"$NAME\""
+      }
+    }
     snuff value
   }
   if filter == "json" {
@@ -2176,6 +2194,42 @@ pull lookup(expr, where) {
     snuff sh_quote(to_text(value))
   }
   cough "{{${expr}}} in ${where}: unknown filter `|${filter}`; the filters are |json and |sh"
+}
+
+pull render_shell(s, where) {
+  RENDER_SHELL = true
+  roll out = ""
+  try {
+    out = render(s, where)
+  } finally {
+    RENDER_SHELL = false
+  }
+  snuff out
+}
+
+# The templates in a task's `shell` and `undo_shell` lines that reach the
+# shell unquoted: every one without `|sh`, except the paths cigo itself
+# supplies (root, project, home). One per key and expression.
+pull unquoted_shell_templates(t) {
+  roll out = []
+  for key in ["shell", "undo_shell"] {
+    if t.has(key) and type_of(t[key]) == "string" {
+      for expr in template_exprs(t[key]) {
+        stick bar = expr.find("|")
+        stick filter = pick(bar < 0, "", expr.slice(bar + 1).trim())
+        stick base = expr_base(expr)
+        if filter != "sh" and base != "root" and base != "project" and base != "home" {
+          out.push({key: key, expr: expr, base: base})
+        }
+      }
+    }
+  }
+  snuff out
+}
+
+pull unquoted_advice(u) {
+  stick var_name = u.base.split(".").last().upper().replace("-", "_")
+  snuff "{{${u.expr}}} reaches a `${u.key}` line unquoted, so a value holding shell syntax runs as shell; write {{${u.base}|sh}}, or put the value in `env` and read \"$${var_name}\" (a `cmd` list never reaches a shell)"
 }
 
 pull render(s, where) {
@@ -2498,9 +2552,18 @@ pull hop_options(name, t, cwd, defaults, where) {
   # relative to the pack root, which is the project root.
   stick globs = touches_of(t)
   if not globs.is_empty() {
-    o.touches = globs.map(pack(x) => pick(cwd == "." or path.is_abs(x), x, path.join(cwd, x)))
+    o.touches = globs.map(pack(x) => touch_under(cwd, x))
   }
   snuff o
+}
+
+# A touches glob under the task's directory; a leading `?` (may match
+# nothing) stays in front.
+pull touch_under(cwd, g) {
+  stick optional = g.starts_with("?")
+  stick bare = pick(optional, g.slice(1), g)
+  stick joined = pick(cwd == "." or path.is_abs(bare), bare, path.join(cwd, bare))
+  snuff pick(optional, "?" + joined, joined)
 }
 
 pull touches_of(t) {
@@ -2685,7 +2748,7 @@ pull produced(cwd, t) {
 
 pull undo_of(t, where) {
   if t.has("undo_shell") {
-    stick line = render(str(t.undo_shell), where)
+    stick line = render_shell(str(t.undo_shell), where)
     snuff {shell: line, label: line}
   }
   if t.has("undo") {
@@ -2804,7 +2867,7 @@ pull run_task(ctx, name, index, total) {
   stick more = pick(name == ctx.last, extra, [])
   roll cmd = null
   if t.has("shell") {
-    roll line = render(str(t.shell), where)
+    roll line = render_shell(str(t.shell), where)
     for w in more {
       line = line + " " + quote(w)
     }
@@ -2932,7 +2995,7 @@ pull run_task(ctx, name, index, total) {
     # The undo is journaled as a compensation once the task succeeds: a later
     # failure in this run, or `cig unburn` weeks from now, runs it with this
     # state. A task that failed has nothing to undo, so none is recorded.
-    burn (s) {
+    burn (s, name) {
       s.task = name
       s.undo = undo
       s.cwd = cwd
@@ -2972,7 +3035,7 @@ pull run_task(ctx, name, index, total) {
         # compensation sees its state, modules and builtins only, so no
         # helper of this file is called here.)
         stick tail = done.err.trim_end().lines().last() ?? ""
-        roll said = "`${s.task}` is NOT undone: its undo `${s.undo.label}` exited ${done.code}"
+        roll said = "the undo `${s.undo.label}` exited ${done.code}"
         if tail != "" {
           said = said + "; stderr: `${tail}`"
         }
@@ -3039,6 +3102,26 @@ pull do_run(g, wanted) {
   for n in names {
     if tasks[n].has("unresolved") {
       fail("task `${n}` cannot run: ${tasks[n].unresolved}; `cigo check` lists every problem")
+    }
+  }
+  # A value pasted into a shell line unquoted is shell code: said before the
+  # run starts, as `cigo check` says it; with --strict, or under CI (where
+  # values come from PR titles and commit messages), the run stops instead.
+  roll unquoted = []
+  for n in names {
+    for u in unquoted_shell_templates(tasks[n]) {
+      unquoted.push("${n}: " + unquoted_advice(u))
+    }
+  }
+  if not unquoted.is_empty() {
+    for line in unquoted {
+      log.warn(line)
+    }
+    if flags.contains("--strict") {
+      fail("${unquoted.len()} value" + pick(unquoted.len() == 1, "", "s") + " reach a shell line unquoted and --strict given; nothing ran")
+    }
+    if env.get("CI", "") != "" {
+      fail("${unquoted.len()} value" + pick(unquoted.len() == 1, "", "s") + " reach a shell line unquoted and CI is set, so nothing ran; write {{name|sh}}, or pass the value through `env`")
     }
   }
   # Versions: where the project's pins and this machine disagree, switch
@@ -3719,10 +3802,12 @@ pull do_check(g) {
       problem("error", name, "`touches` is a glob or a list of globs, relative to the task's directory, like [\"src/**\", \"package.json\"]")
       snuff
     }
-    for g in as_list(tv) {
+    for given in as_list(tv) {
+      # A leading `?` says the glob may match nothing; the rest is the glob.
+      stick g = pick(given.starts_with("?"), given.slice(1), given)
       stick rooted = g.starts_with("/") or g.starts_with("\\") or (g.len() >= 2 and g.slice(1, 2) == ":")
       if g.trim() == "" or path.is_abs(g) or rooted or g.starts_with("~") or g.replace("\\", "/").split("/").contains("..") {
-        problem("error", name, "`touches`: `${g}` must be a relative glob inside the project; cig keeps what a task may change under its own directory")
+        problem("error", name, "`touches`: `${given}` must be a relative glob inside the project; cig keeps what a task may change under its own directory")
       }
     }
   }
@@ -3976,19 +4061,10 @@ pull do_check(g) {
     }
     # A value pasted into a shell line as text is shell code: a captured
     # title holding `; rm -rf` runs. `|sh` makes it one word; `cmd` lists
-    # never reach a shell. A warning, an error under --strict.
-    for key in ["shell", "undo_shell"] {
-      if t.has(key) and type_of(t[key]) == "string" {
-        for expr in template_exprs(t[key]) {
-          stick bar = expr.find("|")
-          stick filter = pick(bar < 0, "", expr.slice(bar + 1).trim())
-          stick base = expr_base(expr)
-          if filter != "sh" and base != "root" and base != "project" and base != "home" {
-            stick var_name = base.split(".").last().upper().replace("-", "_")
-            problem(pick(flags.contains("--strict"), "error", "warning"), name, "{{${expr}}} reaches a `${key}` line unquoted, so a value holding shell syntax runs as shell; write {{${expr_base(expr)}|sh}}, or put the value in `env` and read \"$${var_name}\" (a `cmd` list never reaches a shell)")
-          }
-        }
-      }
+    # never reach a shell. A warning, an error under --strict; `cigo run`
+    # says the same before it starts, and stops under --strict or CI.
+    for u in unquoted_shell_templates(t) {
+      problem(pick(flags.contains("--strict"), "error", "warning"), name, unquoted_advice(u))
     }
     if t.has("stdin_from") {
       if not tasks.has(str(t.stdin_from)) {
