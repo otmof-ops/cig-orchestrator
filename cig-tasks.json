@@ -40,7 +40,8 @@
         "lint"
       ],
       "timeout_ms": 900000,
-      "desc": "the test suite, itself written in CigScript"
+      "box": false,
+      "desc": "the test suite, itself written in CigScript; on the tin, so the boxes of the cigs it starts can be made (the box does not nest)"
     }
   }
 }
