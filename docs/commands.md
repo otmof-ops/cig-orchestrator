@@ -105,8 +105,16 @@ version, a yanked one included (`cigo update` on its own never picks a
 version listed in the repository's `YANKED` file). A cigo running from a git
 checkout is updated with `git pull` instead, and `update` says so.
 
-**`cigo crash`** is the crash reports: `list`, `show <id>`, `send <id>`,
-`delete <id>` (or `--all`). See [crash reports](#crash-reports).
+**`cigo crash`** is cigo's own crash reports: `list`, `show <id>`, `send
+<id>` (through cig), `delete <id>` (or `--all`). See [crash
+reports](#crash-reports).
+
+**`cigo report <run> [--send]`** bundles a run for an issue: cig's own
+report for it (plan, journal, diagnostic, doctor's diagnosis, redacted) with
+the manifest's shape beside it (component names and toolchains, task names
+and the keys each uses; never a value, a command or an argument), written
+under `~/.cig-orchestrator/reports/<run>.json`. `--send` files it through
+cig's ashtray as a report on `issues_repo`.
 
 **`cigo config`** reads and writes `~/.cig-orchestrator/config`:
 `crash_reports` (`ask`, `always`, `never`), `issues_repo`, `update_channel`
@@ -191,21 +199,23 @@ carries on as today.
 
 A task failing is cigo doing its job. cigo itself failing, a runtime or type
 error inside `orchestrate.cig`, is a bug in cigo, and it is reported the way
-cig reports its own crashes: a report is saved under
-`~/.cig-orchestrator/crashes/`, the run is rolled back as any failed run is,
-and nothing is sent anywhere unless you say so.
+cig reports its own: a report is saved under `~/.cig-orchestrator/crashes/`,
+the run is rolled back as any failed run is, and the report is handed to
+cig's ashtray (`cig crash submit --origin cig-orchestrator`). From there it
+is cig's: cig's `reports` setting (`cig config reports ask|always|never`;
+ask once and remember, never under CI with nothing set) says whether it
+goes; cig redacts it again, files one issue per bug on cigo's `issues_repo`
+with a live stats block, waits out a lost network, and tells you on `cig
+update --check` when a release fixed it. cigo's own `crash_reports` keeps
+one word: `never` keeps the report on this machine and never hands it over;
+`always` asks cig to send it in this process. `cigo crash show <id>` is what
+cigo saved; `cig crash show <id>` is exactly what travels.
 
 The report holds cigo's and cig's versions, OS and architecture, the command
 line (token-, secret-, URL- and path-looking values redacted), the project
 directory relative to your home, a timestamp, the error and its line in
 `orchestrate.cig`, and the id of the run. It does not hold your manifest,
-environment variable values, or file contents. `cigo crash show <id>` is
-exactly what `cigo crash send <id>` would file as a public issue on
-`issues_repo`, one issue per fingerprint, with a comment when the same crash
-is seen again. `crash_reports = always` sends without asking; `never` keeps
-every report local; `ask`, the default, prints the two commands and leaves it
-with you (cigo runs under cig, which owns the terminal, so it does not
-prompt). `CIGO_INTERNAL_PANIC=<command>` raises one on purpose, for the suite.
+environment variable values, or file contents.
 
 ## cig's own flags
 

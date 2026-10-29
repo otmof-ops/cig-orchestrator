@@ -5,8 +5,26 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
-## Unreleased
+## 1.1.0 — 2026-10-29
 
+Needs cig 1.7.0 (`cig crash submit`, the ashtray).
+
+- **cigo's reports go through cig** (CigScript #101, step 10). A bug inside
+  `orchestrate.cig` is still saved under `~/.cig-orchestrator/crashes/` and
+  the run still rolled back; from there the report is handed to cig's
+  ashtray (`cig crash submit --origin cig-orchestrator --repo <issues_repo>`),
+  so it gets every route (`gh`, a token with curl, a prefilled link), the
+  queue that waits out a lost network, cig's redaction, one issue per bug
+  with the live stats block, and cig's one consent setting: `cig config
+  reports ask|always|never` says whether it goes. cigo's `crash_reports`
+  keeps one word of its own: `never` keeps a report on this machine and
+  never hands it over; `always` asks cig to send it in this process. `cigo
+  crash send <id>` files one now, through cig.
+- **`cigo report <run> [--send]`.** The run's bundle as cig makes it (plan,
+  journal, diagnostic, doctor's diagnosis, redacted) with the manifest's
+  shape beside it (component names and toolchains, task names and the keys
+  each uses, never a value, a command or an argument), written under
+  `~/.cig-orchestrator/reports/`; `--send` files it through cig as a report.
 - cigo's own `test` task runs on the tin (`box: false`): the suite starts
   cigs of its own whose boxed hops could not be made inside a box, since
   overlayfs does not layer over an overlay. The manifest doc says so for

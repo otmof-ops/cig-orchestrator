@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/otmof-ops/CigScript"><img alt="a CigScript tool" src="https://img.shields.io/badge/a-CigScript%20tool-f97316"></a>
-  <img alt="needs cig 1.6.2 or newer" src="https://img.shields.io/badge/needs-cig%201.6.2%2B-6b7280">
+  <img alt="needs cig 1.7.0 or newer" src="https://img.shields.io/badge/needs-cig%201.7.0%2B-6b7280">
   <a href="TOOLCHAINS.md"><img alt="60 toolchains" src="https://img.shields.io/badge/toolchains-60-6b7280"></a>
   <a href="docs/roadmap.md"><img alt="actively maintained" src="https://img.shields.io/badge/status-actively%20maintained-f97316"></a>
   <a href="LICENSE"><img alt="license Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6b7280"></a>
@@ -80,7 +80,7 @@ would have run and the chain would have put back what it created.
 | checked first | `cigo check` finds loops, typos, unknown toolchains, missing programs and broken templates before anything runs |
 | the tools themselves | `cigo doctor` finds each toolchain's tools and versions and compares them with the pins you already keep; every command warns where a version disagrees, the installed cig against the project's pins included, and `--strict` stops on one. `cigo versions switch` runs tasks on the pinned versions through the version manager already on the machine (mise, asdf, rustup, uv, fnm...), per task, never your default |
 | what a task rewrites | on Linux every task runs in cig's box, over a copy-on-write layer on the project: a task that cannot start leaves nothing, and every change one that ran made comes back on rollback, named or not. Elsewhere a format stage's sources and a setup stage's lockfiles are kept in the tin before the task runs; `touches` names a task's own, `touches_sealed` what to keep encrypted |
-| cigo itself | crash reports under your control, `cigo update` to a checksum- and attestation-verified release, `cigo version --json` |
+| cigo itself | its own bugs reported through cig's ashtray under cig's one consent setting, never a task's failure; `cigo report <run> --send` for a run that went wrong; `cigo update` to a checksum- and attestation-verified release, `cigo version --json` |
 
 ## One stage, every language
 
@@ -162,7 +162,7 @@ your sanity.
 
 ## Install
 
-Needs `cig` 1.6.2 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
+Needs `cig` 1.7.0 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
 
 ```sh
 tag=v0.4.0

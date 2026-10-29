@@ -1,7 +1,7 @@
 #!/usr/bin/env cig
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
-# cig >=1.6.2
+# cig >=1.7.0
 # cig-orchestrator: every language in the project, one chain, no glue script.
 #
 # Most projects are several languages in a row: a Python step that makes
@@ -29,9 +29,9 @@
 
 pack { "." }
 
-stick VERSION = "1.0.0"
+stick VERSION = "1.1.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
-stick CIG_NEEDS = ">=1.6.2"
+stick CIG_NEEDS = ">=1.7.0"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
@@ -3505,7 +3505,8 @@ pull do_help() {
   exhale "  cigo update [--check] [--to=X.Y.Z]"
   exhale "                              install the newest release, checksum and attestation verified"
   exhale "  cigo crash [list|show|send|delete <id>]"
-  exhale "                              crash reports, under your control; never sent unless you say so"
+  exhale "                              cigo's own crash reports; sent through cig's ashtray when cig's `reports` setting says so"
+  exhale "  cigo report <run> [--send]  a run's bundle (cig's report, the manifest's shape) for an issue; --send files it through cig"
   exhale "  cigo config [<key> [<value>|--unset]]"
   exhale "                              crash_reports, issues_repo, update_channel, versions, install in ~/.cig-orchestrator/config"
   exhale ""
@@ -5409,8 +5410,48 @@ pull issue_body(r) {
   snuff "Automated crash report from `cigo`. The person who hit this chose to send it.\n\n- cig-orchestrator: ${r.version}\n- cig: ${r.cig}\n- os/arch: ${r.os}/${r.arch}\n- location: `${r.panic_location}`\n- fingerprint: `${r.fingerprint}`\n\n<details><summary>Full report</summary>\n\n```json\n" + json.stringify(r, 2) + "\n```\n</details>\n"
 }
 
-# File a report as an issue with gh: one issue per fingerprint, a comment on
-# it when the fingerprint is already filed. Returns the URL, or null.
+# Hand a report to cig: the ashtray, the consent (`cig config reports`), the
+# redaction, the routes and one issue per bug are cig's (`cig crash submit`,
+# cig 1.7.0). `now` sends in this process; otherwise cig queues it and sends
+# in the background. Returns true when cig took it.
+pull crash_submit(r, now) {
+  stick repo = config().issues_repo
+  roll words = ["crash", "submit", "--origin", "cig-orchestrator", "--repo", repo, "--file", crash_path(r)]
+  if now {
+    words.push("--now")
+  }
+  roll got = null
+  burn {
+    got = proc.run("cig", words, {timeout_ms: 600000})
+  }
+  stick said = (str(got.err) + str(got.out)).trim()
+  if got.code != 0 {
+    log.error("cig could not take the report: ${said}")
+    snuff false
+  }
+  for line in said.lines() {
+    roll at = line.find("filed at ")
+    if at >= 0 {
+      r.sent = line.slice(at + 9).trim()
+    }
+    at = line.find("count was updated on ")
+    if at >= 0 {
+      r.sent = line.slice(at + 21).trim()
+    }
+  }
+  if r.get("sent", null) != null {
+    write_outside(crash_path(r), json.stringify(r, 2) + "\n")
+  }
+  for line in said.lines() {
+    if line.trim() != "" {
+      log.info(line)
+    }
+  }
+  snuff true
+}
+
+# The gh route from before 1.1.0, kept for a machine whose cig is too old to
+# take a submission; `cigo crash send` tries cig first.
 pull crash_send(r) {
   stick repo = config().issues_repo
   if which("gh") == null {
@@ -5473,11 +5514,12 @@ pull report_crash(e) {
   log.error("It contains: cigo and cig versions, OS/arch, the command line (token- and path-looking values redacted), the project directory relative to your home, a timestamp, the error and its line in orchestrate.cig, and the id of the run. It does NOT contain your manifest, environment variable values, or file contents.")
   if c.crash_reports == "never" {
     log.error("crash_reports is \"never\": the report stays local. `cigo config crash_reports ask` changes this.")
-  } else if c.crash_reports == "always" {
-    log.error("crash_reports is \"always\": sending it to github.com/${c.issues_repo}.")
-    crash_send(r)
   } else {
-    log.error("View it first:  cigo crash show ${r.id}   then, to file it as a public issue:  cigo crash send ${r.id}")
+    # From here it is cig's: the report joins cig's ashtray, and cig's own
+    # `reports` setting (ask once, always, never) says whether it goes, to
+    # github.com/${issues_repo}, one issue per bug, redacted again.
+    log.error("Handing it to cig's ashtray; `cig config reports` says whether reports go (cigo crash show ${r.id} reads it, cigo crash send ${r.id} files it now).")
+    crash_submit(r, c.crash_reports == "always")
   }
 }
 
@@ -5527,7 +5569,7 @@ pull do_crash() {
     if config().crash_reports == "never" {
       fail("crash_reports is \"never\" in ${tilde(CONFIG_FILE)}; `cigo config crash_reports ask`, then send it again")
     }
-    if crash_send(r) == null {
+    if not crash_submit(r, true) {
       exit(1)
     }
   } else if what == "delete" {
@@ -5538,6 +5580,109 @@ pull do_crash() {
     }
   } else {
     fail("`cigo crash` takes list, show <id>, send <id> or delete <id>|--all")
+  }
+}
+
+# The manifest with nothing of the person's in it: names and shapes, no
+# values. Component names and toolchains, task names and the keys each
+# uses, the defaults' keys; never an env value, a command or an argument.
+pull manifest_summary() {
+  roll m = null
+  try {
+    m = load()
+  } ashtray e {
+    snuff {error: "the manifest could not be read: " + str(e.get("message", "?"))}
+  }
+  roll comps = {}
+  stick cs = m.get("components", {})
+  if type_of(cs) == "map" {
+    for name in cs {
+      stick c = cs[name]
+      if type_of(c) == "map" {
+        comps[name] = {toolchain: str(c.get("toolchain", "")), keys: c.keys()}
+      }
+    }
+  }
+  roll tasks = {}
+  stick ts = m.get("tasks", {})
+  if type_of(ts) == "map" {
+    for name in ts {
+      stick t = ts[name]
+      tasks[name] = pick(type_of(t) == "map", t.keys(), [type_of(t)])
+    }
+  }
+  snuff {
+    project: str(m.get("project", "")),
+    top_keys: m.keys(),
+    components: comps,
+    tasks: tasks,
+    defaults: pick(type_of(m.get("defaults", {})) == "map", m.get("defaults", {}).keys(), []),
+    toolchains: pick(type_of(m.get("toolchains", {})) == "map", m.get("toolchains", {}).keys(), []),
+  }
+}
+
+# `cigo report <run> [--send]`: the run's bundle as cig makes it (plan,
+# journal, diagnostic, doctor's diagnosis, redacted), with the manifest's
+# shape beside it, written under ~/.cig-orchestrator/reports/; `--send`
+# hands it to cig's ashtray as a report, the way a crash goes.
+pull do_report() {
+  expect_flags(["--send"])
+  stick id = targets.get(0, "")
+  if id == "" {
+    fail("report which run? `cigo report <run>`; `cig runs` lists them")
+  }
+  roll got = null
+  burn {
+    got = proc.run("cig", ["--json", "report", id], {timeout_ms: 120000})
+  }
+  if got.code != 0 {
+    fail("cig could not bundle run ${id}: ${str(got.err).trim()}")
+  }
+  roll inner = null
+  try {
+    inner = json.parse(got.out)
+  } ashtray e {
+    fail("cig's bundle for ${id} is not JSON: ${str(e.get("message", "?"))}")
+  }
+  stick run = inner.get("run", {})
+  stick what = pick(run.get("error", null) != null, str(run.get("error", "")), "run ${str(run.get("id", id))} finished ${str(run.get("status", "?"))}")
+  stick bundle = {
+    kind: "report",
+    title: "cigo run: " + what,
+    location: "cig-orchestrator report",
+    version: VERSION,
+    cig: cig.version(),
+    active_run_id: str(run.get("id", id)),
+    generated: time.now_iso(),
+    manifest: manifest_summary(),
+    cig_report: inner,
+    note: "The manifest travels as names and shapes only; cig's bundle is redacted as cig redacts it; file contents are never included.",
+  }
+  stick file = path.join(CIGO_HOME, "reports", str(run.get("id", id)) + ".json")
+  if not write_outside(file, json.stringify(bundle, 2) + "\n") {
+    fail("could not write ${tilde(file)}")
+  }
+  if not flags.contains("--send") {
+    exhale tilde(file)
+    log.info("read it, then `cigo report ${id} --send` files it through cig, or attach it to an issue on github.com/${config().issues_repo}")
+    snuff
+  }
+  if config().crash_reports == "never" {
+    fail("crash_reports is \"never\" in ${tilde(CONFIG_FILE)}; the bundle stays at ${tilde(file)}")
+  }
+  stick repo = config().issues_repo
+  roll sent = null
+  burn {
+    sent = proc.run("cig", ["crash", "submit", "--origin", "cig-orchestrator", "--repo", repo, "--file", file, "--now"], {timeout_ms: 600000})
+  }
+  stick said = (str(sent.err) + str(sent.out)).trim()
+  for line in said.lines() {
+    if line.trim() != "" {
+      log.info(line)
+    }
+  }
+  if sent.code != 0 {
+    exit(1)
   }
 }
 
@@ -5888,6 +6033,8 @@ pull dispatch() {
     do_update()
   } else if command == "crash" {
     do_crash()
+  } else if command == "report" {
+    do_report()
   } else if command == "config" {
     do_config()
   } else if command == "toolchains" {

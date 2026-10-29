@@ -1393,7 +1393,7 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
   }
   stick old = launch_env(dir, launcher, ["version"], {PATH: fake + path_sep + env.get("PATH", "")})
   exits(old, 2)
-  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.6.2 or newer")
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.7.0 or newer")
   stick j = json.parse(launch(dir, launcher, ["version", "--json"]).out)
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
 })
@@ -2239,6 +2239,80 @@ test("check refuses a box that is not true or false, and touches_sealed that are
   says(c.out, "error: bad: `box` is true or false")
   says(c.out, "error: bad: `touches_sealed` is a glob or a list of globs")
   says(c.out, "error: defaults: `box` is true or false")
+})
+
+# ----- 1.1.0: reports through cig --------------------------------------------------
+
+pull filed_under(tracker, repo_dir) {
+  roll filed = []
+  roll tries = 0
+  while filed.is_empty() and tries < 600 {
+    filed = fs.glob(path.join(tracker, repo_dir, "*.json"))
+    if filed.is_empty() {
+      tries += 1
+      time.sleep_ms(100)
+    }
+  }
+  snuff filed
+}
+
+test("a bug inside cigo is handed to cig's ashtray and filed under cigo's repository", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick tracker = dir + "-tracker"
+  stick r = hop_env(dir, "cig", ["run", tool, "--", "run", "version"], {CIGO_HOME: cigo_home(dir), CIGO_INTERNAL_PANIC: "mid-run", CIG_REPORTS: "always", CIG_INTERNAL_TRACKER_DIR: tracker})
+  exits(r, 1)
+  says(r.err, "A crash report was saved locally:")
+  says(r.err, "Handing it to cig's ashtray")
+  # cig files it in the background, under cigo's repository, as cigo's.
+  stick filed = filed_under(tracker, "otmof-ops__cig-orchestrator")
+  assert(not filed.is_empty(), "cig did not file the report: ${r.err}")
+  stick issue = json.load(filed[0])
+  says(str(issue.title), "crash [")
+  says(str(issue.title), "cig-orchestrator ")
+  says(str(issue.body), "orchestrate.cig:")
+  says(str(issue.body), "\"origin\": \"cig-orchestrator\"")
+  # cigo's own copy stays where it was, and cig's ashtray knows the origin.
+  assert(fs.glob(path.join(cigo_home(dir), "crashes", "*.json")).len() == 1, "cigo's copy is gone")
+  stick ash = cig(dir, ["--json", "crash", "list"])
+  says(ash.out, "\"origin\":\"cig-orchestrator\"")
+})
+
+test("crash_reports never keeps a cigo crash on this machine, out of cig's ashtray", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  tool_home(dir, ["config", "crash_reports", "never"])
+  stick tracker = dir + "-tracker-never"
+  stick r = hop_env(dir, "cig", ["run", tool, "--", "run", "version"], {CIGO_HOME: cigo_home(dir), CIGO_INTERNAL_PANIC: "mid-run", CIG_REPORTS: "always", CIG_INTERNAL_TRACKER_DIR: tracker})
+  exits(r, 1)
+  says(r.err, "crash_reports is \"never\"")
+  never_says(r.err, "Handing it to cig")
+  assert(not fs.exists(tracker), "a report was filed")
+  stick ash = cig(dir, ["--json", "crash", "list"])
+  never_says(ash.out, cigo_home(dir))
+})
+
+test("cigo report <run> --send bundles the run with the manifest's shape and files it through cig", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick tracker = dir + "-tracker-report"
+  stick failing = tool_in(dir, ["run", "liar"])
+  exits(failing, 1)
+  stick id = str(last_run(dir).id)
+  # Without --send: the file, and where it is.
+  stick w = tool_home(dir, ["report", id])
+  exits(w, 0)
+  says(w.out, "reports")
+  stick written = json.load(path.join(cigo_home(dir), "reports", id + ".json"))
+  assert(written.kind == "report" and written.manifest.project != "" and written.cig_report.kind == "cigscript-report", json.stringify(written).slice(0, 300))
+  never_says(json.stringify(written.manifest), "echo")
+  # With --send: filed through cig, now.
+  stick s = hop_env(dir, "cig", ["run", tool, "--", "report", id, "--send"], {CIGO_HOME: cigo_home(dir), CIG_INTERNAL_TRACKER_DIR: tracker})
+  exits(s, 0)
+  says(s.err, "filed at ")
+  stick filed = fs.glob(path.join(tracker, "otmof-ops__cig-orchestrator", "*.json"))
+  assert(filed.len() == 1, "expected one issue, found ${filed.len()}")
+  stick issue = json.load(filed[0])
+  says(str(issue.title), "report [")
+  says(str(issue.body), "cigscript-report")
+  says(str(issue.body), "\"origin\": \"cig-orchestrator\"")
 })
 
 # ----- the end --------------------------------------------------------------
