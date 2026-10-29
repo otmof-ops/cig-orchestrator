@@ -2322,6 +2322,14 @@ exhale "${passed} passed, ${failed.len()} failed"
 if not failed.is_empty() {
   cough "failing: ${failed.join(", ")}"
 }
+# cig sends the reports its runs queued in the background, working under
+# the suite's cig home; the teardown waits for that sender to finish rather
+# than pulling the directory from under it (a race the macOS runner lost).
+roll waited = 0
+while fs.exists(path.join(home, "ashtray", ".flush.lock")) and waited < 600 {
+  waited += 1
+  time.sleep_ms(100)
+}
 burn {
   fs.rm(work)
 }
