@@ -106,7 +106,7 @@ writes both directories to `GITHUB_PATH` for the steps that follow:
         run: |
           irm https://raw.githubusercontent.com/otmof-ops/CigScript/main/install.ps1 | iex
           $env:Path = "$env:LOCALAPPDATA\Programs\cig;$env:Path"
-          $tag = 'v1.1.0'
+          $tag = 'v1.1.1'
           $base = "https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
           irm "$base/cig-orchestrator-$tag.tar.gz" -OutFile cigo.tar.gz
           irm "$base/cig-orchestrator-$tag.tar.gz.sha256" -OutFile cigo.tar.gz.sha256

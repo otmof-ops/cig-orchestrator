@@ -1,7 +1,7 @@
 #!/usr/bin/env cig
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
-# cig >=1.7.0
+# cig >=1.7.1
 # cig-orchestrator: every language in the project, one chain, no glue script.
 #
 # Most projects are several languages in a row: a Python step that makes
@@ -29,9 +29,9 @@
 
 pack { "." }
 
-stick VERSION = "1.1.0"
+stick VERSION = "1.1.1"
 # The cigs this version runs on; the header pin above says the same to cig itself.
-stick CIG_NEEDS = ">=1.7.0"
+stick CIG_NEEDS = ">=1.7.1"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
@@ -5583,42 +5583,83 @@ pull do_crash() {
   }
 }
 
-# The manifest with nothing of the person's in it: names and shapes, no
-# values. Component names and toolchains, task names and the keys each
-# uses, the defaults' keys; never an env value, a command or an argument.
+# The manifest with nothing of the person's in it: shapes, no names and no
+# values. The project and every component and task get a placeholder
+# (`<project>`, `c1`, `t1`...), a key stays only when the manifest's
+# vocabulary has it, a toolchain only when cigo knows it; never an env
+# value, a command, an argument, a path or a glob. The placeholders come
+# back beside it, so a run's error that names a task gets the same word.
 pull manifest_summary() {
   roll m = null
   try {
     m = load()
   } ashtray e {
-    snuff {error: "the manifest could not be read: " + str(e.get("message", "?"))}
+    snuff {summary: {error: "the manifest could not be read: " + str(e.get("message", "?"))}, names: {}}
+  }
+  roll names = {}
+  stick project = str(m.get("project", ""))
+  if project != "" {
+    names[project] = "<project>"
   }
   roll comps = {}
   stick cs = m.get("components", {})
   if type_of(cs) == "map" {
+    roll i = 0
     for name in cs {
+      i += 1
+      names[name] = "c${i}"
       stick c = cs[name]
       if type_of(c) == "map" {
-        comps[name] = {toolchain: str(c.get("toolchain", "")), keys: c.keys()}
+        stick tc = str(c.get("toolchain", ""))
+        comps["c${i}"] = {toolchain: pick(tc == "" or TOOLCHAINS.has(tc), tc, "<toolchain>"), keys: known_keys(c.keys(), COMPONENT_KEYS)}
       }
     }
   }
   roll tasks = {}
   stick ts = m.get("tasks", {})
   if type_of(ts) == "map" {
+    roll j = 0
     for name in ts {
+      j += 1
+      names[name] = "t${j}"
       stick t = ts[name]
-      tasks[name] = pick(type_of(t) == "map", t.keys(), [type_of(t)])
+      tasks["t${j}"] = pick(type_of(t) == "map", known_keys(t.keys(), TASK_KEYS + ["env_files", "origin", "group"]), [type_of(t)])
+    }
+  }
+  roll toolchains = []
+  stick tcs = m.get("toolchains", {})
+  if type_of(tcs) == "map" {
+    for name in tcs {
+      toolchains.push(pick(TOOLCHAINS.has(name), name, "<toolchain>"))
     }
   }
   snuff {
-    project: str(m.get("project", "")),
-    top_keys: m.keys(),
-    components: comps,
-    tasks: tasks,
-    defaults: pick(type_of(m.get("defaults", {})) == "map", m.get("defaults", {}).keys(), []),
-    toolchains: pick(type_of(m.get("toolchains", {})) == "map", m.get("toolchains", {}).keys(), []),
+    summary: {
+      project: pick(project == "", "", "<project>"),
+      top_keys: known_keys(m.keys(), TOP_KEYS),
+      components: comps,
+      tasks: tasks,
+      defaults: pick(type_of(m.get("defaults", {})) == "map", known_keys(m.get("defaults", {}).keys(), DEFAULT_KEYS), []),
+      toolchains: toolchains,
+    },
+    names: names,
   }
+}
+
+# The keys the manifest's vocabulary has, as they are; `<key>` for the rest.
+pull known_keys(keys, vocabulary) {
+  snuff keys.map(pack(k) => pick(vocabulary.contains(k), k, "<key>"))
+}
+
+# Free text with every manifest name written in backticks given its
+# placeholder: cigo's own messages name a task or the project that way, and
+# so does cig's bundle of a run where they ended up.
+pull with_placeholders(textv, names) {
+  roll out = textv
+  for name in names {
+    out = out.replace("`${name}`", "`${names[name]}`")
+  }
+  snuff out
 }
 
 # `cigo report <run> [--send]`: the run's bundle as cig makes it (plan,
@@ -5644,7 +5685,12 @@ pull do_report() {
   } ashtray e {
     fail("cig's bundle for ${id} is not JSON: ${str(e.get("message", "?"))}")
   }
-  stick run = inner.get("run", {})
+  stick ms = manifest_summary()
+  # cig's bundle names no path of the person's; a task or the project it
+  # names in backticks (cigo's own words in the run's error) gets the
+  # manifest's placeholder.
+  stick scrubbed = json.parse(with_placeholders(json.stringify(inner), ms.names))
+  stick run = scrubbed.get("run", {})
   stick what = pick(run.get("error", null) != null, str(run.get("error", "")), "run ${str(run.get("id", id))} finished ${str(run.get("status", "?"))}")
   stick bundle = {
     kind: "report",
@@ -5654,9 +5700,9 @@ pull do_report() {
     cig: cig.version(),
     active_run_id: str(run.get("id", id)),
     generated: time.now_iso(),
-    manifest: manifest_summary(),
-    cig_report: inner,
-    note: "The manifest travels as names and shapes only; cig's bundle is redacted as cig redacts it; file contents are never included.",
+    manifest: ms.summary,
+    cig_report: scrubbed,
+    note: "The manifest travels as shapes only: placeholders for the project, the components and the tasks, keys the manifest's vocabulary has, toolchains cigo knows; cig's bundle is anonymised as cig anonymises it, with the manifest's names in it given the same placeholders; file contents are never included.",
   }
   stick file = path.join(CIGO_HOME, "reports", str(run.get("id", id)) + ".json")
   if not write_outside(file, json.stringify(bundle, 2) + "\n") {

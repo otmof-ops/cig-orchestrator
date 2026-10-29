@@ -5,6 +5,23 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.1.1 — 2026-10-29
+
+Needs cig 1.7.1 (reports anonymised on every route, CigScript #103).
+
+- **Nothing of the person's in `cigo report`.** The manifest's summary named
+  the project, every component and every task, and a run's error named the
+  failing task; a client's or a project's name reached a public issue. The
+  summary is now shapes only: `<project>`, `c1`..., `t1`... for the names, a
+  key kept only when the manifest's vocabulary has it (`<key>` otherwise), a
+  toolchain only when cigo knows it (`<toolchain>` otherwise); and the task
+  or project a run's error names in backticks gets the same placeholder in
+  cig's bundle and in the report's title. cig 1.7.1 anonymises the rest of
+  the bundle on its side: every path a placeholder, a hop its program and
+  argument count, the command line the words cig knows. Test:
+  `cigo report --send carries no name of the person's: not a folder, a
+  file, a task or the project`.
+
 ## 1.1.0 — 2026-10-29
 
 Needs cig 1.7.0 (`cig crash submit`, the ashtray).

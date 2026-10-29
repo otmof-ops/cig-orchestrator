@@ -110,10 +110,13 @@ checkout is updated with `git pull` instead, and `update` says so.
 reports](#crash-reports).
 
 **`cigo report <run> [--send]`** bundles a run for an issue: cig's own
-report for it (plan, journal, diagnostic, doctor's diagnosis, redacted) with
-the manifest's shape beside it (component names and toolchains, task names
-and the keys each uses; never a value, a command or an argument), written
-under `~/.cig-orchestrator/reports/<run>.json`. `--send` files it through
+report for it (plan, journal, diagnostic, doctor's diagnosis, every path a
+placeholder) with the manifest's shape beside it: a placeholder for the
+project and for every component and task (`<project>`, `c1`, `t1`), the keys
+each uses when the manifest's vocabulary has them, the toolchains cigo
+knows; never a name, a value, a command, an argument, a path or a glob. A
+task the run's error names in backticks gets the same placeholder. Written
+under `~/.cig-orchestrator/reports/<run>.json`; `--send` files it through
 cig's ashtray as a report on `issues_repo`.
 
 **`cigo config`** reads and writes `~/.cig-orchestrator/config`:

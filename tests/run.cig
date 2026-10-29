@@ -58,6 +58,18 @@ pull fresh(fixture) {
   snuff dir
 }
 
+# A fresh copy of a fixture at a path of the test's choosing under
+# .test-work/, for a test about what a path's names must not reach.
+pull fresh_at(fixture, rel) {
+  copies += 1
+  stick dir = path.join(work, "${copies}-" + rel)
+  burn {
+    fs.mkdir(path.dir(dir))
+    fs.cp(path.join(root, fixture), dir)
+  }
+  snuff dir
+}
+
 # Any program, in `dir`, with this suite's own cig home: {code, out, err}.
 pull hop_env(dir, program, words, more) {
   roll r = null
@@ -2313,6 +2325,36 @@ test("cigo report <run> --send bundles the run with the manifest's shape and fil
   says(str(issue.title), "report [")
   says(str(issue.body), "cigscript-report")
   says(str(issue.body), "\"origin\": \"cig-orchestrator\"")
+})
+
+test("cigo report --send carries no name of the person's: not a folder, a file, a task or the project", pack() {
+  stick dir = fresh_at("tests/fixtures/chain", "zqx-clients/ZqxProject")
+  edit_manifest(dir, pack(m) {
+    m["project"] = "ZqxCorp"
+    m.tasks["zqx-deploy"] = {cmd: ["sh", "-c", "echo zqx-secret"], produces: ["zqx-out/ZqxResult.txt"], desc: "ships zqx"}
+  })
+  stick tracker = dir + "-tracker-zqx"
+  stick failing = tool_in(dir, ["run", "zqx-deploy"])
+  exits(failing, 1)
+  says(failing.err, "zqx-deploy")
+  stick id = str(last_run(dir).id)
+  stick s = hop_env(dir, "cig", ["run", tool, "--", "report", id, "--send"], {CIGO_HOME: cigo_home(dir), CIG_INTERNAL_TRACKER_DIR: tracker})
+  exits(s, 0)
+  says(s.err, "filed at ")
+  stick filed = fs.glob(path.join(tracker, "otmof-ops__cig-orchestrator", "*.json"))
+  assert(filed.len() == 1, "expected one issue, found ${filed.len()}")
+  stick issue = json.load(filed[0])
+  stick body = str(issue.body)
+  never_says(body.lower(), "zqx")
+  never_says(str(issue.title).lower(), "zqx")
+  # The shape stays: the project and the task as placeholders, the task's
+  # keys as the manifest's vocabulary, the error naming the task's placeholder.
+  says(body, "\"project\": \"<project>\"")
+  says(body, "\"produces\"")
+  says(body, "did not produce")
+  never_says(body, "echo")
+  stick written = json.load(path.join(cigo_home(dir), "reports", id + ".json"))
+  never_says(json.stringify(written).lower(), "zqx")
 })
 
 # ----- the end --------------------------------------------------------------
