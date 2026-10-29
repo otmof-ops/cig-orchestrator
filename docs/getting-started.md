@@ -10,7 +10,7 @@ needs the `cig` runtime, 1.7.0 or newer:
 
 ```sh
 # Review, then run (pinned to a release; never asks for sudo)
-curl -fsSL https://raw.githubusercontent.com/otmof-ops/CigScript/v1.7.0/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/otmof-ops/CigScript/v1.7.1/install.sh -o install.sh
 less install.sh && sh install.sh
 cig --version
 ```

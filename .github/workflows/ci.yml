@@ -22,7 +22,7 @@ jobs:
           - { os: macos-15-intel,   asset: macos-x86_64,   ext: "" }
           - { os: windows-latest,   asset: windows-x86_64, ext: ".exe" }
     env:
-      CIG_VERSION: v1.7.0
+      CIG_VERSION: v1.7.1
     defaults:
       run:
         shell: bash
@@ -88,7 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     container: alpine:latest
     env:
-      CIG_VERSION: v1.7.0
+      CIG_VERSION: v1.7.1
     steps:
       # git first: without it, checkout downloads a tarball and leaves no .git,
       # and the shell component's `git ls-files` has nothing to list.
