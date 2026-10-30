@@ -210,7 +210,7 @@ jobs:
           tar -czf "$dir.tar.gz" "$dir"
           sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
           cat "$dir.tar.gz.sha256"
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: cig-orchestrator-${{ github.ref_name }}.tar.gz
       - uses: softprops/action-gh-release@v2
