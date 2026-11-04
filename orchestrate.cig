@@ -29,7 +29,7 @@
 
 pack { "." }
 
-stick VERSION = "1.2.0"
+stick VERSION = "1.3.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
 stick CIG_NEEDS = ">=1.7.1"
 stick REPO = "otmof-ops/cig-orchestrator"
@@ -54,6 +54,10 @@ stick SETTINGS = {
     doc: "when a toolchain's installed version disagrees with the project's pin: ask (print the question and the commands that answer it; never in CI), always (run tasks on the pinned version through the version manager found), never (warn only), off (do not look)"},
   install: {values: ["never", "ask", "always"], default: "ask", floor: false, presets: {ci: "never"},
     doc: "when the version manager lacks the pinned version: ask (print the install command), always (install it), never"},
+  security: {values: ["off", "report", "standard", "strict"], default: "standard", floor: true, presets: {ci: "strict", paranoid: "strict", chill: "report"},
+    doc: "what the guard's verdict stops before a task runs: standard (critical refused; medium and high held at a terminal until approved, run with the report unattended), strict (also fail high unattended), report (say it, run anyway), off (do not look)"},
+  trust: {values: ["on", "off"], default: "on", floor: true, presets: {paranoid: "off"},
+    doc: "the trust store: a task approved as it is (its command, the scripts it names, its lockfiles) is not checked again; off checks every run"},
 }
 # The old shape, kept for the places that read a default and a doc.
 roll CONFIG_KEYS = {}
@@ -1918,7 +1922,7 @@ pull stage_deps(present, stage, order) {
 stick TOP_KEYS = ["project", "cig", "versions", "defaults", "settings", "components", "toolchains", "tasks"]
 stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms", "inputs_limit", "box"]
 stick COMPONENT_KEYS = ["path", "toolchain", "after", "stages", "env", "env_file", "groups", "timeout_ms", "retries", "retry_delay_ms", "desc"]
-stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "inputs_limit", "produces", "touches", "touches_sealed", "box", "encoding", "cmds", "rm", "each", "fail_on_output"]
+stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "inputs_limit", "produces", "touches", "touches_sealed", "box", "encoding", "cmds", "rm", "each", "fail_on_output", "trust", "footprint"]
 stick CAPTURES = ["text", "json", "lines", "kv"]
 stick TOOLCHAIN_KEYS = ["language", "short", "extends", "detect", "family", "priority", "auto", "kind", "workspace", "claims_subtree",
   "stages", "extras", "order", "vars", "scripts", "targets", "targets_run", "tools", "versions", "pins", "touches", "install", "note"]
@@ -2036,7 +2040,7 @@ pull component_task(comp_name, r, stage, spec, needs) {
       t[key] = c[key]
     }
   }
-  for key in ["ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "inputs_limit", "produces", "touches", "touches_sealed", "box", "desc", "unresolved", "cmds", "rm", "each", "fail_on_output"] {
+  for key in ["ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "inputs_limit", "produces", "touches", "touches_sealed", "box", "desc", "unresolved", "cmds", "rm", "each", "fail_on_output", "trust", "footprint"] {
     if spec.has(key) {
       t[key] = spec[key]
     }
@@ -3155,7 +3159,7 @@ pull run_task(ctx, name, index, total) {
 }
 
 pull do_run(g, wanted) {
-  expect_flags(["--only", "--force", "--strict", "--versions", "--install", "--box", "--no-box"])
+  expect_flags(["--only", "--force", "--strict", "--versions", "--install", "--box", "--no-box", "--accept-risk", "--run-untrusted", "--no-guard", "--plain"])
   if wanted.is_empty() {
     fail("run what? `cigo run <task>`, or one stage everywhere: `cigo run test`; `cigo list` shows them")
   }
@@ -3202,6 +3206,8 @@ pull do_run(g, wanted) {
       fail("${unquoted.len()} value" + pick(unquoted.len() == 1, "", "s") + " reach a shell line unquoted and CI is set, so nothing ran; write {{name|sh}}, or pass the value through `env`")
     }
   }
+  # The guard: what each task is about to run, read before anything runs.
+  guard_run(tasks, names)
   # Versions: where the project's pins and this machine disagree, switch
   # through a manager when the answer is yes, and warn about the rest.
   stick comps = components_of(tasks, names)
@@ -3530,6 +3536,10 @@ pull do_help() {
   exhale "  cigo plan [<task>...] [--only]"
   exhale "                              the order a run would take"
   exhale "  cigo show <task>            where a task comes from and everything it will do"
+  exhale "  cigo audit [<task>...] [--json]"
+  exhale "                              what the guard reads before a task runs: install hooks and findings, with codes"
+  exhale "  cigo trust [<task>|list|show <task>|revoke <task>|revoke --all]"
+  exhale "                              approve a task as it is now (signed with the tin's key), or see and drop approvals"
   exhale "  cigo check [--strict]       the manifest, checked before anything runs"
   exhale "  cigo doctor [--strict]      each toolchain: installed, which version, against the project's pins"
   exhale "  cigo versions [switch|keep|install [--yes]]"
@@ -3906,6 +3916,22 @@ pull do_check(g) {
     check_globs(name, t, "touches_sealed")
     if t.has("box") and type_of(t.box) != "bool" {
       problem("error", name, "`box` is true or false: whether the task runs over a copy-on-write layer on the project (cig's box, Linux)")
+    }
+    if t.has("trust") and str(t.trust) != "never" {
+      problem("error", name, "`trust` is \"never\": the guard checks this task on every run, approved or not")
+    }
+    if t.has("footprint") {
+      if type_of(t.footprint) != "map" {
+        problem("error", name, "`footprint` is a map of lists: writes, reads, network, execs (what this task is known to do beyond its toolchain's)")
+      } else {
+        for k in t.footprint.keys() {
+          if not ["writes", "reads", "network", "execs"].contains(k) {
+            problem("error", name, "`footprint.${k}` is not a footprint key (writes, reads, network, execs)")
+          } else if type_of(t.footprint[k]) != "list" {
+            problem("error", name, "`footprint.${k}` is a list")
+          }
+        }
+      }
     }
   }
   pull check_globs(name, t, key) {
@@ -5278,6 +5304,555 @@ pull do_toolchains() {
 # crash report has to survive the rollback that follows the crash.
 
 stick CIGO_HOME = env.get("CIGO_HOME", path.join(fs.home(), ".cig-orchestrator"))
+
+# ----- the guard: what a task is about to run, read before it runs -----------------------
+#
+# Before a task runs, the guard asks cheap questions in order. Is this exact
+# task approved already (its command as written, the scripts it names, its
+# component's lockfiles, hashed into one key)? What do its own text and its
+# install hooks say, against patterns real attacks use (the rules, as data,
+# scored per category)? The verdict's friction matches the risk: none and
+# low run; medium and high are held at a terminal until approved (`cigo
+# trust <task>`, or `--accept-risk` for one run) and run with the report
+# unattended (security = strict fails high there); critical is refused, and
+# `--run-untrusted=<task>` runs it anyway at a terminal. An approval is
+# signed with a key derived from the tin's (`cig tin mac`), which nothing a
+# task runs can make: in the box the key folder is empty.
+
+stick TRUST_DIR = path.join(CIGO_HOME, "trust")
+stick TRUST_LABEL = "cigo-trust"
+stick SCRIPT_EXTS = [".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".ps1", ".cig"]
+# The scripts whose text the static read looks into: a CigScript file is
+# left to cig (its effects run under cig's own journal), and a rule table
+# would match itself.
+stick SCAN_EXTS = [".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".ps1"]
+stick LOCKFILES = ["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "deno.lock", "uv.lock", "poetry.lock", "pdm.lock", "Pipfile.lock", "requirements.txt", "Cargo.lock", "go.sum", "Gemfile.lock", "composer.lock", "gradle.lockfile", "packages.lock.json"]
+stick RISKS = ["none", "low", "medium", "high", "critical"]
+
+# The static read's rules: a pattern real attacks use, its code, its
+# category and its weight. Scored per category, never summed blindly.
+stick RULES = [
+  {id: "fetch-run-sh", code: "E874", cat: "fetch-and-run", w: 0.6, re: '(curl|wget)\s[^|\n]*\|\s*(sudo\s+)?(ba|z|da)?sh\b', says: "downloads and runs whatever that server sends today"},
+  {id: "fetch-run-iex", code: "E874", cat: "fetch-and-run", w: 0.6, re: '(?i)\b(iwr|invoke-webrequest|invoke-restmethod)\b[^|\n]*\|\s*iex\b', says: "downloads and runs whatever that server sends today"},
+  {id: "fetch-run-python", code: "E874", cat: "fetch-and-run", w: 0.6, re: 'python3?\s+-c\s+.{0,4}\$\((curl|wget)\s', says: "runs code fetched from the network"},
+  {id: "obf-decode-run", code: "E875", cat: "obfuscation", w: 0.7, re: 'base64\s+(-d|--decode)[^\n]*\|\s*(sudo\s+)?(ba|z|da)?sh\b|\beval\s*\(\s*(atob|Buffer\.from)\s*\(|\bexec\s*\(\s*(base64\.b64decode|bytes\.fromhex|codecs\.decode)', says: "decodes something and runs it, so the text cannot be read as it is"},
+  {id: "obf-charcodes", code: "E875", cat: "obfuscation", w: 0.6, re: 'String\.fromCharCode\((\s*\d+\s*,){8,}|(\\x[0-9a-fA-F]{2}){16,}', says: "code assembled from character codes or hex escapes"},
+  {id: "cred-ssh", code: "E871", cat: "credentials", w: 0.8, re: '(~|\$HOME|%USERPROFILE%)[/\\]+\.ssh\b|/\.ssh/id_[a-z0-9]+', says: "names an SSH key"},
+  {id: "cred-cloud", code: "E871", cat: "credentials", w: 0.8, re: '\.aws[/\\]credentials|\.config[/\\]gcloud|\.azure[/\\]|\.kube[/\\]config|\.docker[/\\]config\.json|\.git-credentials|(~|\$HOME)[/\\]\.netrc\b|(~|\$HOME)[/\\]\.npmrc\b|\.pypirc\b|\.cargo[/\\]credentials', says: "names a cloud, registry or git credential file"},
+  {id: "cred-browser", code: "E871", cat: "credentials", w: 0.7, re: '(Login Data|logins\.json|key[34]\.db|Local State|Cookies\.sqlite)\b', says: "names a browser's credential store"},
+  {id: "persist-rc", code: "E873", cat: "persistence", w: 0.8, re: '>>?\s*(~|\$HOME|%USERPROFILE%)[/\\]\.(bashrc|bash_profile|profile|zshrc|zprofile|zshenv)\b|\.config[/\\]fish[/\\]config\.fish', says: "writes a shell startup file, which runs again at every login"},
+  {id: "persist-sched", code: "E873", cat: "persistence", w: 0.8, re: '\bcrontab\s+-|/etc/cron\.|[/\\]systemd[/\\]user[/\\]|LaunchAgents[/\\]|CurrentVersion\\Run\b|\\Startup\\|schtasks\s+/create', says: "schedules itself to run again later"},
+  {id: "persist-hook", code: "E873", cat: "persistence", w: 0.8, re: '\.git[/\\]hooks[/\\]', says: "writes a git hook, which runs on the next commit or push"},
+  {id: "exfil-sites", code: "E872", cat: "exfiltration", w: 0.8, re: '(?i)(pastebin\.com|transfer\.sh|ngrok\.io|requestbin|webhook\.site|pipedream\.net|hooks\.slack\.com|discord(app)?\.com/api/webhooks|api\.telegram\.org/bot|burpcollaborator|oastify\.com)', says: "talks to a paste site, a webhook catcher or a chat webhook"},
+  {id: "exfil-rawip", code: "E872", cat: "exfiltration", w: 0.6, re: 'https?://(\d{1,3}\.){3}\d{1,3}(:\d+)?(/|\s|$)', says: "talks to a raw address rather than a named host"},
+  {id: "destr-rm", code: "E877", cat: "destructive", w: 0.9, re: '\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+|-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s+)(/|~|\$HOME|\*)(\s|$|["\x27])', says: "removes the home, the root or everything here, recursively"},
+  {id: "priv-sudo", code: "E878", cat: "privilege", w: 0.6, re: '(^|[;&|(\s])(sudo|doas)\s|\bchmod\s+[ugoa]*\+s\b|\bsetuid\s*\(', says: "asks for root in a step that has no business becoming root"},
+  {id: "self-tin", code: "E879", cat: "self-defense", w: 1.0, re: '\b(rm|unlink|mv|cp|chmod|chown|truncate|shred|rmdir|del|tee)\s[^\n]*\.cig(script|-orchestrator)[/\\](tin|runs|keys|config|inbox|trust)\b|>\s*[^\s]*\.cig(script|-orchestrator)[/\\](tin|runs|keys|config|inbox|trust)\b|\b(p?kill|killall)\s+[^\n]*\b(cig|cigo)\b', says: "acts on cig's or cigo's own state, or kills them by name"},
+  {id: "pi-addressed", code: "E886", cat: "prompt-injection", w: 0.7, re: '(?i)\b(ignore|disregard)\s+(all\s+|any\s+|the\s+)?(previous|prior|above|earlier)\s+(instructions|prompts|rules)|\byou are (an?|the) (ai|assistant|language model)\b|\bas an ai\b|\bsystem prompt\b|<\|im_start\|>|\[INST\]|<<SYS>>', says: "text addressed to an AI agent, telling it what to do"},
+  {id: "pi-invisible", code: "E887", cat: "prompt-injection", w: 0.8, re: '[\x{E0020}-\x{E007F}]{4,}|[\x{200B}\x{200C}\x{200D}\x{2060}]{3,}|[\x{202A}-\x{202E}\x{2066}-\x{2069}]', says: "invisible Unicode text, which a reader cannot see and an agent can"},
+]
+
+# One line of character for the top finding at a terminal; plain words
+# everywhere else and under every headline. Rotated so the same code does
+# not say the same thing twice in a row.
+stick HEADLINES = {
+  E871: ["going through your pockets", "fingers in the till"],
+  E872: ["tried to pass it out the window", "calling someone it shouldn't"],
+  E873: ["trying to move in", "left a lit one where it will be found again"],
+  E874: ["rolling unknown leaf", "lighting whatever the server sends"],
+  E875: ["can't read the label", "the wrapper hides the contents"],
+  E877: ["torching the place"],
+  E878: ["asking for the good stuff", "wants the keys to the cabinet"],
+  E879: ["eyeing the tin", "going for the stash"],
+  E886: ["someone's whispering to your agent"],
+  E887: ["fine print in invisible ink"],
+}
+stick PLAIN = {E871: "credential file named", E872: "exfiltration pattern", E873: "persistence", E874: "downloads and executes remote code", E875: "obfuscated code", E877: "destructive command", E878: "privilege escalation", E879: "references cig's or cigo's own state", E886: "text addressed to AI agents", E887: "invisible Unicode text"}
+roll SAID = {}
+roll TRUST_NOTED = false
+
+pull guard_on() {
+  snuff config().security != "off" and not flags.contains("--no-guard")
+}
+
+pull voice() {
+  snuff attended() and not flags.contains("--plain") and not flags.contains("--json")
+}
+
+# `--flag` alone is "*", `--flag=value` is the value, absent is null.
+pull guard_flag(name) {
+  for f in flags {
+    if f == name {
+      snuff "*"
+    }
+    if f.starts_with(name + "=") {
+      snuff f.slice(name.len() + 1)
+    }
+  }
+  snuff null
+}
+
+pull task_cwd(t) {
+  stick cwd = str(t.get("cwd", "."))
+  snuff pick(cwd == "", ".", cwd)
+}
+
+pull task_dir(t) {
+  stick cwd = task_cwd(t)
+  snuff pick(cwd == ".", ROOT, path.join(ROOT, cwd))
+}
+
+# Every word a task's command is made of, as written in the manifest.
+pull task_words(t) {
+  roll words = []
+  if t.has("cmd") {
+    words = words + as_list(argv_of(t.cmd) ?? []).map(pack(w) => str(w))
+  }
+  if t.has("cmds") {
+    for c in as_list(t.cmds) {
+      words = words + as_list(argv_of(c) ?? []).map(pack(w) => str(w))
+    }
+  }
+  if t.has("shell") {
+    words = words + str(t.shell).split(" ")
+  }
+  snuff words
+}
+
+# The script files a task names that are here: part of what it is.
+pull task_files(t) {
+  roll files = []
+  stick dir = task_dir(t)
+  for w in task_words(t) {
+    stick clean = w.replace('"', "").replace("'", "").replace(";", "")
+    if SCRIPT_EXTS.any(pack(e) => clean.ends_with(e)) {
+      stick p = pick(path.is_abs(clean), clean, path.join(dir, clean))
+      if fs.is_file(p) and not files.contains(p) {
+        files.push(p)
+      }
+    }
+  }
+  snuff files
+}
+
+# The lockfiles beside the task and at the project root: what a setup
+# stage resolves to.
+pull task_lockfiles(t) {
+  roll found = []
+  for dir in [task_dir(t), ROOT] {
+    for name in LOCKFILES {
+      stick p = path.join(dir, name)
+      if fs.is_file(p) and not found.contains(p) {
+        found.push(p)
+      }
+    }
+  }
+  snuff found
+}
+
+pull file_digest(p) {
+  try {
+    snuff hash.sha256(fs.read_text(p))
+  } ashtray e {
+    snuff "unreadable"
+  }
+}
+
+# The trust key: what the task is, hashed. Its command as written, the
+# names of its environment, the scripts it names, its lockfiles. One byte
+# of any of them changes the key, so a version is checked once, never
+# every run.
+pull trust_key(t, name) {
+  roll parts = ["cigo-trust-1", name]
+  for k in ["cmd", "shell", "cmds", "cwd", "rm", "each", "stdin", "stdin_from"] {
+    if t.has(k) {
+      parts.push(k + "=" + json.stringify(t[k]))
+    }
+  }
+  stick envs = t.get("env", {})
+  if type_of(envs) == "map" {
+    parts.push("env=" + envs.keys().sort().join(","))
+  }
+  for f in task_files(t) {
+    parts.push("file:" + f + "=" + file_digest(f))
+  }
+  for f in task_lockfiles(t) {
+    parts.push("lock:" + f + "=" + file_digest(f))
+  }
+  snuff hash.sha256(parts.join("\n"))
+}
+
+pull trust_files(key) {
+  snuff {json: path.join(TRUST_DIR, key + ".json"), mac: path.join(TRUST_DIR, key + ".mac")}
+}
+
+# `cig tin mac`: a MAC under a subkey of the tin's key for cigo's label, or
+# a check of one. Exit 0 is a MAC (or a match), 1 a mismatch, anything else
+# a cig that cannot (before 1.11.0, or no key here).
+pull tin_mac(file, check) {
+  roll words = ["tin", "mac", file, "--label", TRUST_LABEL]
+  if check != null {
+    words = words + ["--check", check]
+  }
+  roll r = null
+  burn {
+    try {
+      r = proc.run("cig", words, {timeout_ms: 30000})
+    } ashtray e {
+      r = {code: -1, out: "", err: e.message}
+    }
+  }
+  snuff r
+}
+
+# Is this task approved as it is now? A record that does not verify under
+# this machine's key is a forged approval (E889): ignored and said.
+pull trusted(t, name) {
+  stick key = trust_key(t, name)
+  if config().trust == "off" or str(t.get("trust", "")) == "never" {
+    snuff {trusted: false, key: key}
+  }
+  stick f = trust_files(key)
+  if not fs.is_file(f.json) or not fs.is_file(f.mac) {
+    snuff {trusted: false, key: key}
+  }
+  stick r = tin_mac(f.json, fs.read_text(f.mac).trim())
+  if r.code == 0 {
+    snuff {trusted: true, key: key}
+  }
+  if r.code == 1 {
+    log.warn("E889 a forged approval: ${tilde(f.json)} is not signed by your key; ignored (cigo trust revoke ${name} removes it)")
+  } else if not TRUST_NOTED {
+    TRUST_NOTED = true
+    log.warn("the trust store is checked with cig 1.11.0 or later (cig tin mac); this cig cannot, so every task is checked")
+  }
+  snuff {trusted: false, key: key}
+}
+
+# Write the approval and sign it. False when it could not be signed (an
+# older cig, or no key here): the run goes on, the approval is not kept.
+pull approve(t, name, verdict) {
+  stick key = trust_key(t, name)
+  stick f = trust_files(key)
+  stick rec = {key: key, task: name, project: ROOT, at: time.now_iso(), by: "cig-orchestrator ${VERSION}", risk: verdict.risk, findings: verdict.findings.map(pack(x) => x.code + " " + x.where)}
+  if not write_outside(f.json, json.stringify(rec, 2) + "\n") {
+    fail("could not write ${f.json}")
+  }
+  stick r = tin_mac(f.json, null)
+  if r.code != 0 {
+    remove_outside(f.json)
+    log.warn("the approval of `${name}` was not kept: it could not be signed (" + r.err.trim() + "); cig 1.11.0 or later signs the trust store")
+    snuff false
+  }
+  if not write_outside(f.mac, r.out.trim() + "\n") {
+    fail("could not write ${f.mac}")
+  }
+  log.info("approved `${name}` as it is now (key ${key.slice(0, 12)}); a change to its command, scripts or lockfiles is checked again")
+  snuff true
+}
+
+# The install hooks a setup stage would run: what the packages installed
+# here declare (read after a first install; before it, the lockfile names
+# them and the rehearsal, when it lands, sees them run), and the build
+# scripts beside the component.
+pull install_hooks(t) {
+  roll hooks = []
+  stick cwd = task_cwd(t)
+  for rel in glob_under(cwd, "node_modules/*/package.json") + glob_under(cwd, "node_modules/@*/*/package.json") {
+    try {
+      stick pj = json.parse(unbom(fs.read_text(path.join(ROOT, rel))))
+      stick scripts = pj.get("scripts", {})
+      if type_of(scripts) == "map" {
+        for k in ["preinstall", "install", "postinstall"] {
+          if scripts.has(k) {
+            hooks.push({where: str(pj.get("name", rel)) + " " + k, text: str(scripts[k])})
+          }
+        }
+      }
+    } ashtray e {
+    }
+  }
+  for f in ["setup.py", "build.rs"] {
+    stick p = path.join(task_dir(t), f)
+    if fs.is_file(p) {
+      try {
+        hooks.push({where: f, text: fs.read_text(p)})
+      } ashtray e {
+      }
+    }
+  }
+  snuff hooks
+}
+
+# The static read: the task's own text, the scripts it names, and for a
+# setup stage its install hooks, against the rules. Each hit is a finding
+# with its code, where it was and the text that matched.
+pull static_read(t, name) {
+  roll sources = []
+  if t.has("shell") {
+    sources.push({where: "shell", text: str(t.shell)})
+  }
+  stick words = task_words(t)
+  if not words.is_empty() and not t.has("shell") {
+    sources.push({where: "cmd", text: words.join(" ")})
+  }
+  for f in task_files(t).filter(pack(p) => SCAN_EXTS.any(pack(e) => p.ends_with(e))) {
+    try {
+      sources.push({where: tilde(f), text: fs.read_text(f)})
+    } ashtray e {
+    }
+  }
+  roll hooks = []
+  if str(t.get("stage", "")) == "setup" {
+    hooks = install_hooks(t)
+    for h in hooks {
+      sources.push({where: h.where, text: h.text})
+    }
+  }
+  roll findings = []
+  for s in sources {
+    roll n = 0
+    for line in s.text.lines() {
+      n += 1
+      stick bare = line.trim()
+      stick comment = s.where != "shell" and s.where != "cmd" and (bare.starts_with("#") or bare.starts_with("//"))
+      for rule in RULES {
+        if not comment and text.matches(line, rule.re) {
+          stick where = pick(s.where == "shell" or s.where == "cmd", s.where, s.where + ":" + str(n))
+          findings.push({code: rule.code, cat: rule.cat, w: rule.w, rule: rule.id, where: where, text: clip(line.trim(), 120), says: rule.says})
+        }
+      }
+    }
+  }
+  snuff {risk: risk_of(findings), findings: findings, hooks: hooks}
+}
+
+# Scored per category: self-defense, or credentials with exfiltration, is
+# critical; the heaviest single finding sets the rest.
+pull risk_of(findings) {
+  if findings.is_empty() {
+    snuff "none"
+  }
+  stick cats = findings.map(pack(f) => f.cat)
+  if cats.contains("self-defense") or (cats.contains("credentials") and cats.contains("exfiltration")) or findings.any(pack(f) => f.code == "E870") {
+    snuff "critical"
+  }
+  roll top = 0.0
+  for f in findings {
+    if f.w > top {
+      top = f.w
+    }
+  }
+  if top >= 0.8 {
+    snuff "high"
+  }
+  if top >= 0.5 {
+    snuff "medium"
+  }
+  snuff "low"
+}
+
+pull top_finding(findings) {
+  roll top = findings.first()
+  for f in findings {
+    if f.w > top.w {
+      top = f
+    }
+  }
+  snuff top
+}
+
+pull headline(f) {
+  if voice() and HEADLINES.has(f.code) {
+    stick lines = HEADLINES[f.code]
+    stick n = SAID.get(f.code, 0)
+    SAID[f.code] = n + 1
+    snuff lines[n % lines.len()] + ": " + f.where
+  }
+  snuff PLAIN.get(f.code, f.cat) + ": " + f.where
+}
+
+# The verdict as the person reads it: one line of character at a terminal,
+# then the plain evidence under it, then what to do.
+pull report_verdict(name, v) {
+  stick top = top_finding(v.findings)
+  exhale "cigo: `${name}` is rated ${v.risk} by the guard; " + headline(top)
+  for f in v.findings {
+    exhale "  ${f.code}  ${f.cat}  ${f.where}: ${f.text}"
+    exhale "        ${f.says}"
+  }
+}
+
+pull refuse(message) {
+  log.error(message)
+  cough {message: message, exit_code: 1}
+}
+
+# The pass over a run's tasks, before anything runs.
+pull guard_run(tasks, names) {
+  if not guard_on() {
+    snuff
+  }
+  stick mode = config().security
+  stick accept = guard_flag("--accept-risk")
+  stick untrusted = guard_flag("--run-untrusted")
+  for n in names {
+    stick t = tasks[n]
+    if not t.get("group", false) {
+      stick tr = trusted(t, n)
+      if not tr.trusted {
+        stick v = static_read(t, n)
+        if v.risk != "none" {
+          report_verdict(n, v)
+          if v.risk == "low" or mode == "report" {
+            exhale "  it runs (" + pick(mode == "report", "security = report", "rated low") + ")"
+          } else if v.risk == "critical" {
+            if untrusted == n and attended() {
+              log.warn("running `${n}` although it is rated critical (--run-untrusted=${n}); no backup of the tin was taken first")
+            } else {
+              refuse("`${n}` is refused: rated critical by the guard. cigo audit ${n} shows the evidence; at a terminal, cigo run ${n} --run-untrusted=${n} runs it anyway")
+            }
+          } else {
+            stick accepted = accept == n or (accept == "*" and v.risk == "medium")
+            if accepted and attended() {
+              approve(t, n, v)
+            } else if attended() {
+              refuse("`${n}` is held: rated ${v.risk} by the guard. cigo trust ${n} approves it as it is now; cigo run ${n} --accept-risk" + pick(v.risk == "high", "=${n}", "") + " runs it once")
+            } else if mode == "strict" and v.risk == "high" {
+              refuse("`${n}` is rated high by the guard and security = strict, unattended; nothing ran")
+            } else {
+              log.warn("`${n}` is rated ${v.risk} by the guard; it runs (security = ${mode}, unattended)")
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+# `cigo audit [<task>...]`: the guard's read of each task, with nothing run.
+pull do_audit(g) {
+  expect_flags(["--json", "--plain"])
+  roll names = targets
+  if names.is_empty() {
+    names = g.tasks.keys().sort().filter(pack(n) => not g.tasks[n].get("group", false) and not g.tasks[n].get("bad", false))
+  }
+  roll all = {}
+  roll worst = "none"
+  for n in names {
+    if not g.tasks.has(n) {
+      fail("no task `${n}`; `cigo list` shows them")
+    }
+    stick t = g.tasks[n]
+    stick v = static_read(t, n)
+    stick tr = pick(config().trust == "off", {trusted: false, key: trust_key(t, n)}, trusted(t, n))
+    all[n] = {risk: v.risk, trusted: tr.trusted, key: tr.key, hooks: v.hooks.map(pack(h) => h.where), findings: v.findings}
+    if RISKS.index_of(v.risk) > RISKS.index_of(worst) {
+      worst = v.risk
+    }
+    if not flags.contains("--json") {
+      exhale "${n}: ${v.risk}" + pick(tr.trusted, " (approved as it is now)", "") + pick(v.hooks.is_empty(), "", "; ${v.hooks.len()} install hook" + pick(v.hooks.len() == 1, "", "s") + ": " + v.hooks.map(pack(h) => h.where).join(", "))
+      for f in v.findings {
+        exhale "  ${f.code}  ${f.cat}  ${f.where}: ${f.text}"
+        exhale "        ${f.says}"
+      }
+    }
+  }
+  if flags.contains("--json") {
+    exhale json.stringify({worst: worst, tasks: all}, 2)
+  } else if names.len() > 1 {
+    exhale "worst: ${worst}"
+  }
+}
+
+# `cigo trust`: see, give and take back approvals.
+pull do_trust(g) {
+  expect_flags(["--all", "--json", "--plain"])
+  stick sub = targets.get(0, "")
+  if sub == "" or sub == "list" {
+    roll recs = []
+    if fs.is_dir(TRUST_DIR) {
+      for f in fs.list(TRUST_DIR).sort() {
+        if f.ends_with(".json") {
+          try {
+            recs.push(json.parse(fs.read_text(path.join(TRUST_DIR, f))))
+          } ashtray e {
+          }
+        }
+      }
+    }
+    if flags.contains("--json") {
+      exhale json.stringify(recs, 2)
+    } else if recs.is_empty() {
+      exhale "no approvals (cigo trust <task> approves one as it is now; cigo run <task> --accept-risk after a verdict does too)"
+    } else {
+      for r in recs {
+        exhale "${str(r.get("task", "?"))}  ${str(r.get("risk", ""))}  ${str(r.get("at", ""))}  ${tilde(str(r.get("project", "")))}  (key ${str(r.get("key", "")).slice(0, 12)})"
+      }
+    }
+    snuff
+  }
+  if sub == "show" {
+    stick name = targets.get(1, "")
+    if name == "" or not g.tasks.has(name) {
+      fail("cigo trust show <task>; `cigo list` shows them")
+    }
+    stick key = trust_key(g.tasks[name], name)
+    stick f = trust_files(key)
+    if not fs.is_file(f.json) {
+      exhale "`${name}` is not approved as it is now (key ${key.slice(0, 12)})"
+      snuff
+    }
+    exhale fs.read_text(f.json).trim()
+    stick r = tin_mac(f.json, pick(fs.is_file(f.mac), fs.read_text(f.mac).trim(), ""))
+    exhale pick(r.code == 0, "signature: matches your key", pick(r.code == 1, "signature: does NOT match your key (E889): ignored", "signature: not checked (cig 1.11.0 or later checks it)"))
+    snuff
+  }
+  if sub == "revoke" {
+    if flags.contains("--all") {
+      roll n = 0
+      if fs.is_dir(TRUST_DIR) {
+        for f in fs.list(TRUST_DIR) {
+          if f.ends_with(".json") or f.ends_with(".mac") {
+            remove_outside(path.join(TRUST_DIR, f))
+            n += 1
+          }
+        }
+      }
+      exhale "revoked every approval (${n} file" + pick(n == 1, "", "s") + ")"
+      snuff
+    }
+    stick name = targets.get(1, "")
+    if name == "" or not g.tasks.has(name) {
+      fail("cigo trust revoke <task>|--all")
+    }
+    stick key = trust_key(g.tasks[name], name)
+    stick f = trust_files(key)
+    if not fs.is_file(f.json) {
+      exhale "`${name}` was not approved as it is now; nothing to revoke"
+      snuff
+    }
+    remove_outside(f.json)
+    remove_outside(f.mac)
+    exhale "revoked the approval of `${name}`"
+    snuff
+  }
+  # `cigo trust <task>`: the verdict, then the approval.
+  if not g.tasks.has(sub) {
+    fail("cigo trust <task>|list|show <task>|revoke <task>|--all; `cigo list` shows the tasks")
+  }
+  stick t = g.tasks[sub]
+  stick v = static_read(t, sub)
+  if v.risk == "none" {
+    exhale "`${sub}` has no findings; approved as it is now so it is not read again"
+  } else {
+    report_verdict(sub, v)
+    if v.risk == "critical" {
+      refuse("`${sub}` is rated critical; that is not approved. cigo run ${sub} --run-untrusted=${sub} runs it once, at a terminal")
+    }
+  }
+  approve(t, sub, v)
+}
 stick CRASHES = path.join(CIGO_HOME, "crashes")
 stick CONFIG_FILE = path.join(CIGO_HOME, "config")
 # Every key `cigo config` accepts: its default and its meaning. The same
@@ -6359,10 +6934,14 @@ pull dispatch() {
     do_adopt()
   } else if command == "outputs" {
     do_outputs()
-  } else if ["list", "show", "plan", "check", "doctor", "run", "versions"].contains(command) {
+  } else if ["list", "show", "plan", "check", "doctor", "run", "versions", "audit", "trust"].contains(command) {
     stick g = build_graph(load())
     if command == "list" {
       do_list(g)
+    } else if command == "audit" {
+      do_audit(g)
+    } else if command == "trust" {
+      do_trust(g)
     } else if command == "versions" {
       do_versions(g)
     } else if command == "show" {

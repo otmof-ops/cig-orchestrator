@@ -5,6 +5,46 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.3.0 — 2026-11-05
+
+The guard, first half (#55 steps 1, 2 and 4): a task is read before it
+runs, the verdict's friction matches the risk, and an approval is signed
+with the tin's key.
+
+- **The static read.** Before a task runs, its command as written, the
+  scripts it names (shell, Python, JavaScript, Ruby, Perl, PowerShell; a
+  CigScript file is left to cig) and, for a setup stage, the install hooks
+  of the packages installed here (`node_modules/*/package.json` scripts,
+  `setup.py`, `build.rs`) are read against the rules: patterns real attacks
+  use, as data, each with its code (`E871`–`E887`, registered in cig 1.11.0
+  so `cig explain` knows them), its category and its weight. Scored per
+  category: acting on cig's or cigo's own state, or credentials with
+  exfiltration, is critical; the heaviest finding sets the rest. Comment
+  lines are skipped. `cigo audit [<task>...] [--json]` shows the read with
+  nothing run.
+- **The verdict and its friction.** `security` (a floored setting:
+  `standard`; `strict` under CI; `report`; `off`): none and low run; medium
+  and high are held at a terminal until approved (`cigo trust <task>`, or
+  `--accept-risk` for one run, `--accept-risk=<task>` for high) and run with
+  the report unattended (`strict` fails high there); critical is refused,
+  and `--run-untrusted=<task>` runs it anyway at a terminal, saying that no
+  backup of the tin was taken. One line of character for the top finding at
+  a terminal, plain evidence under it, plain everywhere else. `--no-guard`
+  skips the read for one run.
+- **The trust store.** An approval is the task as it is: its command, the
+  names of its environment, the scripts it names and its lockfiles, hashed
+  into one key, kept under `~/.cig-orchestrator/trust/` and signed with
+  `cig tin mac` under a subkey of the tin's key. An approved task costs one
+  hash lookup; a changed byte is checked again; a record that does not
+  verify is a forged approval (`E889`), ignored and said. `cigo trust
+  [<task>|list|show <task>|revoke <task>|--all]`; `trust` (`on`, `off`) and
+  per task `trust: "never"`. Below cig 1.11.0 the store cannot be signed,
+  and every task is checked.
+- **The manifest** gains `trust` and `footprint` (writes, reads, network,
+  execs: what a task is known to do beyond its toolchain's), validated by
+  `cigo check`; the footprint feeds the rehearsal, which lands next with
+  OSV checks and the tin backup.
+
 ## 1.2.0 — 2026-11-05
 
 The config model the security work rests on (#66, step 1): one way to

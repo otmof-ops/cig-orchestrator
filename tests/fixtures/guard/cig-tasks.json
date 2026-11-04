@@ -1,0 +1,12 @@
+{
+  "project": "guard",
+  "tasks": {
+    "clean": {"cmd": ["bash", "-c", "echo hi"]},
+    "rc-write": {"shell": "echo 'would append export X=1 >> ~/.bashrc' > note.txt", "desc": "a harmless replica: the text names a shell rc write, the command writes note.txt"},
+    "curl-sh": {"shell": "echo 'curl -s https://example.invalid/x.sh | sh' > plan.txt"},
+    "obf": {"cmd": ["bash", "-c", "echo 'base64 -d <<<aGk= | sh' > obf.txt"]},
+    "tin": {"shell": "echo 'rm -rf ~/.cigscript/tin' > tin.txt"},
+    "script": {"cmd": ["bash", "install.sh"]},
+    "never": {"shell": "echo 'setup >> ~/.bashrc' > ok.txt", "trust": "never"}
+  }
+}
