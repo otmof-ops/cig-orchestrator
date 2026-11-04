@@ -29,12 +29,45 @@
 
 pack { "." }
 
-stick VERSION = "1.1.1"
+stick VERSION = "1.2.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
 stick CIG_NEEDS = ">=1.7.1"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
+
+# Every setting, in one model. `values` runs from the loosest to the
+# tightest where the order matters (a project may only move right along it:
+# the security floor); null means free text. `presets` names what each
+# preset sets; a preset that leaves a key alone takes the default.
+stick PRESETS = ["chill", "balanced", "strict", "paranoid", "ci", "agent-heavy", "research"]
+stick SETTINGS = {
+  preset: {values: PRESETS, default: "balanced", floor: false, presets: {},
+    doc: "the bundle of defaults every other setting starts from: chill, balanced, strict, paranoid, ci, agent-heavy, research"},
+  crash_reports: {values: ["always", "ask", "never"], default: "ask", floor: false, presets: {ci: "never"},
+    doc: "what to do with a crash report: ask (print how to look at it and send it), always (file it without asking), never (keep it local only)"},
+  issues_repo: {values: null, default: REPO, floor: false, presets: {},
+    doc: "GitHub repository that receives crash reports (owner/name)"},
+  update_channel: {values: ["prerelease", "stable"], default: "stable", floor: false, presets: {},
+    doc: "which releases `cigo update` considers: stable, or prerelease"},
+  versions: {values: ["off", "never", "ask", "always"], default: "ask", floor: true, presets: {chill: "never", ci: "never", paranoid: "always"},
+    doc: "when a toolchain's installed version disagrees with the project's pin: ask (print the question and the commands that answer it; never in CI), always (run tasks on the pinned version through the version manager found), never (warn only), off (do not look)"},
+  install: {values: ["never", "ask", "always"], default: "ask", floor: false, presets: {ci: "never"},
+    doc: "when the version manager lacks the pinned version: ask (print the install command), always (install it), never"},
+}
+# The old shape, kept for the places that read a default and a doc.
+roll CONFIG_KEYS = {}
+for k in SETTINGS {
+  CONFIG_KEYS[k] = [SETTINGS[k].default, SETTINGS[k].doc]
+}
+stick LAYERS = ["default", "preset", "system", "user", "project", "env"]
+# Where an administrator's settings live; `!locked` after a value makes it
+# final for every later layer.
+stick SYSTEM_CONFIG = env.get("CIGO_SYSTEM_CONFIG", pick(cig.os() == "windows", "C:/ProgramData/cigscript/cigo.conf", "/etc/cigscript/cigo.conf"))
+# The project's `settings`, set when a manifest is loaded (load()).
+roll PROJECT_SETTINGS = {}
+# Project settings a layer below refused (the floor): [{key, wanted, kept}].
+roll FLOORED = []
 stick ROOT = fs.cwd()
 # The `versions` and `install` settings (the switch to pinned toolchain
 # versions, below) and where the answer and the version probes are kept.
@@ -1882,7 +1915,7 @@ pull stage_deps(present, stage, order) {
 
 # ----- the manifest ---------------------------------------------------------------
 
-stick TOP_KEYS = ["project", "cig", "versions", "defaults", "components", "toolchains", "tasks"]
+stick TOP_KEYS = ["project", "cig", "versions", "defaults", "settings", "components", "toolchains", "tasks"]
 stick DEFAULT_KEYS = ["timeout_ms", "retries", "retry_delay_ms", "inputs_limit", "box"]
 stick COMPONENT_KEYS = ["path", "toolchain", "after", "stages", "env", "env_file", "groups", "timeout_ms", "retries", "retry_delay_ms", "desc"]
 stick TASK_KEYS = ["cmd", "shell", "needs", "desc", "source", "cwd", "env", "env_file", "timeout_ms", "retries", "retry_delay_ms", "ok", "undo", "undo_shell", "capture", "stdin", "stdin_from", "inputs", "inputs_limit", "produces", "touches", "touches_sealed", "box", "encoding", "cmds", "rm", "each", "fail_on_output"]
@@ -1953,6 +1986,10 @@ pull load() {
   }
   if type_of(m) != "map" or (type_of(m.get("tasks", null)) != "map" and type_of(m.get("components", null)) != "map") {
     fail("${MANIFEST} needs `components` or `tasks`, like {\"components\": {\"api\": {\"path\": \"api\", \"toolchain\": \"go\"}}}")
+  }
+  # The project's own settings join the layers (a project can only tighten).
+  if type_of(m.get("settings", null)) == "map" {
+    PROJECT_SETTINGS = m.settings
   }
   snuff m
 }
@@ -3744,6 +3781,27 @@ pull do_check(g) {
   if m.has("cig") and (type_of(m.cig) != "string" or cig_pin_ok(m.cig, "1.0.0") == null) {
     problem("error", MANIFEST, "`cig` is the cig version this project is written for: 1.2 (any 1.2.x), 1.2.0 (exactly) or >=1.2.0")
   }
+  # The project's settings: known keys, known values, and only ever tighter
+  # than what the person running cigo has (the security floor).
+  if m.has("settings") {
+    if type_of(m.settings) != "map" {
+      problem("error", MANIFEST, "`settings` is a map of setting names to values (cigo config lists them)")
+    } else {
+      for k in m.settings {
+        if not SETTINGS.has(k) {
+          problem("warning", MANIFEST, "`settings.${k}` is not a setting cigo knows; the keys are ${SETTINGS.keys().join(", ")}")
+        } else if SETTINGS[k].values != null and not SETTINGS[k].values.contains(str(m.settings[k])) {
+          problem("error", MANIFEST, "`settings.${k}` must be one of ${SETTINGS[k].values.join(", ")}, not `${m.settings[k]}`")
+        }
+      }
+    }
+  }
+  config_full()
+  for f in FLOORED {
+    if f.layer == "project" {
+      problem("warning", MANIFEST, "`settings.${f.key}` asks for `${f.wanted}`, looser than your `${f.kept}` (from ${f.from}); ignored: a project can only tighten")
+    }
+  }
   if env.get("CIGO_VERSIONS", "1") != "0" {
     for f in version_findings(g, g.components.keys(), true) {
       problem(pick(flags.contains("--strict"), "error", "warning"), f.where, f.message)
@@ -4491,7 +4549,7 @@ pull versions_setting(g) {
     }
   }
   # Nobody said: a CI run cannot answer a question, so it never switches.
-  if env.get("CI", "") != "" {
+  if not attended() {
     snuff "never"
   }
   snuff "ask"
@@ -5224,40 +5282,178 @@ stick CRASHES = path.join(CIGO_HOME, "crashes")
 stick CONFIG_FILE = path.join(CIGO_HOME, "config")
 # Every key `cigo config` accepts: its default and its meaning. The same
 # names as cig's, where cig has them.
-stick CONFIG_KEYS = {
-  crash_reports: ["ask", "what to do with a crash report: ask (print how to look at it and send it), always (file it without asking), never (keep it local only)"],
-  issues_repo: [REPO, "GitHub repository that receives crash reports (owner/name)"],
-  update_channel: ["stable", "which releases `cigo update` considers: stable, or prerelease"],
-  versions: ["ask", "when a toolchain's installed version disagrees with the project's pin: ask (print the question and the commands that answer it; never in CI), always (run tasks on the pinned version through the version manager found), never (warn only), off (do not look)"],
-  install: ["ask", "when the version manager lacks the pinned version: ask (print the install command), always (install it), never"],
-}
 
 # Is `key` set in the config file itself (not a default)?
 pull config_sets(key) {
+  if config_full().source.get(key, "default") != "default" {
+    snuff true
+  }
   if not fs.is_file(CONFIG_FILE) {
     snuff false
   }
   snuff fs.read_text(CONFIG_FILE).lines().any(pack(l) => text.matches(l, '^\s*' + key + '\s*='))
 }
 
-pull config() {
-  roll c = {}
-  for k in CONFIG_KEYS {
-    c[k] = CONFIG_KEYS[k][0]
+# One `key = value` file (the user's, or an administrator's): {key: {value,
+# locked}}. `!locked` after a value makes it final for every later layer.
+pull read_conf(file) {
+  roll out = {}
+  if not fs.is_file(file) {
+    snuff out
   }
-  if fs.is_file(CONFIG_FILE) {
-    for line in fs.read_text(CONFIG_FILE).lines() {
-      stick l = line.trim()
-      if l == "" or l.starts_with("#") {
-        continue
-      }
-      stick at = l.find("=")
-      if at > 0 {
-        c[l.slice(0, at).trim()] = l.slice(at + 1).trim().replace("\"", "")
+  for line in fs.read_text(file).lines() {
+    stick l = line.trim()
+    if l == "" or l.starts_with("#") {
+      continue
+    }
+    stick at = l.find("=")
+    if at <= 0 {
+      continue
+    }
+    roll v = l.slice(at + 1).trim()
+    roll locked = false
+    if v.ends_with("!locked") {
+      locked = true
+      v = v.slice(0, v.len() - 7).trim()
+    }
+    out[l.slice(0, at).trim()] = {value: v.replace("\"", ""), locked: locked}
+  }
+  snuff out
+}
+
+# The position of `x` in `xs`, or -1 (`find` takes a predicate and gives the
+# element; the scales below need the index).
+pull index_of(xs, x) {
+  roll i = 0
+  for v in xs {
+    if str(v) == str(x) {
+      snuff i
+    }
+    i += 1
+  }
+  snuff -1
+}
+
+# Where a value sits on its key's loose-to-tight scale; -1 for free text or
+# a value the key does not know.
+pull rank_of(key, value) {
+  stick vals = SETTINGS.get(key, {}).get("values", null)
+  if vals == null {
+    snuff -1
+  }
+  snuff index_of(vals, value)
+}
+
+# Is a person at the keyboard? CI is not (the CI preset applies there and
+# nothing is loosened from the environment).
+pull attended() {
+  snuff env.get("CI", "") == ""
+}
+
+# Every setting through the layers: default < preset < system < user <
+# project < environment, each later layer winning, with three rules: a
+# locked system value is final; a project value may only tighten a floored
+# key; the environment loosens only when attended. Computed once per run.
+pull config_full() {
+  snuff cached("config_full", pack() {
+    roll eff = {}
+    roll src = {}
+    roll locked = {}
+    for k in SETTINGS {
+      eff[k] = SETTINGS[k].default
+      src[k] = "default"
+    }
+    stick sys = read_conf(SYSTEM_CONFIG)
+    stick usr = read_conf(CONFIG_FILE)
+    # The preset is itself a setting, read from the layers that may name it.
+    roll preset_name = "balanced"
+    roll preset_src = "default"
+    if sys.has("preset") and PRESETS.contains(sys.preset.value) {
+      preset_name = sys.preset.value
+      preset_src = "system"
+    }
+    if usr.has("preset") and PRESETS.contains(usr.preset.value) and not (sys.has("preset") and sys.preset.locked) {
+      preset_name = usr.preset.value
+      preset_src = "user"
+    }
+    stick env_preset = env.get("CIGO_PRESET", "")
+    if PRESETS.contains(env_preset) and not (sys.has("preset") and sys.preset.locked) {
+      preset_name = env_preset
+      preset_src = "env"
+    }
+    if preset_src == "default" and not attended() {
+      preset_name = "ci"
+      preset_src = "ci"
+    }
+    eff.preset = preset_name
+    src.preset = preset_src
+    for k in SETTINGS {
+      if k != "preset" and SETTINGS[k].presets.has(preset_name) {
+        eff[k] = SETTINGS[k].presets[preset_name]
+        src[k] = "preset"
       }
     }
-  }
-  snuff c
+    pull apply(layer, values) {
+      for k in values {
+        if k == "preset" or not SETTINGS.has(k) {
+          continue
+        }
+        if locked.get(k, false) {
+          continue
+        }
+        stick want = str(values[k])
+        if layer == "project" and SETTINGS[k].floor and rank_of(k, want) >= 0 and rank_of(k, want) < rank_of(k, eff[k]) {
+          FLOORED.push({key: k, wanted: want, kept: eff[k], layer: layer, from: src[k]})
+          continue
+        }
+        if layer == "env" and SETTINGS[k].values != null and rank_of(k, want) < 0 {
+          # Not a value this key has (CIGO_VERSIONS=0 is an older switch read
+          # elsewhere): not a setting.
+          continue
+        }
+        if layer == "env" and rank_of(k, want) >= 0 and rank_of(k, want) < rank_of(k, eff[k]) and not attended() {
+          FLOORED.push({key: k, wanted: want, kept: eff[k], layer: layer, from: src[k]})
+          continue
+        }
+        eff[k] = want
+        src[k] = layer
+      }
+    }
+    roll sysv = {}
+    for k in sys {
+      sysv[k] = sys[k].value
+      if sys[k].locked {
+        locked[k] = true
+      }
+    }
+    # Locked keys take the system value whatever came before.
+    for k in sysv {
+      if SETTINGS.has(k) and k != "preset" {
+        eff[k] = sysv[k]
+        src[k] = "system"
+      }
+    }
+    roll usrv = {}
+    for k in usr {
+      usrv[k] = usr[k].value
+    }
+    apply("user", usrv)
+    apply("project", PROJECT_SETTINGS)
+    roll envv = {}
+    for k in SETTINGS {
+      stick e = env.get("CIGO_" + k.upper(), "")
+      if e != "" {
+        envv[k] = e
+      }
+    }
+    apply("env", envv)
+    snuff {effective: eff, source: src, locked: locked, preset: preset_name}
+  })
+}
+
+# The effective settings, as every reader has always taken them.
+pull config() {
+  snuff config_full().effective
 }
 
 # Write a file outside the pack: a hop, so the journal does not see it and a
@@ -5733,37 +5929,94 @@ pull do_report() {
 }
 
 pull do_config() {
-  expect_flags(["--unset"])
-  stick c = config()
-  if targets.is_empty() {
-    stick width = CONFIG_KEYS.keys().map(pack(k) => k.len()).max()
-    for k in CONFIG_KEYS {
-      exhale "${k.pad_right(width)}  ${str(c[k]).pad_right(28)}  ${CONFIG_KEYS[k][1]}"
+  expect_flags(["--unset", "--json"])
+  stick full = config_full()
+  stick c = full.effective
+  stick width = SETTINGS.keys().map(pack(k) => k.len()).max()
+  pull where_set(k) {
+    roll s = full.source[k]
+    if full.locked.get(k, false) {
+      s = s + ", locked by ${tilde(SYSTEM_CONFIG)}"
     }
-    exhale "file: ${tilde(CONFIG_FILE)}"
+    snuff s
+  }
+  if targets.is_empty() {
+    if flags.contains("--json") {
+      exhale json.stringify({effective: c, source: full.source, locked: full.locked, preset: full.preset, floored: FLOORED})
+      snuff
+    }
+    for k in SETTINGS {
+      exhale "${k.pad_right(width)}  ${str(c[k]).pad_right(14)}  ${("(" + where_set(k) + ")").pad_right(14)}  ${SETTINGS[k].doc}"
+    }
+    exhale "layers: default < preset (${full.preset}) < ${tilde(SYSTEM_CONFIG)} < ${tilde(CONFIG_FILE)} < ${MANIFEST} settings < CIGO_<KEY>; a project can only tighten"
     snuff
   }
   stick key = targets[0]
-  if not CONFIG_KEYS.has(key) {
-    fail("`${key}` is not a config key; they are ${CONFIG_KEYS.keys().join(", ")}")
+  if key == "explain" {
+    stick k = targets.get(1, "")
+    if not SETTINGS.has(k) {
+      fail("`cigo config explain <key>`; the keys are ${SETTINGS.keys().join(", ")}")
+    }
+    stick s = SETTINGS[k]
+    exhale "${k}: ${s.doc}"
+    exhale "  now       ${c[k]} (${where_set(k)})"
+    exhale "  default   ${s.default}"
+    if s.values != null {
+      exhale "  values    ${s.values.join(" < ")}  (loosest to tightest)"
+    }
+    if not s.presets.is_empty() {
+      exhale "  presets   " + s.presets.keys().map(pack(p) => "${p}=${s.presets[p]}").join("  ")
+    }
+    exhale pick(s.floor, "  floor     a project may only tighten this; a looser project value is ignored and cigo check says so", "  floor     not a security setting: any layer may set it")
+    snuff
+  }
+  if key == "diff" {
+    roll n = 0
+    for k in SETTINGS {
+      stick from_preset = pick(SETTINGS[k].presets.has(full.preset), SETTINGS[k].presets.get(full.preset, SETTINGS[k].default), SETTINGS[k].default)
+      if k != "preset" and str(c[k]) != str(from_preset) {
+        exhale "${k.pad_right(width)}  ${str(c[k]).pad_right(14)}  preset ${full.preset} says ${from_preset}  (${where_set(k)})"
+        n += 1
+      }
+    }
+    if n == 0 {
+      exhale "every setting is as the ${full.preset} preset has it"
+    }
+    snuff
+  }
+  if key == "preset" and targets.len() > 1 {
+    stick want = str(targets[1])
+    if not PRESETS.contains(want) {
+      fail("presets are ${PRESETS.join(", ")}, not `${want}`")
+    }
+    # chill < balanced < strict < paranoid; the special-purpose ones are not
+    # compared. Loosening is a person's decision, never a script's in CI.
+    stick ladder = ["chill", "balanced", "strict", "paranoid"]
+    if ladder.contains(want) and ladder.contains(full.preset) and index_of(ladder, want) < index_of(ladder, full.preset) and not attended() {
+      fail("`${want}` is looser than the current `${full.preset}`; a preset is loosened at a terminal, not from CI")
+    }
+    write_setting("preset", want)
+    snuff
+  }
+  if not SETTINGS.has(key) {
+    fail("`${key}` is not a config key; they are ${SETTINGS.keys().join(", ")} (also: cigo config explain <key>, cigo config diff, cigo config preset <name>)")
   }
   if targets.len() == 1 and not flags.contains("--unset") {
     exhale str(c[key])
     snuff
   }
   stick value = pick(flags.contains("--unset"), null, str(targets.get(1, "")))
-  if key == "crash_reports" and value != null and not ["ask", "always", "never"].contains(value) {
-    fail("crash_reports must be ask, always or never, not `${value}`")
+  if value != null and SETTINGS[key].values != null and not SETTINGS[key].values.contains(value) {
+    fail("${key} must be one of ${SETTINGS[key].values.join(", ")}, not `${value}`")
   }
-  if key == "update_channel" and value != null and not ["stable", "prerelease"].contains(value) {
-    fail("update_channel must be stable or prerelease, not `${value}`")
+  if full.locked.get(key, false) {
+    fail("${key} is locked by ${tilde(SYSTEM_CONFIG)}; an administrator set it")
   }
-  if key == "versions" and value != null and not VERSION_SETTINGS.contains(value) {
-    fail("versions must be one of ${VERSION_SETTINGS.join(", ")}, not `${value}`")
-  }
-  if key == "install" and value != null and not INSTALL_SETTINGS.contains(value) {
-    fail("install must be one of ${INSTALL_SETTINGS.join(", ")}, not `${value}`")
-  }
+  write_setting(key, value)
+}
+
+# Set (or unset, with null) one key in the user's config file.
+pull write_setting(key, value) {
   roll kept = []
   if fs.is_file(CONFIG_FILE) {
     kept = fs.read_text(CONFIG_FILE).lines().filter(pack(l) => not text.matches(l, '^\s*' + key + '\s*='))
@@ -6069,7 +6322,24 @@ pull maybe_crash(where) {
 
 # ----- dispatch ---------------------------------------------------------------------------
 
+# The project's `settings` join the layers for every command run inside a
+# project, `cigo config` and `cigo update` included (load() sets them again,
+# the same). A manifest that does not parse is check's business, not this.
+pull project_settings_early() {
+  if not fs.is_file(MANIFEST) {
+    snuff
+  }
+  try {
+    stick early = json.parse(unbom(fs.read_text(MANIFEST)))
+    if type_of(early) == "map" and type_of(early.get("settings", null)) == "map" {
+      PROJECT_SETTINGS = early.settings
+    }
+  } ashtray e {
+  }
+}
+
 pull dispatch() {
+  project_settings_early()
   maybe_crash(command)
   if command == "help" or command == "--help" or command == "-h" {
     do_help()

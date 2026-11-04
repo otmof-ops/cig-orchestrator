@@ -2357,6 +2357,86 @@ test("cigo report --send carries no name of the person's: not a folder, a file, 
   never_says(json.stringify(written).lower(), "zqx")
 })
 
+# ----- 1.2.0: the config model (#66): layers, the floor, locks, presets ------
+
+pull tool_layers(dir, words, more) {
+  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, {CIGO_HOME: cigo_home(dir), CIGO_SYSTEM_CONFIG: path.join(dir + "-sys", "cigo.conf")}.merge(more))
+}
+
+test("a project file cannot lower protection, and may tighten it", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  edit_manifest(dir, pack(m) {
+    m.settings = {versions: "off"}
+  })
+  stick c = tool_layers(dir, ["check"], {})
+  exits(c, 0)
+  says(c.out + c.err, "`settings.versions` asks for `off`, looser than your `ask`")
+  says(tool_layers(dir, ["config", "versions"], {}).out, "ask")
+  edit_manifest(dir, pack(m) {
+    m.settings = {versions: "always"}
+  })
+  stick tighter = tool_layers(dir, ["config", "versions"], {})
+  says(tighter.out, "always")
+  says(tool_layers(dir, ["config"], {}).out, "always          (project)")
+})
+
+test("a locked system setting cannot be overridden", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(dir + "-sys")
+    fs.write_text(path.join(dir + "-sys", "cigo.conf"), "versions = never !locked\n")
+  }
+  exits(tool_layers(dir, ["config", "install", "always"], {}), 0)
+  stick refused = tool_layers(dir, ["config", "versions", "always"], {})
+  exits(refused, 2)
+  says(refused.err, "versions is locked by")
+  stick listed = tool_layers(dir, ["config"], {})
+  says(listed.out, "never")
+  says(listed.out, "locked by")
+  edit_manifest(dir, pack(m) {
+    m.settings = {versions: "always"}
+  })
+  says(tool_layers(dir, ["config", "versions"], {}).out, "never")
+})
+
+test("a preset sets the keys it names, and config diff shows what differs from it", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  exits(tool_layers(dir, ["config", "preset", "paranoid"], {}), 0)
+  says(tool_layers(dir, ["config", "versions"], {}).out, "always")
+  says(tool_layers(dir, ["config", "diff"], {}).out, "every setting is as the paranoid preset has it")
+  exits(tool_layers(dir, ["config", "install", "never"], {}), 0)
+  stick d = tool_layers(dir, ["config", "diff"], {})
+  says(d.out, "install")
+  says(d.out, "preset paranoid says ask")
+  stick bad = tool_layers(dir, ["config", "preset", "relaxed"], {})
+  exits(bad, 2)
+  says(bad.err, "presets are chill, balanced, strict, paranoid, ci, agent-heavy, research")
+})
+
+test("config explain names the default, the scale, the presets and the floor", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  stick e = tool_layers(dir, ["config", "explain", "versions"], {})
+  exits(e, 0)
+  says(e.out, "default   ask")
+  says(e.out, "values    off < never < ask < always")
+  says(e.out, "presets   ")
+  says(e.out, "floor     a project may only tighten this")
+  stick free = tool_layers(dir, ["config", "explain", "issues_repo"], {})
+  says(free.out, "not a security setting")
+})
+
+test("the environment loosens a setting only at a terminal, never under CI", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  says(tool_layers(dir, ["config", "versions"], {CIGO_VERSIONS: "off"}).out, "off")
+  # Under CI the ci preset applies (versions never) and a looser environment value is ignored.
+  stick ci = tool_layers(dir, ["config", "versions"], {CI: "1", CIGO_VERSIONS: "off"})
+  says(ci.out, "never")
+  stick listed = tool_layers(dir, ["config"], {CI: "1"})
+  says(listed.out, "ci")
+  # A value the key does not know is not a setting: ignored by the layer.
+  says(tool_layers(dir, ["config", "versions"], {CIGO_VERSIONS: "0"}).out, "ask")
+})
+
 # ----- the end --------------------------------------------------------------
 
 exhale ""

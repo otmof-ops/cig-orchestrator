@@ -5,6 +5,34 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.2.0 — 2026-11-05
+
+The config model the security work rests on (#66, step 1): one way to
+read every setting, a floor a project cannot dig under, and presets.
+
+- **Layers.** A setting is read as built-in default < preset < the
+  administrator's `/etc/cigscript/cigo.conf` < `~/.cig-orchestrator/config`
+  < the project's `settings` in `cig-tasks.json` < `CIGO_<KEY>` in the
+  environment, each later layer winning. `cigo config` shows every setting
+  with where it was set; `--json` gives the layers whole.
+- **The security floor.** A setting that matters for safety has its values
+  on a scale from loosest to tightest, and a project may only move along it
+  toward tighter: a cloned repository's `cig-tasks.json` cannot turn
+  protection down. A looser project value is ignored and `cigo check` says
+  so. The environment loosens a setting only at a terminal, never under CI,
+  where the `ci` preset applies on its own.
+- **Locks.** `key = value !locked` in the administrator's file is final for
+  every later layer, and `cigo config` says who set it.
+- **Presets.** `cigo config preset chill|balanced|strict|paranoid|ci|agent-heavy|research`
+  sets the bundle every other setting starts from (`balanced` by default);
+  a looser preset is chosen at a terminal, never from CI. `cigo config diff`
+  shows what differs from the preset, and `cigo config explain <key>` what
+  a setting does, its default, its scale, its presets and its floor.
+
+The settings that exist today (`versions`, `install`, `crash_reports`,
+`update_channel`, `issues_repo`) are the first on the model; each security
+feature adds its own as it lands.
+
 ## 1.1.1 — 2026-10-29
 
 Needs cig 1.7.1 (reports anonymised on every route, CigScript #103).

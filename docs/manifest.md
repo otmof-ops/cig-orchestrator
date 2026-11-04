@@ -33,6 +33,7 @@ after that it's yours, and `cigo check` reads it over before anything runs.
 | `cig` | the cig this project is written for, as cig reads a pin: `1.2` (any 1.2.x), `1.2.0` (exactly), `>=1.2.0`; every command warns when the installed cig does not satisfy it (`.cig-version` at the root says the same to cig itself) |
 | `versions` | what to do when a toolchain's installed version disagrees with the project's pin: `ask`, `always`, `never` or `off` ([running on the pinned version](commands.md#running-on-the-pinned-version)) |
 | `defaults` | `timeout_ms`, `retries`, `retry_delay_ms`, `inputs_limit` and `box` for every task that doesn't set its own |
+| `settings` | the project's values for cigo's settings (`versions`, `install`, ...): read after the user's own and the preset, and **only ever tighter** than them; a looser value is ignored and `cigo check` says so (`cigo config explain <key>`) |
 | `toolchains` | this project's changes to built-in toolchains, and toolchains of its own ([your own toolchains](custom-toolchains.md)) |
 | `components` | a directory and the toolchain that builds it, one entry each |
 | `tasks` | commands of the project's own: the chain, the deploy, anything else |
