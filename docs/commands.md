@@ -173,6 +173,34 @@ time, so a tool is asked again only when it changed and an unchanged project
 opens without a hop. `--strict` on `run`, `check` and `doctor` turns a
 disagreement into a stop; `CIGO_VERSIONS=0` keeps the warnings quiet.
 
+### The guard: `cigo audit`, `cigo trust`, and what `cigo run` does first
+
+Before a task runs, the guard reads what it is about to run: the command as
+written, the scripts it names, and for a setup stage the install hooks of
+the packages installed here, against patterns real attacks use. Each hit
+is a finding with a code (`cig explain E873`), the place and the matching
+text, scored per category into a risk: `none`, `low`, `medium`, `high`,
+`critical`.
+
+```
+cigo audit [<task>...] [--json]        the read, with nothing run
+cigo trust <task>                      approve a task as it is now (never critical)
+cigo trust list | show <task> | revoke <task> | revoke --all
+cigo run <task> --accept-risk[=<task>] run a held task once (high needs its name) and approve it
+cigo run <task> --run-untrusted=<task> run a refused task anyway, at a terminal
+cigo run <task> --no-guard             skip the read for one run
+```
+
+What a verdict does depends on `security`: `standard` (the default) refuses
+critical, holds medium and high at a terminal until approved, and runs them
+with the report unattended; `strict` (the default under CI) also fails high
+unattended; `report` says it and runs; `off` does not look. An approval is
+the task as it is (command, environment names, scripts, lockfiles) hashed
+into one key and signed with `cig tin mac` under a subkey of the tin's key:
+one lookup per run, checked again when a byte changes, and a record that
+does not verify is a forged approval (`E889`), ignored and said. Nothing a
+task runs can sign one: in cig's box the key folder is empty.
+
 ### Running on the pinned version
 
 When a toolchain's installed version disagrees with the project's pin, cigo

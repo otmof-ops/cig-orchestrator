@@ -2437,6 +2437,190 @@ test("the environment loosens a setting only at a terminal, never under CI", pac
   says(tool_layers(dir, ["config", "versions"], {CIGO_VERSIONS: "0"}).out, "ask")
 })
 
+# ----- 1.3.0: the guard, first half (#55): the trust store, the static read, the verdict ------
+
+pull guard_tool(dir, words, more) {
+  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, {CIGO_HOME: cigo_home(dir)}.merge(more))
+}
+
+# cig 1.11.0 signs the trust store (`cig tin mac`); an older cig cannot, and
+# the guard says so and checks every run.
+pull has_tin_mac() {
+  snuff cig(root, ["tin", "mac", "--help"]).code == 0
+}
+
+test("the guard lets a clean task run, and holds a persistence write until it is approved", pack() {
+  stick dir = fresh("tests/fixtures/guard")
+  stick r = guard_tool(dir, ["run", "clean"], {})
+  exits(r, 0)
+  never_says(r.out + r.err, "rated")
+  stick h = guard_tool(dir, ["run", "rc-write"], {})
+  exits(h, 1)
+  says(h.out, "E873")
+  says(h.out, "rated high")
+  says(h.err, "cigo trust rc-write")
+  assert(not there(dir, "note.txt"), "a held task ran")
+  stick a = guard_tool(dir, ["run", "rc-write", "--accept-risk=rc-write"], {})
+  exits(a, 0)
+  assert(there(dir, "note.txt"), "the accepted task did not run")
+})
+
+test("the guard: medium takes --accept-risk alone, high needs the task's name", pack() {
+  stick dir = fresh("tests/fixtures/guard")
+  stick m = guard_tool(dir, ["run", "curl-sh"], {})
+  exits(m, 1)
+  says(m.out, "E874")
+  says(m.out, "rated medium")
+  stick m2 = guard_tool(dir, ["run", "curl-sh", "--accept-risk"], {})
+  exits(m2, 0)
+  assert(there(dir, "plan.txt"), "the accepted medium task did not run")
+  stick h = guard_tool(dir, ["run", "rc-write", "--accept-risk"], {})
+  exits(h, 1)
+  says(h.err, "--accept-risk=rc-write")
+  assert(not there(dir, "note.txt"), "a high task ran on a bare --accept-risk")
+})
+
+test("the guard refuses critical, and --run-untrusted=<task> runs it at a terminal only", pack() {
+  stick dir = fresh("tests/fixtures/guard")
+  stick c = guard_tool(dir, ["run", "tin"], {})
+  exits(c, 1)
+  says(c.out, "E879")
+  says(c.err, "refused")
+  assert(not there(dir, "tin.txt"), "a refused task ran")
+  stick u = guard_tool(dir, ["run", "tin", "--run-untrusted=tin"], {})
+  exits(u, 0)
+  assert(there(dir, "tin.txt"), "--run-untrusted did not run the task")
+  says(u.err, "no backup of the tin")
+  stick ci = guard_tool(dir, ["run", "obf", "--run-untrusted=obf"], {CI: "1"})
+  # Unattended, --run-untrusted means nothing; obf is medium and strict runs it with the report.
+  exits(ci, 0)
+  says(ci.out, "E875")
+  stick ci2 = guard_tool(dir, ["run", "tin", "--run-untrusted=tin"], {CI: "1"})
+  exits(ci2, 1)
+  says(ci2.err, "refused")
+})
+
+test("the guard reads a script the task names: credentials with exfiltration is critical, with the file and line", pack() {
+  stick dir = fresh("tests/fixtures/guard")
+  stick r = guard_tool(dir, ["run", "script"], {})
+  exits(r, 1)
+  says(r.out, "E871")
+  says(r.out, "E872")
+  says(r.out, "install.sh:3")
+  says(r.out, "rated critical")
+})
+
+test("the guard unattended: strict fails high, standard runs it with the report, report never fails", pack() {
+  stick dir = fresh("tests/fixtures/guard")
+  stick s = guard_tool(dir, ["run", "rc-write"], {CI: "1"})
+  exits(s, 1)
+  says(s.err, "security = strict")
+  assert(not there(dir, "note.txt"), "strict ran a high task unattended")
+  exits(guard_tool(dir, ["config", "security", "standard"], {}), 0)
+  stick st = guard_tool(dir, ["run", "rc-write"], {CI: "1"})
+  exits(st, 0)
+  says(st.out, "E873")
+  says(st.err, "it runs (security = standard")
+  exits(guard_tool(dir, ["config", "security", "report"], {}), 0)
+  stick rp = guard_tool(dir, ["run", "tin"], {CI: "1"})
+  exits(rp, 0)
+  says(rp.out, "E879")
+  says(rp.out, "security = report")
+  exits(guard_tool(dir, ["config", "security", "off"], {}), 0)
+  stick off = guard_tool(dir, ["run", "script"], {})
+  exits(off, 0)
+  never_says(off.out, "E871")
+})
+
+test("the guard's approval is one lookup, a changed lockfile is checked again, and a forged approval is ignored", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: cig 1.11.0 or later signs the trust store)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/guard")
+  stick a = guard_tool(dir, ["run", "rc-write", "--accept-risk=rc-write"], {})
+  exits(a, 0)
+  says(a.err, "approved `rc-write`")
+  stick again = guard_tool(dir, ["run", "rc-write"], {})
+  exits(again, 0)
+  never_says(again.out, "rated")
+  stick l = guard_tool(dir, ["trust", "list"], {})
+  exits(l, 0)
+  says(l.out, "rc-write")
+  burn {
+    fs.write_text(path.join(dir, "package-lock.json"), "{}\n")
+  }
+  stick held = guard_tool(dir, ["run", "rc-write"], {})
+  exits(held, 1)
+  says(held.out, "rated high")
+  stick key = json.parse(guard_tool(dir, ["audit", "rc-write", "--json"], {}).out).tasks["rc-write"].key
+  burn {
+    fs.write_text(path.join(cigo_home(dir), "trust", key + ".json"), "{\"task\":\"rc-write\",\"forged\":true}\n")
+    fs.write_text(path.join(cigo_home(dir), "trust", key + ".mac"), "0000000000000000000000000000000000000000000000000000000000000000\n")
+  }
+  stick f = guard_tool(dir, ["run", "rc-write"], {})
+  exits(f, 1)
+  says(f.err, "E889")
+  says(f.out, "rated high")
+  exits(guard_tool(dir, ["trust", "revoke", "--all"], {}), 0)
+  stick empty = guard_tool(dir, ["trust", "list"], {})
+  says(empty.out, "no approvals")
+})
+
+test("the guard: cigo trust <task> approves after the verdict, never critical, and show checks the signature", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: cig 1.11.0 or later signs the trust store)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/guard")
+  stick t1 = guard_tool(dir, ["trust", "curl-sh"], {})
+  exits(t1, 0)
+  says(t1.out, "E874")
+  says(t1.err, "approved `curl-sh`")
+  stick r = guard_tool(dir, ["run", "curl-sh"], {})
+  exits(r, 0)
+  never_says(r.out, "rated")
+  stick t2 = guard_tool(dir, ["trust", "tin"], {})
+  exits(t2, 1)
+  says(t2.err, "not approved")
+  stick s = guard_tool(dir, ["trust", "show", "curl-sh"], {})
+  exits(s, 0)
+  says(s.out, "matches your key")
+  stick n = guard_tool(dir, ["run", "never"], {})
+  exits(n, 1)
+  says(n.out, "rated high")
+})
+
+test("the guard: cigo audit lists each task's risk and findings, in text and JSON", pack() {
+  stick dir = fresh("tests/fixtures/guard")
+  stick a = guard_tool(dir, ["audit"], {})
+  exits(a, 0)
+  says(a.out, "clean: none")
+  says(a.out, "tin: critical")
+  says(a.out, "worst: critical")
+  stick j = json.parse(guard_tool(dir, ["audit", "--json"], {}).out)
+  assert(j.worst == "critical", "worst was ${j.worst}")
+  assert(j.tasks["script"].findings.len() >= 2, "the script's findings: ${json.stringify(j.tasks["script"].findings)}")
+  assert(j.tasks["clean"].findings.is_empty(), "clean had findings")
+})
+
+test("the guard: trust and footprint are checked in the manifest, and --no-guard skips the read", pack() {
+  stick dir = fresh("tests/fixtures/guard")
+  edit_manifest(dir, pack(m) {
+    m.tasks["never"].trust = "always"
+    m.tasks["clean"].footprint = {writes: "x", nope: []}
+  })
+  stick c = guard_tool(dir, ["check"], {})
+  exits(c, 1)
+  says(c.out + c.err, "`trust` is \"never\"")
+  says(c.out + c.err, "`footprint.writes` is a list")
+  says(c.out + c.err, "`footprint.nope` is not a footprint key")
+  stick dir2 = fresh("tests/fixtures/guard")
+  stick n = guard_tool(dir2, ["run", "tin", "--no-guard"], {})
+  exits(n, 0)
+  assert(there(dir2, "tin.txt"), "--no-guard did not run the task")
+})
+
 # ----- the end --------------------------------------------------------------
 
 exhale ""
