@@ -119,12 +119,26 @@ task the run's error names in backticks gets the same placeholder. Written
 under `~/.cig-orchestrator/reports/<run>.json`; `--send` files it through
 cig's ashtray as a report on `issues_repo`.
 
-**`cigo config`** reads and writes `~/.cig-orchestrator/config`:
-`crash_reports` (`ask`, `always`, `never`), `issues_repo`, `update_channel`
-(`stable`, `prerelease`), `versions` (`ask`, `always`, `never`, `off`) and
-`install` (`ask`, `always`, `never`). `cigo config` lists them,
-`cigo config <key>` prints one, `cigo config <key> <value>` sets it,
-`--unset` removes it.
+**`cigo config`** is every setting, read through layers, each later one
+winning: the built-in default, the preset, the administrator's
+`/etc/cigscript/cigo.conf`, your `~/.cig-orchestrator/config`, the project's
+`settings` in `cig-tasks.json`, and `CIGO_<KEY>` in the environment. Three
+rules hold: a setting that matters for safety has its values on a scale from
+loosest to tightest and **a project may only tighten** (a looser project
+value is ignored and `cigo check` says so); the environment loosens a
+setting only at a terminal, never under CI, where the `ci` preset applies on
+its own; and `key = value !locked` in the administrator's file is final.
+`cigo config` lists every setting with where it was set (`--json` for the
+layers whole), `cigo config <key>` prints one, `cigo config <key> <value>`
+sets it in your file, `--unset` removes it, `cigo config explain <key>` says
+what it does, its default, its scale, its presets and its floor, `cigo
+config diff` shows what differs from the preset, and `cigo config preset
+chill|balanced|strict|paranoid|ci|agent-heavy|research` chooses the bundle
+every setting starts from (a looser one is chosen at a terminal). The
+settings today: `versions` (`off` < `never` < `ask` < `always`; floored),
+`install` (`never` < `ask` < `always`), `crash_reports` (`always` < `ask` <
+`never`), `update_channel` (`prerelease` < `stable`), `issues_repo`, and
+`preset`.
 
 **`cigo outputs`** shows what the last run's tasks handed on; `cigo outputs
 stats` shows one task's, as JSON.
