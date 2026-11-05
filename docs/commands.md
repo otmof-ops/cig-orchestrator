@@ -136,9 +136,11 @@ config diff` shows what differs from the preset, and `cigo config preset
 chill|balanced|strict|paranoid|ci|agent-heavy|research` chooses the bundle
 every setting starts from (a looser one is chosen at a terminal). The
 settings today: `versions` (`off` < `never` < `ask` < `always`; floored),
-`install` (`never` < `ask` < `always`), `crash_reports` (`always` < `ask` <
-`never`), `update_channel` (`prerelease` < `stable`), `issues_repo`, and
-`preset`.
+`install` (`never` < `ask` < `always`), `security` (`off` < `report` <
+`standard` < `strict`; floored), `trust` (`on` < `off`; floored), `osv`
+(`off` < `online` < `offline`; floored), `rehearse` (`never` < `auto` <
+`always`; floored), `crash_reports` (`always` < `ask` < `never`),
+`update_channel` (`prerelease` < `stable`), `issues_repo`, and `preset`.
 
 **`cigo outputs`** shows what the last run's tasks handed on; `cigo outputs
 stats` shows one task's, as JSON.
@@ -196,6 +198,8 @@ places (`decoded from scripts/x.sh:4`). All of it is text: nothing runs.
 
 ```
 cigo audit [<task>...] [--json]        the read, with nothing run
+cigo audit --offline [<task>...]       the same, with OSV read from this machine's database
+cigo audit --update-db [<ecosystem>...] fetch OSV's dumps and build that database
 cigo trust <task>                      approve a task as it is now (never critical)
 cigo trust list | show <task> | revoke <task> | revoke --all
 cigo run <task> --accept-risk[=<task>] run a held task once (high needs its name) and approve it
@@ -213,6 +217,40 @@ into one key and signed with `cig tin mac` under a subkey of the tin's key:
 one lookup per run, checked again when a byte changes, and a record that
 does not verify is a forged approval (`E889`), ignored and said. Nothing a
 task runs can sign one: in cig's box the key folder is empty.
+
+### Known-bad packages: OSV
+
+The packages a task's lockfiles name, at the versions they pin, are checked
+against [OSV](https://osv.dev) with the rest of the read: `package-lock.json`,
+`npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `uv.lock`,
+`poetry.lock`, `pdm.lock`, `Pipfile.lock`, a pinned `requirements.txt`,
+`Cargo.lock`, `go.sum`, `Gemfile.lock`, `composer.lock`, `gradle.lockfile`
+and NuGet's `packages.lock.json`, in the task's folder and the project's.
+
+- A package OSV lists as **malicious** (a `MAL-` advisory, or one whose
+  weakness is embedded malicious code, CWE-506 or CWE-912) is `E870`,
+  critical: the task is refused before anything is installed.
+- A package with a **known vulnerability** is `E885`, one line per package
+  with the worst severity, the advisories, and the version that fixes all
+  of them when OSV names one. It is reported, and holds nothing.
+
+```
+osv = online    (default) one batched question to OSV per run that needs it
+osv = offline   the database cigo audit --update-db built; nothing leaves the machine
+osv = off       not checked
+```
+
+Online, only each package's ecosystem, name and version are sent, never a
+path or a project's name; an answer naming advisories is kept a day and a
+clean one an hour, under `~/.cig-orchestrator/osv/`. When OSV cannot be
+reached, the run says so once and goes on with the rest of the guard.
+Offline, `cigo audit --update-db` downloads OSV's dump for each ecosystem the
+project uses (or the ones named: `npm`, `PyPI`, `crates.io`, `Go`,
+`RubyGems`, `Packagist`, `Maven`, `NuGet`), keeps the versions and ranges
+its advisories name, and throws the dump away; npm's is about 200 MB to
+fetch. The database is as fresh as its last update; run it again to catch
+what was reported since. `osv` is floored, and `offline` is the tightest:
+a project cannot send its packages to OSV when you chose not to.
 
 ### The rehearsal: the dry run is the real run
 
@@ -382,7 +420,8 @@ holds the before-bytes of what a task's `touches` named) under
 
 | path | holds |
 |---|---|
-| `config` | `crash_reports`, `issues_repo`, `update_channel`, `versions`, `install` (`cigo config`) |
+| `config` | your settings (`cigo config`) |
+| `osv/` | OSV's answers and the advisories read (online), and one database per ecosystem (`cigo audit --update-db`) |
 | `crashes/<id>.json` | crash reports, yours until you send them (`cigo crash`) |
 | `update/<tag>/` | the last release `cigo update` downloaded and verified |
 
@@ -399,6 +438,7 @@ holds the before-bytes of what a task's `touches` named) under
 | `CIGO_VERSIONS=0` | no version warnings |
 | `CIGO_BOX=0`, `CIGO_BOX=1` | tasks on the tin, or in the box, where the manifest and the task say nothing (the default is the box on Linux and the tin elsewhere) |
 | `CIGO_UPDATE_MANIFEST`, `CIGO_YANKED_FILE` | a local releases list and YANKED file for `cigo update`, instead of GitHub's (the suite uses them) |
+| `CIGO_OSV_API`, `CIGO_OSV_DUMPS` | another OSV to ask (`https://api.osv.dev`) and another place for its dumps (`https://osv-vulnerabilities.storage.googleapis.com`): a mirror, or a fixture (the suite uses them) |
 | `CIGO_INTERNAL_PANIC=<command>` | crash on purpose at that command (`mid-run` for inside a run), for the suite |
 
 ## On Windows

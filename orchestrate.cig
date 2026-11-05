@@ -29,7 +29,7 @@
 
 pack { "." }
 
-stick VERSION = "1.5.0"
+stick VERSION = "1.6.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
 stick CIG_NEEDS = ">=1.12.0"
 stick REPO = "otmof-ops/cig-orchestrator"
@@ -58,6 +58,8 @@ stick SETTINGS = {
     doc: "what the guard's verdict stops before a task runs: standard (critical refused; medium and high held at a terminal until approved, run with the report unattended), strict (also fail high unattended), report (say it, run anyway), off (do not look)"},
   trust: {values: ["on", "off"], default: "on", floor: true, presets: {paranoid: "off"},
     doc: "the trust store: a task approved as it is (its command, the scripts it names, its lockfiles) is not checked again; off checks every run"},
+  osv: {values: ["off", "online", "offline"], default: "online", floor: true, presets: {},
+    doc: "known-bad packages: the lockfiles' packages checked against OSV (malicious packages refused, known vulnerabilities reported); online sends name@version alone, offline reads the database cigo audit --update-db builds, off does not look"},
   rehearse: {values: ["never", "auto", "always"], default: "auto", floor: true, presets: {paranoid: "always", chill: "never"},
     doc: "the rehearsal (Linux, cig 1.12.0): auto runs a stage that runs code you did not write (an install, a build that runs its dependencies' scripts) or that the guard flagged in cig's contained box first, and judges what it did against its toolchain's footprint; always does it for every task not approved; never only reads"},
 }
@@ -3888,8 +3890,11 @@ pull do_help() {
   exhale "  cigo plan [<task>...] [--only]"
   exhale "                              the order a run would take"
   exhale "  cigo show <task>            where a task comes from and everything it will do"
-  exhale "  cigo audit [<task>...] [--json]"
-  exhale "                              what the guard reads before a task runs: install hooks and findings, with codes"
+  exhale "  cigo audit [<task>...] [--json] [--offline]"
+  exhale "                              what the guard reads before a task runs: install hooks, findings, and"
+  exhale "                              the lockfiles' packages against OSV (name@version alone is sent)"
+  exhale "  cigo audit --update-db [<ecosystem>...]"
+  exhale "                              build the offline OSV database (npm, PyPI, crates.io, Go, RubyGems, Packagist, Maven, NuGet)"
   exhale "  cigo rehearse <npm:name[@version]|pypi:name[==version]|crates:name[@version]|./script.sh> [--json] [--keep]"
   exhale "                              install it in cig's contained box (Linux) and say what it did beyond its footprint"
   exhale "  cigo trust [<task>|list|show <task>|revoke <task>|revoke --all]"
@@ -5944,6 +5949,20 @@ pull install_hooks(t) {
   snuff hooks
 }
 
+# Where OSV is asked and its database kept (see "known-bad packages" below).
+stick OSV_DIR = path.join(CIGO_HOME, "osv")
+stick OSV_API = env.get("CIGO_OSV_API", "https://api.osv.dev")
+stick OSV_DUMPS = env.get("CIGO_OSV_DUMPS", "https://osv-vulnerabilities.storage.googleapis.com")
+# An answer naming advisories is kept a day; a clean one an hour, so a
+# package reported malicious today is refused today.
+stick OSV_CACHE_MS = 86400000
+stick OSV_CLEAN_MS = 3600000
+stick OSV_DETAIL_CAP = 200
+stick OSV_ECOSYSTEMS = ["npm", "PyPI", "crates.io", "Go", "RubyGems", "Packagist", "Maven", "NuGet"]
+roll OSV_NOTED = false
+roll OSV_INDEXES = {}
+roll OSV_PARSED = {}
+
 # What the read decodes and how it reads shell (see "the read, harder to
 # fool" below).
 stick B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -6233,6 +6252,815 @@ pull scan_text(where, body, shellish, comments, depth, budget) {
   snuff found
 }
 
+# The guard's read of a task: the static read, and its lockfiles' packages
+# against OSV.
+pull read_task(t, name) {
+  stick v = static_read(t, name)
+  stick known = osv_findings(t)
+  if known.is_empty() {
+    snuff v
+  }
+  stick all = v.findings + known
+  snuff {risk: risk_of(all), findings: all, hooks: v.hooks}
+}
+
+# ----- known-bad packages: OSV (#55 step 3) --------------------------------------
+#
+# Every package a task's lockfiles name is checked against OSV: a malicious
+# package (a MAL- advisory, or one whose weakness is embedded malicious code,
+# CWE-506 or CWE-912) is critical and refused before anything is installed;
+# a known vulnerability is reported, one line per package, and holds nothing.
+# Online sends name@version alone, batched, and keeps the answers a day;
+# offline reads the database `cigo audit --update-db` builds from OSV's own
+# dumps, and nothing leaves the machine.
+
+# A package's key, the way OSV matches it: PyPI names normalised (PEP 503),
+# Go and Packagist versions without a leading v.
+pull osv_key(p) {
+  snuff p.eco + "|" + osv_name(p.eco, p.name) + "@" + osv_ver(p.eco, p.version)
+}
+
+pull osv_name(eco, name) {
+  if eco == "PyPI" {
+    snuff text.replace(str(name).lower(), "[-_.]+", "-")
+  }
+  snuff str(name)
+}
+
+pull osv_ver(eco, version) {
+  stick v = str(version)
+  if (eco == "Go" or eco == "Packagist") and v.starts_with("v") {
+    snuff v.slice(1)
+  }
+  snuff v
+}
+
+pull pkg(eco, name, version, where) {
+  snuff {eco: eco, name: str(name), version: str(version), where: where}
+}
+
+# The packages a lockfile names, each with its ecosystem; [] for a file this
+# does not read (or cannot parse).
+pull lock_packages(file) {
+  stick base = path.base(file)
+  stick where = tilde(file)
+  roll out = []
+  roll body = ""
+  try {
+    body = unbom(fs.read_text(file))
+  } ashtray e {
+    snuff out
+  }
+  try {
+    if base == "package-lock.json" or base == "npm-shrinkwrap.json" {
+      stick j = json.parse(body)
+      stick pk = j.get("packages", null)
+      if type_of(pk) == "map" {
+        for k in pk {
+          stick e = pk[k]
+          if k != "" and type_of(e) == "map" and e.has("version") and not e.get("link", false) {
+            out.push(pkg("npm", k.split("node_modules/").last(), e.version, where))
+          }
+        }
+      } else {
+        pull walk(deps) {
+          if type_of(deps) == "map" {
+            for k in deps {
+              stick e = deps[k]
+              if type_of(e) == "map" and e.has("version") {
+                out.push(pkg("npm", k, e.version, where))
+                walk(e.get("dependencies", null))
+              }
+            }
+          }
+        }
+        walk(j.get("dependencies", null))
+      }
+    } else if base == "yarn.lock" {
+      roll name = null
+      for line in body.lines() {
+        if line != "" and not line.starts_with(" ") and not line.starts_with("#") and line.trim_end().ends_with(":") {
+          stick head = line.trim_end()
+          stick first = head.slice(0, head.len() - 1).split(",").first().trim().replace("\"", "")
+          stick from = pick(first.starts_with("@"), 1, 0)
+          stick at = first.slice(from).find("@")
+          name = null
+          if at >= 0 {
+            name = first.slice(0, at + from)
+          }
+          if first.starts_with("__metadata") {
+            name = null
+          }
+        } else if name != null {
+          stick c = text.captures(line, '^\s+version:?\s+"?([^"\s]+)"?')
+          if c != null {
+            if not c[1].contains("-use.local") {
+              out.push(pkg("npm", name, c[1], where))
+            }
+            name = null
+          }
+        }
+      }
+    } else if base == "pnpm-lock.yaml" {
+      roll inside = false
+      for line in body.lines() {
+        if line != "" and not line.starts_with(" ") {
+          inside = line.trim_end() == "packages:"
+        } else if inside {
+          stick c = text.captures(line, '^  [\x27"]?/?(@?[^@\s\x27"/(]+(?:/[^@\s\x27"(]+)?)@([0-9][^:(\x27"\s]*)')
+          if c != null {
+            out.push(pkg("npm", c[1], c[2], where))
+          }
+        }
+      }
+    } else if base == "bun.lock" {
+      for m in text.find_all(body, '\["(@?[^"@\s]+(?:/[^"@\s]+)?)@([0-9][^"]*)"') {
+        stick c = text.captures(m, '\["(@?[^"@\s]+(?:/[^"@\s]+)?)@([0-9][^"]*)"')
+        out.push(pkg("npm", c[1], c[2], where))
+      }
+    } else if base == "Cargo.lock" or base == "uv.lock" or base == "poetry.lock" or base == "pdm.lock" {
+      stick eco = pick(base == "Cargo.lock", "crates.io", "PyPI")
+      roll cur = {}
+      pull flush() {
+        if cur.has("name") and cur.has("version") {
+          stick src = str(cur.get("source", ""))
+          stick from_registry = pick(base == "Cargo.lock" or base == "uv.lock", src.contains("registry"), not src.contains("path") and not src.contains("editable") and not src.contains("virtual"))
+          if from_registry {
+            out.push(pkg(eco, cur.name, cur.version, where))
+          }
+        }
+        cur = {}
+      }
+      for line in body.lines() {
+        stick bare = line.trim()
+        if bare == "[[package]]" {
+          flush()
+        } else {
+          stick c = text.captures(line, '^(name|version|source)\s*=\s*(.+)$')
+          if c != null {
+            cur[c[1]] = c[2].trim().replace("\"", "")
+          }
+        }
+      }
+      flush()
+    } else if base == "Pipfile.lock" {
+      stick j = json.parse(body)
+      for section in ["default", "develop"] {
+        stick deps = j.get(section, {})
+        if type_of(deps) == "map" {
+          for k in deps {
+            stick v = str(deps[k].get("version", ""))
+            if v.starts_with("==") {
+              out.push(pkg("PyPI", k, v.slice(2), where))
+            }
+          }
+        }
+      }
+    } else if base == "requirements.txt" {
+      for line in body.lines() {
+        stick c = text.captures(line, '^\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*==\s*([^\s;#,]+)')
+        if c != null {
+          out.push(pkg("PyPI", c[1], c[2], where))
+        }
+      }
+    } else if base == "go.sum" {
+      roll seen = []
+      for line in body.lines() {
+        stick c = text.captures(line, '^(\S+) (v[^\s/]+)(?:/go\.mod)? ')
+        if c != null and not seen.contains(c[1] + "@" + c[2]) {
+          seen.push(c[1] + "@" + c[2])
+          out.push(pkg("Go", c[1], c[2], where))
+        }
+      }
+    } else if base == "Gemfile.lock" {
+      roll specs = false
+      for line in body.lines() {
+        if not line.starts_with(" ") {
+          specs = false
+        }
+        if line.trim() == "specs:" {
+          specs = true
+        } else if specs {
+          stick c = text.captures(line, '^    ([A-Za-z0-9_.-]+) \(([0-9][^\s)-]*)')
+          if c != null {
+            out.push(pkg("RubyGems", c[1], c[2], where))
+          }
+        }
+      }
+    } else if base == "composer.lock" {
+      stick j = json.parse(body)
+      for section in ["packages", "packages-dev"] {
+        for e in j.get(section, []) {
+          if type_of(e) == "map" and e.has("name") and e.has("version") {
+            out.push(pkg("Packagist", e.name, e.version, where))
+          }
+        }
+      }
+    } else if base == "gradle.lockfile" {
+      for line in body.lines() {
+        stick c = text.captures(line, '^([^:#\s]+):([^:\s]+):([^=\s]+)=')
+        if c != null {
+          out.push(pkg("Maven", c[1] + ":" + c[2], c[3], where))
+        }
+      }
+    } else if base == "packages.lock.json" {
+      stick j = json.parse(body)
+      stick fws = j.get("dependencies", {})
+      if type_of(fws) == "map" {
+        for fw in fws {
+          stick deps = fws[fw]
+          if type_of(deps) == "map" {
+            for k in deps {
+              stick r = deps[k].get("resolved", null)
+              if r != null and str(deps[k].get("type", "")) != "Project" {
+                out.push(pkg("NuGet", k, r, where))
+              }
+            }
+          }
+        }
+      }
+    }
+  } ashtray e {
+  }
+  snuff out
+}
+
+# The packages a task's lockfiles name, each once.
+pull task_packages(t) {
+  roll out = []
+  roll seen = []
+  for f in task_lockfiles(t) {
+    stick key = f + "#" + file_digest(f)
+    if not OSV_PARSED.has(key) {
+      OSV_PARSED[key] = lock_packages(f)
+    }
+    for p in OSV_PARSED[key] {
+      stick k = osv_key(p)
+      if not seen.contains(k) {
+        seen.push(k)
+        out.push(p)
+      }
+    }
+  }
+  snuff out
+}
+
+# A key of a map, or the fallback when it is not a map (an advisory's JSON
+# is not ours to trust).
+pull map_get(m, key, fallback) {
+  if type_of(m) == "map" {
+    snuff m.get(key, fallback)
+  }
+  snuff fallback
+}
+
+pull osv_note(said) {
+  if not OSV_NOTED {
+    OSV_NOTED = true
+    log.warn(said)
+  }
+}
+
+pull read_json_or(file, fallback) {
+  if not fs.is_file(file) {
+    snuff fallback
+  }
+  try {
+    snuff json.parse(fs.read_text(file))
+  } ashtray e {
+    snuff fallback
+  }
+}
+
+# Online: the advisories OSV names for each package, by key; null when OSV
+# could not be asked. Only name, ecosystem and version are sent.
+pull osv_online(pkgs) {
+  stick cache_file = path.join(OSV_DIR, "online-cache.json")
+  roll cache = read_json_or(cache_file, {})
+  stick now = time.now_ms()
+  roll out = {}
+  roll need = []
+  for p in pkgs {
+    stick k = osv_key(p)
+    stick c = cache.get(k, null)
+    if type_of(c) == "map" and now - int(c.get("at", 0)) < osv_keep_ms(c) {
+      out[k] = c.get("ids", [])
+    } else {
+      need.push(p)
+    }
+  }
+  roll i = 0
+  while i < need.len() {
+    stick chunk = need.slice(i, math.min(i + 1000, need.len()))
+    i += 1000
+    stick body = json.stringify({queries: chunk.map(pack(p) => {package: {name: p.name, ecosystem: p.eco}, version: p.version})})
+    roll r = null
+    burn {
+      try {
+        r = proc.run("curl", ["-fsS", "--max-time", "60", "-X", "POST", OSV_API + "/v1/querybatch", "-H", "Content-Type: application/json", "--data-binary", "@-"], {stdin: body, timeout_ms: 90000})
+      } ashtray e {
+        r = {code: -1, out: "", err: e.message}
+      }
+    }
+    if r.code != 0 {
+      osv_note("known-bad packages were not checked: OSV could not be reached (" + clip(str(r.err).trim(), 120) + "); cigo audit --update-db builds a database to check offline")
+      snuff null
+    }
+    # One answer per package asked, or none of it is believed: an error
+    # page that parses is not a clean bill.
+    roll results = null
+    try {
+      results = map_get(json.parse(r.out), "results", null)
+    } ashtray e {
+      results = null
+    }
+    if type_of(results) != "list" or results.len() != chunk.len() {
+      osv_note("known-bad packages were not checked: OSV's answer could not be read")
+      snuff null
+    }
+    roll j = 0
+    for p in chunk {
+      stick res = results.get(j, {})
+      j += 1
+      stick ids = as_list(map_get(res, "vulns", [])).map(pack(x) => str(map_get(x, "id", "")))
+      out[osv_key(p)] = ids
+      cache[osv_key(p)] = {ids: ids, at: now}
+    }
+  }
+  if not need.is_empty() {
+    roll kept = {}
+    for k in cache {
+      if type_of(cache[k]) == "map" and now - int(cache[k].get("at", 0)) < osv_keep_ms(cache[k]) {
+        kept[k] = cache[k]
+      }
+    }
+    write_outside(cache_file, json.stringify(kept) + "\n")
+  }
+  snuff out
+}
+
+# The versions an advisory says fix it, by package (`eco|name`), from its
+# SEMVER and ECOSYSTEM ranges (a GIT range's fix is a commit, not a version).
+pull osv_fixes(v) {
+  roll out = {}
+  for a in as_list(v.get("affected", [])) {
+    stick pk = map_get(a, "package", {})
+    stick eco = str(map_get(pk, "ecosystem", ""))
+    stick key = eco + "|" + osv_name(eco, map_get(pk, "name", ""))
+    for rg in as_list(map_get(a, "ranges", [])) {
+      if ["SEMVER", "ECOSYSTEM"].contains(str(map_get(rg, "type", ""))) {
+        for e in as_list(map_get(rg, "events", [])) {
+          stick f = map_get(e, "fixed", null)
+          if f != null {
+            roll l = out.get(key, [])
+            if not l.contains(str(f)) {
+              l.push(str(f))
+            }
+            out[key] = l
+          }
+        }
+      }
+    }
+  }
+  snuff out
+}
+
+# How long a cached answer stands: a day when it names advisories, an hour
+# when it is clean.
+pull osv_keep_ms(c) {
+  if as_list(c.get("ids", [])).is_empty() {
+    snuff OSV_CLEAN_MS
+  }
+  snuff OSV_CACHE_MS
+}
+
+# Is this advisory a malicious package? MAL- ids are; otherwise its
+# weakness is embedded malicious code or hidden functionality, or it says so.
+pull osv_malware(id, v) {
+  if id.starts_with("MAL-") {
+    snuff true
+  }
+  stick cwes = map_get(v.get("database_specific", null), "cwe_ids", [])
+  if type_of(cwes) == "list" and (cwes.contains("CWE-506") or cwes.contains("CWE-912")) {
+    snuff true
+  }
+  snuff text.matches(str(v.get("summary", "")), '(?i)\bmalicious (code|package)|\bmalware\b')
+}
+
+# What each advisory is, online: {malware, severity, summary} by id, the
+# details fetched once (in parallel, within a cap) and kept.
+pull osv_details_online(ids) {
+  stick cache_file = path.join(OSV_DIR, "advisories.json")
+  roll cache = read_json_or(cache_file, {})
+  roll out = {}
+  roll need = []
+  for id in ids {
+    if id.starts_with("MAL-") {
+      out[id] = {malware: true, severity: "", summary: "", fixed: {}}
+    } else if type_of(cache.get(id, null)) == "map" and cache[id].has("fixed") {
+      out[id] = cache[id]
+    } else if need.len() < OSV_DETAIL_CAP and not need.contains(id) {
+      need.push(id)
+    }
+  }
+  if need.is_empty() {
+    snuff out
+  }
+  stick tmp = path.join(OSV_DIR, "tmp-details")
+  roll words = ["-fsS", "--max-time", "120", "--create-dirs", "--parallel", "--parallel-max", "16"]
+  for id in need {
+    words = words + ["-o", path.join(tmp, id + ".json"), OSV_API + "/v1/vulns/" + id]
+  }
+  burn {
+    try {
+      proc.run("curl", words, {timeout_ms: 180000})
+    } ashtray e {
+    }
+  }
+  for id in need {
+    # The advisory asked for, or nothing: an error body is not an advisory.
+    stick v = read_json_or(path.join(tmp, id + ".json"), null)
+    if type_of(v) == "map" and str(v.get("id", "")) == id {
+      stick d = {malware: osv_malware(id, v), severity: str(map_get(v.get("database_specific", null), "severity", "")), summary: clip(str(v.get("summary", "")), 120), fixed: osv_fixes(v)}
+      out[id] = d
+      cache[id] = d
+    }
+  }
+  remove_tree_outside(tmp)
+  write_outside(cache_file, json.stringify(cache) + "\n")
+  snuff out
+}
+
+# Compare two versions: dotted parts numerically where they are numbers,
+# a pre-release (`-rc1`, `1.0rc1`) before its release, build metadata
+# ignored. Semver exactly (npm, crates.io, Go); close enough for the rest,
+# whose own rules (PEP 440, Maven) the online check applies exactly.
+pull ver_cmp(a, b) {
+  stick pa = ver_parts(a)
+  stick pb = ver_parts(b)
+  roll i = 0
+  while i < math.max(pa.main.len(), pb.main.len()) {
+    stick x = pa.main.get(i, "0")
+    stick y = pb.main.get(i, "0")
+    stick nx = text.find(x, "^[0-9]+")
+    stick ny = text.find(y, "^[0-9]+")
+    if nx != null and ny != null and int(nx) != int(ny) {
+      snuff pick(int(nx) < int(ny), -1, 1)
+    }
+    if x != y {
+      # The same number, then whatever follows it: a suffix (rc1) comes first.
+      if nx != null and ny != null {
+        snuff pick(x.len() > y.len(), -1, 1)
+      }
+      snuff pick(x < y, -1, 1)
+    }
+    i += 1
+  }
+  if pa.pre == pb.pre {
+    snuff 0
+  }
+  if pa.pre == "" {
+    snuff 1
+  }
+  if pb.pre == "" {
+    snuff -1
+  }
+  snuff pick(pa.pre < pb.pre, -1, 1)
+}
+
+pull ver_parts(v) {
+  roll s = str(v)
+  if s.starts_with("v") {
+    s = s.slice(1)
+  }
+  stick plus = s.find("+")
+  if plus >= 0 {
+    s = s.slice(0, plus)
+  }
+  roll pre = ""
+  stick dash = s.find("-")
+  if dash >= 0 {
+    pre = s.slice(dash + 1)
+    s = s.slice(0, dash)
+  }
+  snuff {main: s.split("."), pre: pre}
+}
+
+# Is a version inside an OSV range ([kind, version] pairs in order)? In
+# from an introduced at or below it, out again from a fixed at or below it
+# or a last affected below it.
+pull in_range(version, pairs) {
+  roll inside = false
+  for e in pairs {
+    stick c = pick(e[1] == "0", 1, ver_cmp(version, e[1]))
+    if e[0] == "i" and c >= 0 {
+      inside = true
+    } else if e[0] == "f" and c >= 0 {
+      inside = false
+    } else if e[0] == "l" and c > 0 {
+      inside = false
+    }
+  }
+  snuff inside
+}
+
+# Offline: the database `cigo audit --update-db` built, one per ecosystem.
+pull osv_index(eco) {
+  if not OSV_INDEXES.has(eco) {
+    OSV_INDEXES[eco] = read_json_or(path.join(OSV_DIR, "db-" + slug(eco) + ".json"), null)
+  }
+  snuff OSV_INDEXES[eco]
+}
+
+pull osv_offline(pkgs) {
+  roll out = {}
+  roll missing = []
+  for p in pkgs {
+    stick idx = osv_index(p.eco)
+    if idx == null {
+      if not missing.contains(p.eco) {
+        missing.push(p.eco)
+      }
+    } else {
+      stick name = osv_name(p.eco, p.name)
+      stick ver = osv_ver(p.eco, p.version)
+      roll ids = idx.versions.get(name + "@" + ver, []) + idx.all.get(name, [])
+      for r in map_get(idx, "ranges", {}).get(name, []) {
+        if not ids.contains(r[0]) and in_range(ver, r[1]) {
+          ids.push(r[0])
+        }
+      }
+      out[osv_key(p)] = ids
+    }
+  }
+  if not missing.is_empty() {
+    osv_note("known-bad packages were not checked for " + missing.join(", ") + ": no offline database (cigo audit --update-db " + missing.join(" ") + ")")
+  }
+  snuff out
+}
+
+pull osv_details_offline(ids, pkgs) {
+  roll out = {}
+  for id in ids {
+    roll d = null
+    if id.starts_with("MAL-") {
+      d = {malware: true, severity: "", summary: ""}
+    }
+    roll fixed = {}
+    for p in pkgs {
+      stick idx = osv_index(p.eco)
+      if idx != null {
+        if d == null and idx.meta.has(id) {
+          stick m = idx.meta[id]
+          d = {malware: m.get(0, 0) == 1, severity: str(m.get(1, "")), summary: str(m.get(2, ""))}
+        }
+        stick name = osv_name(p.eco, p.name)
+        for r in map_get(idx, "ranges", {}).get(name, []) {
+          if r[0] == id {
+            for e in r[1] {
+              if e[0] == "f" {
+                stick key = p.eco + "|" + name
+                roll l = fixed.get(key, [])
+                if not l.contains(e[1]) {
+                  l.push(e[1])
+                }
+                fixed[key] = l
+              }
+            }
+          }
+        }
+      }
+    }
+    if d != null {
+      d["fixed"] = fixed
+      out[id] = d
+    }
+  }
+  snuff out
+}
+
+# The OSV findings for a task: one per package, malicious (E870, critical)
+# or known-vulnerable (E885, low; a little heavier at critical severity).
+pull osv_findings(t) {
+  stick mode = pick(flags.contains("--offline"), "offline", config().osv)
+  if mode == "off" {
+    snuff []
+  }
+  stick pkgs = task_packages(t)
+  if pkgs.is_empty() {
+    snuff []
+  }
+  # Not pick(): it evaluates both arms, and each asks somewhere else.
+  roll hits = null
+  if mode == "offline" {
+    hits = osv_offline(pkgs)
+  } else {
+    hits = osv_online(pkgs)
+  }
+  if hits == null {
+    snuff []
+  }
+  roll ids = []
+  for k in hits {
+    for id in hits[k] {
+      if not ids.contains(id) {
+        ids.push(id)
+      }
+    }
+  }
+  if ids.is_empty() {
+    snuff []
+  }
+  roll about = {}
+  if mode == "offline" {
+    about = osv_details_offline(ids, pkgs)
+  } else {
+    about = osv_details_online(ids)
+  }
+  roll found = []
+  for p in pkgs {
+    stick these = hits.get(osv_key(p), [])
+    if not these.is_empty() {
+      stick bad = these.filter(pack(id) => about.get(id, {}).get("malware", false))
+      stick vuln = these.filter(pack(id) => not about.get(id, {}).get("malware", false))
+      stick named = p.name + "@" + p.version
+      if not bad.is_empty() {
+        found.push({code: "E870", cat: "known-bad", w: 1.0, rule: "osv-malware", where: p.where, text: named, says: "a known malicious package (" + bad.join(", ") + ")"})
+      }
+      if not vuln.is_empty() {
+        stick sevs = vuln.map(pack(id) => str(about.get(id, {}).get("severity", "")))
+        stick worst = pick(sevs.contains("CRITICAL"), "critical", pick(sevs.contains("HIGH"), "high", pick(sevs.contains("MODERATE") or sevs.contains("MEDIUM"), "moderate", pick(sevs.contains("LOW"), "low", ""))))
+        stick shown = vuln.slice(0, math.min(4, vuln.len())).join(", ") + pick(vuln.len() > 4, " and " + str(vuln.len() - 4) + " more", "")
+        found.push({code: "E885", cat: "vulnerable", w: pick(worst == "critical", 0.45, 0.3), rule: "osv-vuln", where: p.where, text: named, says: str(vuln.len()) + " known vulnerabilit" + pick(vuln.len() == 1, "y", "ies") + pick(worst == "", "", ", the worst " + worst) + " (" + shown + "); " + osv_fix_text(p, vuln, about)})
+      }
+    }
+  }
+  snuff found
+}
+
+# The version that fixes every advisory a package has: for each, the lowest
+# fixed version above the one installed; the highest of those is the one
+# to move to. An advisory with no fix named is counted, not guessed.
+pull osv_fix_text(p, vuln, about) {
+  stick key = p.eco + "|" + osv_name(p.eco, p.name)
+  roll need_at = ""
+  roll unfixed = 0
+  for id in vuln {
+    roll lowest = ""
+    for f in as_list(map_get(map_get(about.get(id, {}), "fixed", {}), key, [])) {
+      if ver_cmp(f, p.version) > 0 and (lowest == "" or ver_cmp(f, lowest) < 0) {
+        lowest = f
+      }
+    }
+    if lowest == "" {
+      unfixed += 1
+    } else if need_at == "" or ver_cmp(lowest, need_at) > 0 {
+      need_at = lowest
+    }
+  }
+  if unfixed == 0 {
+    snuff "fixed in " + need_at
+  }
+  if unfixed == vuln.len() {
+    snuff "no fixed version is named"
+  }
+  snuff "fixed in " + need_at + " for all but " + str(unfixed)
+}
+
+# Remove a folder outside the pack (a hop, as write_outside).
+pull remove_tree_outside(dir) {
+  burn {
+    try {
+      if which("rm") != null {
+        proc.run("rm", ["-rf", "--", dir], {timeout_ms: 120000})
+      } else if powershell() != null {
+        proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "Remove-Item -LiteralPath $env:CIGO_FILE -Recurse -Force -ErrorAction SilentlyContinue; exit 0"], {env: {CIGO_FILE: dir}, timeout_ms: 120000})
+      }
+    } ashtray e {
+    }
+  }
+}
+
+# `cigo audit --update-db [<ecosystem>...]`: OSV's dump for each ecosystem
+# (the project's, by default) downloaded, read into a database of the
+# versions each advisory names, and the dump thrown away.
+pull do_update_db(g) {
+  roll ecos = targets
+  if ecos.is_empty() and g != null {
+    roll seen = []
+    for n in g.tasks {
+      if not g.tasks[n].get("group", false) {
+        for p in task_packages(g.tasks[n]) {
+          if not seen.contains(p.eco) {
+            seen.push(p.eco)
+          }
+        }
+      }
+    }
+    ecos = seen
+  }
+  if ecos.is_empty() {
+    ecos = OSV_ECOSYSTEMS
+  }
+  for eco in ecos {
+    if not OSV_ECOSYSTEMS.contains(eco) {
+      fail("no OSV ecosystem `${eco}` here; these are: ${OSV_ECOSYSTEMS.join(", ")}")
+    }
+  }
+  for eco in ecos {
+    stick url = OSV_DUMPS + "/" + eco + "/all.zip"
+    stick tmp = path.join(OSV_DIR, "tmp-" + slug(eco))
+    stick started = time.now_ms()
+    exhale "osv: ${eco}: fetching ${url}"
+    roll r = null
+    burn {
+      try {
+        if which("sh") != null {
+          r = proc.run("sh", ["-c", 'rm -rf "$1" && mkdir -p "$1/x" && curl -fsSL --max-time 1800 -o "$1/all.zip" "$2" && { unzip -q -o "$1/all.zip" -d "$1/x" 2>/dev/null || tar -xf "$1/all.zip" -C "$1/x"; }', "sh", tmp, url], {timeout_ms: 2400000})
+        } else {
+          r = proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "$d = $env:CIGO_FILE; Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path \"$d/x\" | Out-Null; Invoke-WebRequest -UseBasicParsing -Uri $env:CIGO_URL -OutFile \"$d/all.zip\"; Expand-Archive -Force -Path \"$d/all.zip\" -DestinationPath \"$d/x\""], {env: {CIGO_FILE: tmp, CIGO_URL: url}, timeout_ms: 2400000})
+        }
+      } ashtray e {
+        r = {code: -1, err: e.message}
+      }
+    }
+    if r.code != 0 {
+      remove_tree_outside(tmp)
+      fail("osv: ${eco}: the dump could not be fetched or unpacked: " + clip(str(r.err).trim(), 200))
+    }
+    roll versions = {}
+    roll every = {}
+    roll ranged = {}
+    roll meta = {}
+    roll n = 0
+    for f in fs.list(path.join(tmp, "x")) {
+      if f.ends_with(".json") {
+        try {
+          stick v = json.parse(fs.read_text(f))
+          stick id = str(v.get("id", ""))
+          n += 1
+          if not id.starts_with("MAL-") {
+            meta[id] = [pick(osv_malware(id, v), 1, 0), str(map_get(v.get("database_specific", null), "severity", "")), clip(str(v.get("summary", "")), 120)]
+          }
+          for a in v.get("affected", []) {
+            stick pk = a.get("package", {})
+            if str(pk.get("ecosystem", "")) == eco {
+              stick name = osv_name(eco, pk.get("name", ""))
+              for ver in a.get("versions", []) {
+                stick nv = name + "@" + osv_ver(eco, ver)
+                roll l = versions.get(nv, [])
+                if not l.contains(id) {
+                  l.push(id)
+                }
+                versions[nv] = l
+              }
+              for rg in a.get("ranges", []) {
+                stick ev = as_list(map_get(rg, "events", []))
+                stick from0 = ev.any(pack(e) => str(map_get(e, "introduced", "")) == "0")
+                stick ends = ev.any(pack(e) => type_of(e) == "map" and (e.has("fixed") or e.has("last_affected") or e.has("limit")))
+                if from0 and not ends {
+                  roll l = every.get(name, [])
+                  if not l.contains(id) {
+                    l.push(id)
+                  }
+                  every[name] = l
+                } else if ["SEMVER", "ECOSYSTEM"].contains(str(map_get(rg, "type", ""))) {
+                  # The range itself, judged at lookup: [kind, version]
+                  # pairs, i introduced, f fixed, l last affected.
+                  roll pairs = []
+                  for e in ev {
+                    if type_of(e) == "map" {
+                      if e.has("introduced") {
+                        pairs.push(["i", osv_ver(eco, e.introduced)])
+                      } else if e.has("fixed") {
+                        pairs.push(["f", osv_ver(eco, e.fixed)])
+                      } else if e.has("last_affected") {
+                        pairs.push(["l", osv_ver(eco, e.last_affected)])
+                      }
+                    }
+                  }
+                  if not pairs.is_empty() {
+                    roll l = ranged.get(name, [])
+                    l.push([id, pairs])
+                    ranged[name] = l
+                  }
+                }
+              }
+            }
+          }
+        } ashtray e {
+        }
+      }
+    }
+    if not write_outside(path.join(OSV_DIR, "db-" + slug(eco) + ".json"), json.stringify({ecosystem: eco, built: time.now_iso(), source: url, advisories: n, versions: versions, all: every, ranges: ranged, meta: meta}) + "\n") {
+      remove_tree_outside(tmp)
+      fail("osv: ${eco}: the database could not be written under ${tilde(OSV_DIR)}")
+    }
+    remove_tree_outside(tmp)
+    exhale "osv: ${eco}: ${n} advisories: ${versions.len()} versions named, ${ranged.len()} packages by range, ${every.len()} bad in every version (${duration(time.now_ms() - started)})"
+  }
+}
+
 # Scored per category: self-defense, or credentials with exfiltration, is
 # critical; the heaviest single finding sets the rest.
 pull risk_of(findings) {
@@ -6286,9 +7114,18 @@ pull report_verdict(name, v) {
   }
   stick top = top_finding(v.findings)
   exhale "cigo: `${name}` is rated ${v.risk} by the guard; " + headline(top)
+  roll vulns = 0
   for f in v.findings {
-    exhale "  ${f.code}  ${f.cat}  ${f.where}: ${f.text}"
-    exhale "        ${f.says}"
+    if f.code == "E885" {
+      vulns += 1
+    }
+    if f.code != "E885" or vulns <= 8 {
+      exhale "  ${f.code}  ${f.cat}  ${f.where}: ${f.text}"
+      exhale "        ${f.says}"
+    }
+  }
+  if vulns > 8 {
+    exhale "  and ${vulns - 8} more packages with known vulnerabilities: cigo audit ${name} lists them all"
   }
 }
 
@@ -6585,7 +7422,7 @@ pull guard_run(tasks, names, defaults) {
     if not t.get("group", false) {
       stick tr = trusted(t, n)
       if not tr.trusted {
-        stick v = static_read(t, n)
+        stick v = read_task(t, n)
         stick rehearsed = should_rehearse(t, v, defaults)
         if rehearsed {
           REHEARSE[n] = {static: v, fp: footprint_of(t) ?? {writes: [], reads: [], network: [], execs: [], registry_env: []}}
@@ -6765,7 +7602,7 @@ pull do_rehearse() {
 
 # `cigo audit [<task>...]`: the guard's read of each task, with nothing run.
 pull do_audit(g) {
-  expect_flags(["--json", "--plain"])
+  expect_flags(["--json", "--plain", "--offline"])
   roll names = targets
   if names.is_empty() {
     names = g.tasks.keys().sort().filter(pack(n) => not g.tasks[n].get("group", false) and not g.tasks[n].get("bad", false))
@@ -6777,7 +7614,7 @@ pull do_audit(g) {
       fail("no task `${n}`; `cigo list` shows them")
     }
     stick t = g.tasks[n]
-    stick v = static_read(t, n)
+    stick v = read_task(t, n)
     stick tr = pick(config().trust == "off", {trusted: false, key: trust_key(t, n)}, trusted(t, n))
     all[n] = {risk: v.risk, trusted: tr.trusted, key: tr.key, hooks: v.hooks.map(pack(h) => h.where), findings: v.findings}
     if RISKS.index_of(v.risk) > RISKS.index_of(worst) {
@@ -7890,8 +8727,15 @@ pull do_update() {
   roll r = null
   burn {
     # By name, from inside work: GNU tar reads the D: of a Windows path as
-    # a host.
-    r = proc.run("tar", ["-xzf", path.base(tarball)], {cwd: work, timeout_ms: 120000})
+    # a host. Through sh where there is one, so the hop starts in the
+    # project, as every write to cigo's own folder does: started in work,
+    # cig would watch work and call the unpacked files writes outside the
+    # pack it cannot undo (E752), which they are meant to be.
+    if which("sh") != null {
+      r = proc.run("sh", ["-c", 'cd "$1" && exec tar -xzf "$2"', "sh", work, path.base(tarball)], {timeout_ms: 120000})
+    } else {
+      r = proc.run("tar", ["-xzf", path.base(tarball)], {cwd: work, timeout_ms: 120000})
+    }
   }
   if r.code != 0 {
     fail("could not unpack ${path.base(tarball)}: ${r.err.trim()}")
@@ -7969,6 +8813,9 @@ pull dispatch() {
     do_adopt()
   } else if command == "outputs" {
     do_outputs()
+  } else if command == "audit" and flags.contains("--update-db") {
+    expect_flags(["--update-db"])
+    do_update_db(pick(fs.is_file(path.join(ROOT, MANIFEST)), pack() => build_graph(load()), pack() => null)())
   } else if ["list", "show", "plan", "check", "doctor", "run", "versions", "audit", "trust"].contains(command) {
     stick g = build_graph(load())
     if command == "list" {
