@@ -2843,6 +2843,49 @@ test("cigo rehearse rates a script by what it did, and applies none of it", pack
   says(usage.out + usage.err, "npm:left-pad")
 })
 
+test("a verdict is kept for the same bytes: asked again it is not rehearsed, --fresh rehearses, a forged one is refused", pack() {
+  if not rehearsal_here() {
+    snuff
+  }
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a verdict)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick first = guard_tool(dir, ["rehearse", "./clean.sh"], {})
+  if no_box_here(first) {
+    snuff
+  }
+  exits(first, 0)
+  says(first.out, "rehearsing ./clean.sh")
+  stick again = guard_tool(dir, ["rehearse", "./clean.sh"], {})
+  exits(again, 0)
+  says(again.out, "rehearsed ./clean.sh before")
+  assert(not again.out.contains("rehearsing ./clean.sh"), "the same bytes were rehearsed twice:\n" + again.out)
+  says(guard_tool(dir, ["rehearse", "./clean.sh", "--fresh"], {}).out, "rehearsing ./clean.sh")
+  # One byte more is another script.
+  burn {
+    fs.append_text(path.join(dir, "clean.sh"), ": one more line\n")
+  }
+  says(guard_tool(dir, ["rehearse", "./clean.sh"], {}).out, "rehearsing ./clean.sh")
+  # A kept high verdict edited to read clean does not verify: refused, and rehearsed again.
+  exits(guard_tool(dir, ["rehearse", "./replica.sh"], {}), 2)
+  roll forged_one = false
+  burn {
+    for f in fs.list(path.join(cigo_home(dir), "rehearsals")) {
+      if f.ends_with(".json") and fs.read_text(f).contains("\"high\"") {
+        fs.write_text(f, fs.read_text(f).replace("\"high\"", "\"none\""))
+        forged_one = true
+      }
+    }
+  }
+  assert(forged_one, "no kept high verdict to forge")
+  stick forged = guard_tool(dir, ["rehearse", "./replica.sh"], {})
+  says(forged.err, "not signed by your key")
+  exits(forged, 2)
+  says(forged.out, "rated high")
+})
+
 test("cigo toolchains shows a toolchain's footprint", pack() {
   stick dir = fresh("tests/fixtures/rehearse")
   stick r = tool_in(dir, ["toolchains", "node-npm"])
