@@ -1410,9 +1410,42 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
   }
   stick old = launch_env(dir, launcher, ["version"], {PATH: fake + path_sep + env.get("PATH", "")})
   exits(old, 2)
-  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.7.0 or newer")
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.12.0 or newer")
   stick j = json.parse(launch(dir, launcher, ["version", "--json"]).out)
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
+})
+
+test("every floor names the cig the tool needs", pack() {
+  # CIG_NEEDS is the floor. The pin cig reads, both launchers, both
+  # installers, the README and getting started say the same, and CI runs on it.
+  stick tool_src = fs.read_text(path.join(root, "orchestrate.cig")).replace("\r\n", "\n")
+  stick needs = text.captures(tool_src, '(?m)^stick CIG_NEEDS = ">=([0-9]+)\.([0-9]+)\.([0-9]+)"')
+  assert(needs != null, "no CIG_NEEDS floor in orchestrate.cig")
+  stick floor = needs[1] + "." + needs[2] + "." + needs[3]
+  stick pin = text.captures(tool_src, '(?m)^# cig >=([0-9.]+)$')
+  assert(pin != null, "no # cig pin in orchestrate.cig")
+  assert(pin[1] == floor, "the # cig pin says " + pin[1] + ", CIG_NEEDS says " + floor)
+  for f in ["bin/cigo", "install.sh"] {
+    stick got = text.captures(fs.read_text(path.join(root, f)).replace("\r\n", "\n"), '(?m)^needs_major=([0-9]+)\nneeds_minor=([0-9]+)\nneeds_patch=([0-9]+)$')
+    assert(got != null, "no needs_major, needs_minor, needs_patch in " + f)
+    stick says_floor = got[1] + "." + got[2] + "." + got[3]
+    assert(says_floor == floor, f + " says " + says_floor + ", CIG_NEEDS says " + floor)
+  }
+  for f in ["bin/cigo.launch.ps1", "install.ps1"] {
+    stick got = text.captures(fs.read_text(path.join(root, f)).replace("\r\n", "\n"), '(?m)^\$needsMajor = ([0-9]+)\n\$needsMinor = ([0-9]+)\n\$needsPatch = ([0-9]+)$')
+    assert(got != null, "no needsMajor, needsMinor, needsPatch lines in " + f)
+    stick says_floor = got[1] + "." + got[2] + "." + got[3]
+    assert(says_floor == floor, f + " says " + says_floor + ", CIG_NEEDS says " + floor)
+  }
+  stick readme = fs.read_text(path.join(root, "README.md"))
+  says(readme, "Needs `cig` " + floor + " or newer")
+  says(readme, "needs-cig%20" + floor + "%2B")
+  says(fs.read_text(path.join(root, "docs", "getting-started.md")), "the `cig` runtime, " + floor + " or newer")
+  stick pins = text.find_all(fs.read_text(path.join(root, ".github", "workflows", "ci.yml")), 'CIG_VERSION: v[0-9][0-9.]*')
+  assert(pins.len() > 0, "ci.yml pins no CIG_VERSION")
+  for got in pins {
+    assert(got == "CIG_VERSION: v" + floor, "ci.yml has " + got + ": CI runs on the floor, " + floor)
+  }
 })
 
 # ----- the launcher and the installer, on every shell (0.4.0) -----------------------
@@ -2728,7 +2761,7 @@ pull rehearsal_here() {
 }
 
 pull no_box_here(r) {
-  if (r.out + r.err).contains("E777") {
+  if (r.out + r.err).contains("E777") or (r.out + r.err).contains("the rehearsal is not possible here") {
     exhale "        (the contained box cannot be had here; the rehearsal tests step aside)"
     snuff true
   }

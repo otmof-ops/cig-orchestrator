@@ -54,9 +54,17 @@ judged by what it did. Needs cig 1.12.0.
   installs it in a scratch project inside the box, applies nothing, and
   says what it did beyond the ecosystem's footprint; `--json`, `--keep`;
   exit `0`/`1`/`2`/`3` by risk.
+- **Where the contained box cannot be had** (root, user namespaces turned
+  off as in many containers and some CI runners, a kernel before 5.12), the
+  rehearsal says so once and the guard reads instead: a task is never failed
+  for want of the box. cigo asks with one hop that does nothing.
 - **perl's setup fetches over HTTPS** (`cpanm --from https://www.cpan.org`):
   cpanm's default mirror is plain HTTP (CVE-2024-45321).
-- **cig 1.12.0 or later** is the floor (`CIG_NEEDS`).
+- **cig 1.12.0 or later** is the floor (`CIG_NEEDS`), and every place
+  that checks it says so: the tool's `# cig` pin, both launchers, both
+  installers, the README and the docs. They said 1.7.0, 1.7.1 or 1.3.1, and
+  `install.sh` matched versions by pattern, so a cig 1.5 or 1.6 got past
+  its 1.7.0. A test now holds them all to `CIG_NEEDS`.
 
 ## 1.3.0 — 2026-11-05
 

@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/otmof-ops/CigScript"><img alt="a CigScript tool" src="https://img.shields.io/badge/a-CigScript%20tool-f97316"></a>
-  <img alt="needs cig 1.7.0 or newer" src="https://img.shields.io/badge/needs-cig%201.7.0%2B-6b7280">
+  <img alt="needs cig 1.12.0 or newer" src="https://img.shields.io/badge/needs-cig%201.12.0%2B-6b7280">
   <a href="TOOLCHAINS.md"><img alt="60 toolchains" src="https://img.shields.io/badge/toolchains-60-6b7280"></a>
   <a href="docs/roadmap.md"><img alt="actively maintained" src="https://img.shields.io/badge/status-actively%20maintained-f97316"></a>
   <a href="LICENSE"><img alt="license Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6b7280"></a>
@@ -162,10 +162,10 @@ your sanity.
 
 ## Install
 
-Needs `cig` 1.7.0 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
+Needs `cig` 1.12.0 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
 
 ```sh
-tag=v0.4.0
+tag=v1.5.0
 base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
 curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz" && curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
 sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256" && tar -xzf "cig-orchestrator-$tag.tar.gz"
