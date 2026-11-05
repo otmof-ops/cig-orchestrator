@@ -28,6 +28,8 @@ The guard's findings where a team reads them (#56 step 6).
   uploaded to the pull request's Security tab.
 - A lockfile with thousands of packages is read in linear time (two lists
   that were searched once per package are maps now).
+- The one hop that asks whether cig can make a contained box no longer
+  leaves cig's note about a held layer (`E780`) behind it.
 
 ## 1.6.0 — 2026-11-05
 

@@ -7438,7 +7438,9 @@ pull contain_possible() {
     CONTAIN_OK = false
     burn {
       try {
-        stick r = proc.run("true", [], {box: {network: "off", contain: true, apply: "never"}, timeout_ms: 30000})
+        # `true` writes nothing, so nothing is held back and cig has no
+        # layer to tell you about.
+        stick r = proc.run("true", [], {box: {network: "off", contain: true}, timeout_ms: 30000})
         CONTAIN_OK = r.code == 0
         if r.get("layer", null) != null {
           proc.discard_layer(r.layer)
