@@ -2680,6 +2680,75 @@ test("the guard: trust and footprint are checked in the manifest, and --no-guard
 })
 
 
+# ----- the read, harder to fool (#69) ---------------------------------------------
+
+pull audit_of(dir, task) {
+  stick r = guard_tool(dir, ["audit", "--json", task], {})
+  exits(r, 0)
+  snuff json.parse(r.out).tasks[task]
+}
+
+pull has_finding(v, code, where_has) {
+  snuff v.findings.any(pack(f) => f.code == code and f.where.contains(where_has))
+}
+
+test("the read joins split strings: a credential path in pieces is found", pack() {
+  stick dir = fresh("tests/fixtures/guard-evasion")
+  stick v = audit_of(dir, "pieces")
+  assert(v.findings.filter(pack(f) => f.code == "E871").len() == 3, "expected three credential paths: ${json.stringify(v.findings)}")
+  assert(v.findings.all(pack(f) => f.says.contains("split pieces joined")), "the joined reading was not said")
+  assert(v.risk == "high", "rated ${v.risk}")
+})
+
+test("a host built from pieces is resolved, and one the read cannot see is a finding", pack() {
+  stick dir = fresh("tests/fixtures/guard-evasion")
+  stick split = audit_of(dir, "split")
+  assert(split.risk == "critical", "the split-string stealer is ${split.risk}")
+  assert(split.findings.any(pack(f) => f.code == "E872" and f.text.contains("45.12.0.7")), "the host was not folded to its address")
+  stick up = audit_of(dir, "unseen-upload")
+  assert(up.risk == "medium" and up.findings.any(pack(f) => f.rule == "exfil-upload-unseen"), "an upload to an unseen host: ${json.stringify(up)}")
+  stick get = audit_of(dir, "unseen-get")
+  assert(get.risk == "low" and get.findings.any(pack(f) => f.rule == "net-unseen"), "a download from an unseen host: ${json.stringify(get)}")
+})
+
+test("a hidden folder from the home packed up, then the network, is high", pack() {
+  stick dir = fresh("tests/fixtures/guard-evasion")
+  stick v = audit_of(dir, "dotpack")
+  assert(v.risk == "high" and v.findings.any(pack(f) => f.rule == "exfil-dotpack"), "${json.stringify(v)}")
+})
+
+test("base64 payloads are decoded and read, with both places named", pack() {
+  stick dir = fresh("tests/fixtures/guard-evasion")
+  stick v = audit_of(dir, "b64")
+  assert(v.risk == "high", "rated ${v.risk}")
+  assert(has_finding(v, "E875", "b64.sh:5"), "the decoder was not flagged")
+  assert(has_finding(v, "E871", "decoded from") and has_finding(v, "E871", "b64.sh:5"), "the payload was not read where it was decoded")
+  stick c = audit_of(dir, "b64-crit")
+  assert(c.risk == "critical", "a payload that sends credentials out is ${c.risk}")
+})
+
+test("decoding is bounded: three levels deep, within a size cap, nothing run", pack() {
+  stick dir = fresh("tests/fixtures/guard-evasion")
+  stick three = audit_of(dir, "nested3")
+  assert(has_finding(three, "E871", "decoded from decoded from decoded from"), "three levels were not read")
+  stick four = audit_of(dir, "nested4")
+  assert(not four.findings.any(pack(f) => f.code == "E871"), "a fourth level was read")
+  stick big = audit_of(dir, "big")
+  assert(not big.findings.any(pack(f) => f.code == "E871"), "a payload over the cap was decoded")
+  # Nothing ran: the audit reads only.
+  assert(not there(dir, "pkg.tgz") and not fs.exists("/tmp/k.tgz"), "something ran")
+})
+
+test("ordinary scripts stay none: the examples gain no findings", pack() {
+  for ex in ["examples/demo-app", "examples/polyglot"] {
+    stick dir = fresh(ex)
+    stick r = guard_tool(dir, ["audit", "--json"], {})
+    exits(r, 0)
+    stick v = json.parse(r.out)
+    assert(v.worst == "none", "${ex} gained findings: ${r.out}")
+  }
+})
+
 # ----- the rehearsal (#55, #56) -------------------------------------------------
 
 # The rehearsal needs cig 1.12.0's contained box: Linux, user namespaces,

@@ -182,6 +182,18 @@ is a finding with a code (`cig explain E873`), the place and the matching
 text, scored per category into a risk: `none`, `low`, `medium`, `high`,
 `critical`.
 
+Shell text is read twice: as written, and as the shell would join it, with
+the simple assignments made earlier in the same text folded in and the
+quotes that join pieces taken out, so `d="$HOME/.s""sh"` reads `~/.ssh` and
+a host built from parts reads as its address. A network command whose host
+the read still cannot see is a finding of its own (`E872`, low; medium for an
+upload of a local file), and a hidden folder from the home packed up before
+a network command is high. Whatever a decoder is fed (`base64 -d`, `xxd
+-r`, `printf '\x…'`, Python's `b64decode`, Node's `Buffer.from(…,
+'base64')`, PowerShell's `FromBase64String`) is decoded and read the same
+way, three levels deep and within a size cap, and its findings name both
+places (`decoded from scripts/x.sh:4`). All of it is text: nothing runs.
+
 ```
 cigo audit [<task>...] [--json]        the read, with nothing run
 cigo trust <task>                      approve a task as it is now (never critical)

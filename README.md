@@ -165,7 +165,7 @@ your sanity.
 Needs `cig` 1.12.0 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
 
 ```sh
-tag=v1.4.0
+tag=v1.5.0
 base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
 curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz" && curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
 sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256" && tar -xzf "cig-orchestrator-$tag.tar.gz"
