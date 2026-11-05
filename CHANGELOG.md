@@ -31,6 +31,11 @@ against [OSV](https://osv.dev) with the rest of the guard's read.
   whatever the setting.
 - The suite never asks the real OSV: its tests serve OSV's answers and a
   dump from fixtures, and check what would have been sent.
+- **`cigo update` no longer warns about its own download.** Unpacking the
+  release started in cigo's update folder, which cig then watched as a place
+  outside the project, so every update said the unpacked files were writes
+  "the kernel cannot undo" (`E752`). It starts in the project now, like
+  cigo's other writes to its own folder.
 
 ## 1.5.0 — 2026-11-05
 

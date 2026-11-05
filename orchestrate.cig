@@ -8727,8 +8727,15 @@ pull do_update() {
   roll r = null
   burn {
     # By name, from inside work: GNU tar reads the D: of a Windows path as
-    # a host.
-    r = proc.run("tar", ["-xzf", path.base(tarball)], {cwd: work, timeout_ms: 120000})
+    # a host. Through sh where there is one, so the hop starts in the
+    # project, as every write to cigo's own folder does: started in work,
+    # cig would watch work and call the unpacked files writes outside the
+    # pack it cannot undo (E752), which they are meant to be.
+    if which("sh") != null {
+      r = proc.run("sh", ["-c", 'cd "$1" && exec tar -xzf "$2"', "sh", work, path.base(tarball)], {timeout_ms: 120000})
+    } else {
+      r = proc.run("tar", ["-xzf", path.base(tarball)], {cwd: work, timeout_ms: 120000})
+    }
   }
   if r.code != 0 {
     fail("could not unpack ${path.base(tarball)}: ${r.err.trim()}")

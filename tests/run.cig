@@ -1382,6 +1382,8 @@ test("update --check reads the releases, and update installs a verified tarball 
   exits(up, 0)
   says(up.out, "updated: cig-orchestrator ")
   says(up.out, "-> 9.0.0 (verified)")
+  # Unpacking into cigo's own folder is not a write outside the pack to warn about.
+  assert(not up.err.contains("E752"), "the update warned about its own download:\n" + up.err)
   stick v = hop_env(dir, "cig", ["run", path.join(prefix, "share/cig-orchestrator/orchestrate.cig"), "--", "version"], more)
   exits(v, 0)
   says(v.out, "cig-orchestrator 9.0.0")
