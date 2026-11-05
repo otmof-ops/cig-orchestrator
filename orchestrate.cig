@@ -29,7 +29,7 @@
 
 pack { "." }
 
-stick VERSION = "1.7.0"
+stick VERSION = "1.8.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
 stick CIG_NEEDS = ">=1.12.0"
 stick REPO = "otmof-ops/cig-orchestrator"
@@ -3899,6 +3899,8 @@ pull do_help() {
   exhale "                              install it in cig's contained box (Linux) and say what it did beyond its footprint"
   exhale "  cigo rehearse --changed [--base=<rev>] [--list] [--max=N] [--json|--sarif|--markdown]"
   exhale "                              every package the lockfiles add or change since the default branch, rehearsed"
+  exhale "  cigo blacklist [list | add <thing> [--reason=...] [--expires=90d] | remove <entry> | why <thing> | reload]"
+  exhale "                              your own blacklist: packages, files, domains, ranges and URLs the guard refuses"
   exhale "  cigo trust [<task>|list|show <task>|revoke <task>|revoke --all]"
   exhale "                              approve a task as it is now (signed with the tin's key), or see and drop approvals"
   exhale "  cigo check [--strict]       the manifest, checked before anything runs"
@@ -5733,8 +5735,9 @@ stick HEADLINES = {
   E879: ["eyeing the tin", "going for the stash"],
   E886: ["someone's whispering to your agent"],
   E887: ["fine print in invisible ink"],
+  E580: ["this one's on the bad batch list", "you said never again to this one"],
 }
-stick PLAIN = {E871: "credential file named", E872: "exfiltration pattern", E873: "persistence", E874: "downloads and executes remote code", E875: "obfuscated code", E877: "destructive command", E878: "privilege escalation", E879: "references cig's or cigo's own state", E886: "text addressed to AI agents", E887: "invisible Unicode text"}
+stick PLAIN = {E580: "on the blacklist", E871: "credential file named", E872: "exfiltration pattern", E873: "persistence", E874: "downloads and executes remote code", E875: "obfuscated code", E877: "destructive command", E878: "privilege escalation", E879: "references cig's or cigo's own state", E886: "text addressed to AI agents", E887: "invisible Unicode text"}
 roll SAID = {}
 roll TRUST_NOTED = false
 
@@ -5857,7 +5860,11 @@ pull trust_files(key) {
 # a check of one. Exit 0 is a MAC (or a match), 1 a mismatch, anything else
 # a cig that cannot (before 1.11.0, or no key here).
 pull tin_mac(file, check) {
-  roll words = ["tin", "mac", file, "--label", TRUST_LABEL]
+  snuff tin_mac_as(file, check, TRUST_LABEL)
+}
+
+pull tin_mac_as(file, check, label) {
+  roll words = ["tin", "mac", file, "--label", label]
   if check != null {
     words = words + ["--check", check]
   }
@@ -6259,7 +6266,7 @@ pull scan_text(where, body, shellish, comments, depth, budget) {
 # against OSV.
 pull read_task(t, name) {
   stick v = static_read(t, name)
-  stick known = osv_findings(t)
+  stick known = osv_findings(t) + blacklist_findings(t)
   if known.is_empty() {
     snuff v
   }
@@ -7071,10 +7078,552 @@ pull do_update_db(g) {
   }
 }
 
+# ----- the blacklist: your own entries (#62 step 1) ----------------------------------
+#
+# What you never want installed, fetched or run again: a package (one version
+# or every one), a file by its sha256, a domain and its subdomains, an IPv4
+# range, a URL pattern. One entry per line in blacklist.d, signed with the
+# tin's key under cigo's blacklist label; checked in the guard's read, by
+# `cigo rehearse` and by `rehearse --changed`. A list changed by anything but
+# `cigo blacklist` is said (E587) and still counts, together with the last
+# copy of it that verified, so taking an entry out lets nothing through
+# until you sign the change (`cigo blacklist reload`).
+
+stick BLACKLIST_DIR = env.get("CIGO_BLACKLIST_DIR", path.join(pick(env.get("XDG_CONFIG_HOME", "") == "", path.join(fs.home(), ".config"), env.get("XDG_CONFIG_HOME", "")), "cigscript", "blacklist.d"))
+stick BLACKLIST_KEEP = path.join(CIGO_HOME, "blacklist")
+stick BLACKLIST_LABEL = "cigo-blacklist"
+stick MINE = "mine.list"
+stick ECO_OF = {npm: "npm", pypi: "PyPI", crates: "crates.io", go: "Go", gem: "RubyGems", composer: "Packagist", maven: "Maven", nuget: "NuGet"}
+stick PREFIX_OF = {npm: "npm", PyPI: "pypi", "crates.io": "crates", Go: "go", RubyGems: "gem", Packagist: "composer", Maven: "maven", NuGet: "nuget"}
+stick URL_RE = '(?i)\bhttps?://[^\s"\x27`<>)\]]+'
+roll BLACKLIST = null
+roll BLACKLIST_NOTED = {}
+
+# An IPv4 address as a number, or null.
+pull ipv4(s) {
+  stick c = text.captures(str(s), '^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$')
+  if c == null {
+    snuff null
+  }
+  roll n = 0
+  for i in [1, 2, 3, 4] {
+    stick b = int(c[i])
+    if b > 255 {
+      snuff null
+    }
+    n = n * 256 + b
+  }
+  snuff n
+}
+
+# A CIDR range as {base, size}, or null; a bare address is a range of one.
+pull cidr(s) {
+  stick parts = str(s).split("/")
+  stick ip = ipv4(parts.first())
+  if ip == null or parts.len() > 2 {
+    snuff null
+  }
+  roll bits = 32
+  if parts.len() == 2 {
+    if not text.matches(parts[1], '^[0-9]{1,2}$') or int(parts[1]) > 32 {
+      snuff null
+    }
+    bits = int(parts[1])
+  }
+  roll size = 1
+  roll i = bits
+  while i < 32 {
+    size = size * 2
+    i += 1
+  }
+  snuff {base: ip - ip % size, size: size}
+}
+
+# A URL pattern (`*` for anything) as an anchored regex.
+pull url_regex(pattern) {
+  roll out = "^"
+  for ch in str(pattern).chars() {
+    if ch == "*" {
+      out = out + ".*"
+    } else if "\\.+?()[]{}|^$".contains(ch) {
+      out = out + "\\" + ch
+    } else {
+      out = out + ch
+    }
+  }
+  snuff out + "$"
+}
+
+# What an entry's text says: {kind, ...}, or null for a line this does not
+# read. Kinds: package (eco, name, version or "" for every one), sha256,
+# domain, cidr, url.
+pull blacklist_parse(e) {
+  stick low = str(e).trim()
+  stick colon = low.find(":")
+  if colon > 0 {
+    stick kind = low.slice(0, colon).lower()
+    stick v = low.slice(colon + 1)
+    if kind == "sha256" and text.matches(v.lower(), '^[0-9a-f]{64}$') {
+      snuff {kind: "sha256", value: v.lower()}
+    }
+    if kind == "domain" {
+      roll d = v.lower()
+      if d.starts_with("*.") {
+        d = d.slice(2)
+      }
+      if text.matches(d, '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$') {
+        snuff {kind: "domain", value: d}
+      }
+      snuff null
+    }
+    if kind == "cidr" or kind == "ip" {
+      if cidr(v) != null {
+        snuff {kind: "cidr", value: v}
+      }
+      snuff null
+    }
+    if kind == "url" {
+      if text.matches(v, '(?i)^https?://') {
+        snuff {kind: "url", value: v}
+      }
+      snuff null
+    }
+    if kind == "http" or kind == "https" {
+      snuff {kind: "url", value: low}
+    }
+    if ECO_OF.has(kind) {
+      stick eco = ECO_OF[kind]
+      roll name = v
+      roll version = ""
+      stick eq = v.find("==")
+      if eco == "PyPI" and eq > 0 {
+        name = v.slice(0, eq)
+        version = v.slice(eq + 2)
+      } else {
+        # The last @ that is not the first character (npm's @scope/name).
+        roll at = -1
+        roll i = 1
+        while i < v.len() {
+          if v.slice(i, i + 1) == "@" {
+            at = i
+          }
+          i += 1
+        }
+        if at > 0 {
+          name = v.slice(0, at)
+          version = v.slice(at + 1)
+        }
+      }
+      if name == "" or name.contains(" ") {
+        snuff null
+      }
+      snuff {kind: "package", eco: eco, name: osv_name(eco, name), version: pick(version == "", "", osv_ver(eco, version))}
+    }
+  }
+  if text.matches(low.lower(), '^[0-9a-f]{64}$') {
+    snuff {kind: "sha256", value: low.lower()}
+  }
+  if cidr(low) != null {
+    snuff {kind: "cidr", value: low}
+  }
+  if text.matches(low, '(?i)^https?://') {
+    snuff {kind: "url", value: low}
+  }
+  snuff blacklist_parse("domain:" + low)
+}
+
+# An entry as one line of a list: its canonical text.
+pull entry_text(e) {
+  if e.kind == "package" {
+    stick head = PREFIX_OF.get(e.eco, e.eco.lower()) + ":" + e.name
+    if e.version == "" {
+      snuff head
+    }
+    snuff head + pick(e.eco == "PyPI", "==", "@") + e.version
+  }
+  snuff e.kind + ":" + e.value
+}
+
+# The entries of one list's text, each with its reason and expiry.
+pull list_entries(body, source) {
+  roll out = []
+  for line in body.lines() {
+    roll head = line
+    roll note = ""
+    stick hash_at = line.find(" #")
+    if line.trim().starts_with("#") {
+      head = ""
+    } else if hash_at >= 0 {
+      head = line.slice(0, hash_at)
+      note = line.slice(hash_at + 2).trim()
+    }
+    if head.trim() != "" {
+      roll expires = ""
+      stick ex = text.captures(note, '(?:^|\s)expires=([0-9]{4}-[0-9]{2}-[0-9]{2})\s*$')
+      if ex != null {
+        expires = ex[1]
+        note = note.slice(0, note.len() - ex[0].len()).trim()
+      }
+      stick e = blacklist_parse(head.trim())
+      if e != null {
+        out.push(e.merge({entry: entry_text(e), reason: note, expires: expires, source: source}))
+      }
+    }
+  }
+  snuff out
+}
+
+pull list_verifies(f) {
+  stick mac = f + ".mac"
+  if not fs.is_file(f) or not fs.is_file(mac) {
+    snuff false
+  }
+  snuff tin_mac_as(f, fs.read_text(mac).trim(), BLACKLIST_LABEL).code == 0
+}
+
+pull today() {
+  snuff time.now_iso().slice(0, 10)
+}
+
+# The entries in force: every list in BLACKLIST_DIR, each checked against its
+# signature. One that does not verify is said once (E587) and counts with
+# the last copy of it that did. Expired entries are left out (`list` shows
+# them).
+pull blacklist(all) {
+  if BLACKLIST == null {
+    roll out = []
+    if fs.is_dir(BLACKLIST_DIR) {
+      for f in fs.list(BLACKLIST_DIR).sort() {
+        stick name = path.base(f)
+        if name.ends_with(".list") {
+          roll entries = list_entries(fs.read_text(f), name)
+          stick ok = list_verifies(f)
+          if not ok {
+            if not BLACKLIST_NOTED.has(name) {
+              BLACKLIST_NOTED[name] = true
+              log.warn("E587 a list that does not verify: ${tilde(f)} was changed outside cigo blacklist; its entries still count, with the last copy of it that verified (cigo blacklist reload signs it once you have read the change)")
+            }
+            stick kept = path.join(BLACKLIST_KEEP, name)
+            if list_verifies(kept) {
+              stick have = entries.map(pack(e) => e.entry)
+              for e in list_entries(fs.read_text(kept), name) {
+                if not have.contains(e.entry) {
+                  entries.push(e)
+                }
+              }
+            }
+          }
+          out = out + entries.map(pack(e) => e.merge({verified: ok}))
+        }
+      }
+    }
+    BLACKLIST = out
+  }
+  if all {
+    snuff BLACKLIST
+  }
+  stick now = today()
+  snuff BLACKLIST.filter(pack(e) => e.expires == "" or e.expires >= now)
+}
+
+# Does an entry match a package?
+pull entry_matches_pkg(e, eco, name, version) {
+  snuff e.kind == "package" and e.eco == eco and e.name == osv_name(eco, name) and (e.version == "" or e.version == osv_ver(eco, version))
+}
+
+# Does an entry match a URL (and so its host)?
+pull entry_matches_url(e, url) {
+  if e.kind == "url" {
+    snuff text.matches(url, "(?i)" + url_regex(e.value))
+  }
+  stick c = text.captures(url, URL_HOST_RE)
+  if c == null {
+    snuff false
+  }
+  roll host = c[1].lower()
+  stick at = host.find("@")
+  if at >= 0 {
+    host = host.slice(at + 1)
+  }
+  stick colon = host.find(":")
+  if colon >= 0 {
+    host = host.slice(0, colon)
+  }
+  if e.kind == "domain" {
+    snuff host == e.value or host.ends_with("." + e.value)
+  }
+  if e.kind == "cidr" {
+    stick ip = ipv4(host)
+    stick r = cidr(e.value)
+    snuff ip != null and r != null and ip - ip % r.size == r.base
+  }
+  snuff false
+}
+
+pull blacklist_says(e) {
+  snuff "on your blacklist (" + e.source + pick(e.reason == "", "", ": " + e.reason) + ")"
+}
+
+# The guard's read against the blacklist: the lockfiles' packages, the
+# scripts the task names by their sha256, and the URLs in its text.
+pull blacklist_findings(t) {
+  stick entries = blacklist(false)
+  if entries.is_empty() {
+    snuff []
+  }
+  roll found = []
+  for p in task_packages(t) {
+    for e in entries {
+      if entry_matches_pkg(e, p.eco, p.name, p.version) {
+        found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: p.where, file: p.get("file", null), pkg: p.name, text: p.name + "@" + p.version, says: blacklist_says(e) + ": " + e.entry})
+      }
+    }
+  }
+  stick hashes = entries.filter(pack(e) => e.kind == "sha256")
+  if not hashes.is_empty() {
+    for f in task_files(t) {
+      stick h = hash.sha256_file(f)
+      for e in hashes {
+        if e.value == h {
+          found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: tilde(f), file: f, text: path.base(f) + " (sha256 " + h.slice(0, 12) + "…)", says: blacklist_says(e)})
+        }
+      }
+    }
+  }
+  stick nets = entries.filter(pack(e) => e.kind == "domain" or e.kind == "cidr" or e.kind == "url")
+  if not nets.is_empty() {
+    roll texts = []
+    if t.has("shell") {
+      texts.push({where: "shell", file: null, text: str(t.shell)})
+    }
+    stick words = task_words(t)
+    if not words.is_empty() and not t.has("shell") {
+      texts.push({where: "cmd", file: null, text: words.join(" ")})
+    }
+    for f in task_files(t) {
+      try {
+        texts.push({where: tilde(f), file: f, text: fs.read_text(f)})
+      } ashtray e {
+      }
+    }
+    roll said = {}
+    for src in texts {
+      for url in text.find_all(src.text, URL_RE) {
+        for e in nets {
+          stick key = src.where + " " + url + " " + e.entry
+          if not said.has(key) and entry_matches_url(e, url) {
+            said[key] = true
+            found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: src.where, file: src.file, needle: url, text: url, says: blacklist_says(e) + ": " + e.entry})
+          }
+        }
+      }
+    }
+  }
+  snuff found
+}
+
+# The blacklist's word on a rehearsal spec: findings for a package or a
+# script it names.
+pull blacklist_for_spec(spec) {
+  stick entries = blacklist(false)
+  if entries.is_empty() {
+    snuff []
+  }
+  roll found = []
+  if fs.is_file(spec) {
+    stick h = hash.sha256_file(spec)
+    for e in entries {
+      if e.kind == "sha256" and e.value == h {
+        found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: spec, text: spec, says: blacklist_says(e)})
+      }
+    }
+    snuff found
+  }
+  stick want = blacklist_parse(spec)
+  if want != null and want.kind == "package" {
+    for e in entries {
+      if entry_matches_pkg(e, want.eco, want.name, pick(want.version == "", "*any*", want.version)) or (want.version == "" and e.kind == "package" and e.eco == want.eco and e.name == want.name) {
+        found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: spec, text: spec, says: blacklist_says(e) + ": " + e.entry})
+      }
+    }
+  }
+  snuff found
+}
+
+# Write a list and sign it, and keep the copy that verified in cigo's own
+# folder, where a task that edits the list does not reach the copy's key.
+pull save_list(name, entries) {
+  stick f = path.join(BLACKLIST_DIR, name)
+  roll lines = ["# cigo blacklist: one entry per line; `cigo blacklist add` and `remove` keep it signed"]
+  for e in entries {
+    roll note = e.reason
+    if e.expires != "" {
+      note = pick(note == "", "", note + "   ") + "expires=" + e.expires
+    }
+    lines.push(e.entry + pick(note == "", "", "    # " + note))
+  }
+  stick body = lines.join("\n") + "\n"
+  for target in [f, path.join(BLACKLIST_KEEP, name)] {
+    if not write_outside(target, body) {
+      fail("could not write ${tilde(target)}")
+    }
+    stick r = tin_mac_as(target, null, BLACKLIST_LABEL)
+    if r.code != 0 {
+      fail("the list was written but could not be signed (" + clip(str(r.err).trim(), 160) + "); cig 1.11.0 or later with a key here signs it, and an unsigned list is said every run (E587)")
+    }
+    if not write_outside(target + ".mac", r.out.trim() + "\n") {
+      fail("could not write ${tilde(target)}.mac")
+    }
+  }
+  BLACKLIST = null
+}
+
+# --expires=90d or a date; "" for never.
+pull expiry(given) {
+  if given == "" {
+    snuff ""
+  }
+  if text.matches(given, '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') {
+    snuff given
+  }
+  stick d = text.captures(given, '^([0-9]+)d$')
+  if d == null {
+    fail("--expires=${given}: a date (2027-03-01) or a number of days (90d)")
+  }
+  snuff time.format_ms(time.now_ms() + int(d[1]) * 86400000, "%Y-%m-%d")
+}
+
+# `cigo blacklist [list|add|remove|why|reload]`.
+pull do_blacklist() {
+  expect_flags(["--json", "--plain", "--reason", "--expires", "--all"])
+  stick sub = targets.get(0, "list")
+  stick rest = targets.slice(math.min(1, targets.len()))
+  if sub == "list" {
+    stick entries = blacklist(true)
+    if flags.contains("--json") {
+      exhale json.stringify({dir: BLACKLIST_DIR, entries: entries.map(pack(e) => {entry: e.entry, kind: e.kind, reason: e.reason, expires: e.expires, expired: e.expires != "" and e.expires < today(), list: e.source, verified: e.verified})}, 2)
+      snuff
+    }
+    if entries.is_empty() {
+      exhale "your blacklist is empty (${tilde(BLACKLIST_DIR)}); cigo blacklist add <package|file|domain|range|url> --reason=..."
+      snuff
+    }
+    stick width = entries.map(pack(e) => e.entry.len()).max()
+    for e in entries {
+      stick gone = e.expires != "" and e.expires < today()
+      exhale e.entry.pad_right(width) + "  " + e.source + pick(e.verified, "", " (unsigned)") + pick(e.reason == "", "", "  " + e.reason) + pick(e.expires == "", "", pick(gone, "  expired " + e.expires, "  until " + e.expires))
+    }
+    snuff
+  }
+  if sub == "add" {
+    if rest.len() != 1 {
+      fail("cigo blacklist add <npm:name[@version] | pypi:name[==version] | crates:... | sha256:... | ./file | domain | 1.2.3.0/24 | https://url/*> [--reason=...] [--expires=90d]")
+    }
+    stick thing = rest.first()
+    roll e = null
+    roll note = flag_value("--reason", "")
+    if fs.is_file(thing) {
+      e = {kind: "sha256", value: hash.sha256_file(thing)}
+      if note == "" {
+        note = path.base(thing)
+      }
+    } else {
+      e = blacklist_parse(thing)
+    }
+    if e == null {
+      fail("cigo blacklist add ${thing}: not an entry this reads (a package as npm:name@1.2.3, a file, sha256:<hex>, a domain, an IPv4 range or https://... with * for anything)")
+    }
+    stick entry = entry_text(e)
+    stick mine = blacklist_mine()
+    if mine.any(pack(x) => x.entry == entry) {
+      exhale "${entry} is already on your blacklist"
+      snuff
+    }
+    save_list(MINE, mine + [e.merge({entry: entry, reason: note, expires: expiry(flag_value("--expires", ""))})])
+    exhale "blacklisted ${entry}" + pick(note == "", "", " (${note})") + ": the guard refuses a task that would install, fetch or run it"
+    snuff
+  }
+  if sub == "remove" {
+    if rest.len() != 1 {
+      fail("cigo blacklist remove <entry>, as cigo blacklist list shows it")
+    }
+    stick want = blacklist_parse(rest.first())
+    stick entry = pick(want == null, rest.first(), entry_text(want))
+    stick mine = blacklist_mine()
+    stick kept = mine.filter(pack(x) => x.entry != entry)
+    if kept.len() == mine.len() {
+      fail("${entry} is not on your list (${MINE}); cigo blacklist list shows what is")
+    }
+    save_list(MINE, kept)
+    exhale "removed ${entry} from your blacklist"
+    snuff
+  }
+  if sub == "why" {
+    if rest.len() != 1 {
+      fail("cigo blacklist why <package | file | url | host>")
+    }
+    stick thing = rest.first()
+    roll found = blacklist_for_spec(thing)
+    if found.is_empty() and (text.matches(thing, '(?i)^https?://') or blacklist_parse(thing) != null) {
+      stick url = pick(text.matches(thing, '(?i)^https?://'), thing, "https://" + thing + "/")
+      for e in blacklist(false) {
+        if entry_matches_url(e, url) {
+          found.push({code: "E580", text: thing, says: blacklist_says(e) + ": " + e.entry})
+        }
+      }
+    }
+    if found.is_empty() {
+      exhale "${thing} is not on your blacklist"
+      snuff
+    }
+    for f in found {
+      exhale "${thing}: " + f.says
+    }
+    exit(1)
+  }
+  if sub == "reload" {
+    if not attended() {
+      fail("cigo blacklist reload signs your list as it is now, so it is yours to do at a terminal, never under CI")
+    }
+    stick f = path.join(BLACKLIST_DIR, MINE)
+    if not fs.is_file(f) {
+      fail("there is no ${tilde(f)} to sign")
+    }
+    if list_verifies(f) {
+      exhale "${tilde(f)} is signed as it is; nothing to do"
+      snuff
+    }
+    stick now = list_entries(fs.read_text(f), MINE)
+    stick kept_file = path.join(BLACKLIST_KEEP, MINE)
+    stick before = pick(list_verifies(kept_file), list_entries(fs.read_text(kept_file), MINE), [])
+    stick had = before.map(pack(e) => e.entry)
+    stick has = now.map(pack(e) => e.entry)
+    for e in now.filter(pack(x) => not had.contains(x.entry)) {
+      exhale "  + ${e.entry}" + pick(e.reason == "", "", "   # " + e.reason)
+    }
+    for e in before.filter(pack(x) => not has.contains(x.entry)) {
+      exhale "  - ${e.entry}" + pick(e.reason == "", "", "   # " + e.reason)
+    }
+    save_list(MINE, now)
+    exhale "signed ${tilde(f)} as it is now: ${now.len()} entr" + pick(now.len() == 1, "y", "ies")
+    snuff
+  }
+  fail("cigo blacklist [list | add <thing> | remove <entry> | why <thing> | reload]")
+}
+
+# Your own list's entries, as written (expired ones too).
+pull blacklist_mine() {
+  stick f = path.join(BLACKLIST_DIR, MINE)
+  if not fs.is_file(f) {
+    snuff []
+  }
+  snuff list_entries(fs.read_text(f), MINE)
+}
+
 # ----- reports for code scanning and pull requests: SARIF and Markdown (#56 step 6) ---
 
 # The registry's titles for the codes the guard reports (`cig explain <code>`).
-stick CODE_TITLES = {E870: "a known malicious package", E871: "reads credentials", E872: "tries to send data out", E873: "persistence", E874: "fetch and run", E875: "obfuscation", E877: "wiper shape", E878: "asks for privilege", E879: "eyes cigo or the tin", E880: "outside the footprint", E885: "a known vulnerability", E886: "prompt injection", E887: "invisible instructions", E889: "a forged approval"}
+stick CODE_TITLES = {E580: "on the blacklist", E587: "a list that does not verify", E870: "a known malicious package", E871: "reads credentials", E872: "tries to send data out", E873: "persistence", E874: "fetch and run", E875: "obfuscation", E877: "wiper shape", E878: "asks for privilege", E879: "eyes cigo or the tin", E880: "outside the footprint", E885: "a known vulnerability", E886: "prompt injection", E887: "invisible instructions", E889: "a forged approval"}
 
 # A path as the project names it (forward slashes, from its root), or null
 # when it is not in the project.
@@ -7143,6 +7692,9 @@ pull finding_place(f, task_name) {
   if f.get("pkg", null) != null {
     snuff {file: rel, line: package_line(path.join(ROOT, rel), str(f.pkg))}
   }
+  if f.get("needle", null) != null {
+    snuff {file: rel, line: line_naming(path.join(ROOT, rel), str(f.needle))}
+  }
   snuff {file: rel, line: line}
 }
 
@@ -7161,7 +7713,7 @@ pull package_line(file, name) {
 # One finding's own level: critical for a known malicious package or a
 # finding that weighs it alone, then high, medium and low by weight.
 pull finding_level(f) {
-  if f.code == "E870" or f.w >= 1.0 {
+  if f.code == "E870" or f.code == "E580" or f.w >= 1.0 {
     snuff "critical"
   }
   if f.w >= 0.8 {
@@ -7250,7 +7802,7 @@ pull risk_of(findings) {
     snuff "none"
   }
   stick cats = findings.map(pack(f) => f.cat)
-  if cats.contains("self-defense") or (cats.contains("credentials") and cats.contains("exfiltration")) or findings.any(pack(f) => f.code == "E870") {
+  if cats.contains("self-defense") or (cats.contains("credentials") and cats.contains("exfiltration")) or findings.any(pack(f) => f.code == "E870" or f.code == "E580") {
     snuff "critical"
   }
   roll top = 0.0
@@ -7720,6 +8272,22 @@ pull do_rehearse() {
   if spec == "" or targets.len() > 1 {
     fail("cigo rehearse <npm:name[@version] | pypi:name[==version] | crates:name[@version] | ./script.sh>, or --changed")
   }
+  # On your blacklist: refused as it is, with nothing rehearsed.
+  stick listed = blacklist_for_spec(spec)
+  if not listed.is_empty() {
+    stick items = listed.map(pack(f) => {finding: f, subject: spec, place: null, risk: "critical"})
+    if flags.contains("--sarif") {
+      exhale json.stringify(sarif_log(items), 2)
+    } else if flags.contains("--markdown") {
+      exhale markdown_report("cigo rehearse " + spec, "critical", items, "")
+    } else if flags.contains("--json") {
+      exhale json.stringify({target: spec, risk: "critical", rehearsed: false, findings: listed}, 2)
+    } else {
+      report_verdict(spec, {risk: "critical", findings: listed})
+      exhale "  not rehearsed: it is on your blacklist (cigo blacklist why ${spec})"
+    }
+    exit(3)
+  }
   rehearse_ready()
   stick job = rehearse_spec(spec)
   if proc.which(job.tool) == null {
@@ -7962,12 +8530,18 @@ pull do_rehearse_changed() {
     exhale "since ${base}: ${todo.len()} package" + pick(todo.len() == 1, "", "s") + " new or changed in the lockfiles; each is rehearsed in the box and nothing is applied"
   }
   for x in todo {
+    stick listed = blacklist_for_spec(x.spec)
     stick job = rehearse_spec(x.spec)
-    if proc.which(job.tool) == null {
+    if listed.is_empty() and proc.which(job.tool) == null {
       skipped.push(x.pkg)
       continue
     }
-    stick r = rehearse_one(job, false)
+    roll r = null
+    if listed.is_empty() {
+      r = rehearse_one(job, false)
+    } else {
+      r = {target: x.spec, label: job.label, ecosystem: job.eco, risk: "critical", installed: false, rehearsed: false, findings: listed, seconds: 0}
+    }
     results.push(r.merge({where: x.pkg.where}))
     if RISKS.index_of(r.risk) > RISKS.index_of(worst) {
       worst = r.risk
@@ -7978,7 +8552,11 @@ pull do_rehearse_changed() {
       items.push({finding: f, subject: x.spec, place: place, risk: r.risk})
     }
     if human {
-      exhale "  ${x.spec}: ${r.risk} (${duration(int(r.seconds * 1000))})" + pick(r.installed, "", "; the install itself failed")
+      if r.get("rehearsed", true) == false {
+        exhale "  ${x.spec}: critical, on your blacklist; not rehearsed"
+      } else {
+        exhale "  ${x.spec}: ${r.risk} (${duration(int(r.seconds * 1000))})" + pick(r.installed, "", "; the install itself failed")
+      }
       if not r.findings.is_empty() {
         report_verdict(r.label, {risk: r.risk, findings: r.findings})
       }
@@ -9135,7 +9713,11 @@ pull do_update() {
     if att.code == 0 {
       trust = "attested"
     } else {
-      log.warn("the build attestation for ${rel.tag} could not be verified (${att.err.trim().slice(0, 120)}); the checksum matched. `gh auth login` lets gh check it")
+      if att.err.contains("unknown command") {
+        log.warn("the build attestation for ${rel.tag} was not checked: this gh has no `gh attestation` (gh 2.49 or later does); the checksum matched")
+      } else {
+        log.warn("the build attestation for ${rel.tag} could not be verified (${att.err.trim().slice(0, 120)}); the checksum matched. `gh auth login` lets gh check it")
+      }
     }
   }
   roll r = null
@@ -9223,6 +9805,8 @@ pull dispatch() {
     do_toolchains()
   } else if command == "rehearse" {
     do_rehearse()
+  } else if command == "blacklist" {
+    do_blacklist()
   } else if command == "adopt" {
     do_adopt()
   } else if command == "outputs" {

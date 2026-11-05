@@ -76,7 +76,7 @@ if ($i -lt $argsList.Count) { $rest = @($argsList[$i..($argsList.Count - 1)]) }
 $cmd = 'help'
 if ($rest.Count -gt 0) { $cmd = [string]$rest[0] }
 
-$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'crash', 'config', '--help', '-h', '--version')
+$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'crash', 'config', 'blacklist', '--help', '-h', '--version')
 if ($leaveDir -notcontains $cmd) {
     $startDir = (Get-Location).Path
     $dir = $startDir

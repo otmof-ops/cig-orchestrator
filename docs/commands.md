@@ -200,6 +200,7 @@ places (`decoded from scripts/x.sh:4`). All of it is text: nothing runs.
 cigo audit [<task>...] [--json]        the read, with nothing run
 cigo audit --sarif | --markdown        the same as a SARIF log for code scanning, or a table for a pull request
 cigo audit --offline [<task>...]       the same, with OSV read from this machine's database
+cigo blacklist add <thing>             your own entries, refused wherever the guard reads (below)
 cigo audit --update-db [<ecosystem>...] fetch OSV's dumps and build that database
 cigo trust <task>                      approve a task as it is now (never critical)
 cigo trust list | show <task> | revoke <task> | revoke --all
@@ -252,6 +253,40 @@ its advisories name, and throws the dump away; npm's is about 200 MB to
 fetch. The database is as fresh as its last update; run it again to catch
 what was reported since. `osv` is floored, and `offline` is the tightest:
 a project cannot send its packages to OSV when you chose not to.
+
+### Your blacklist: `cigo blacklist`
+
+What you never want installed, fetched or run again, refused wherever the
+guard reads (`E580`, critical): in a task's lockfiles, in the scripts it
+names, in the URLs its text holds, by `cigo rehearse` and by `rehearse
+--changed`.
+
+```
+cigo blacklist add npm:colors-plus@2.4.1     a package version (npm:colors-plus for every version)
+cigo blacklist add pypi:requestz==2.0.1      pypi, crates, go, gem, composer, maven and nuget the same way
+cigo blacklist add ./suspicious.bin          a file, by its sha256 (or sha256:<hex>)
+cigo blacklist add evil.example.com          a domain and its subdomains
+cigo blacklist add 45.12.0.0/16              an IPv4 range
+cigo blacklist add 'https://get.bad.test/*'  URLs by pattern
+         ... --reason="phished our team" --expires=90d
+cigo blacklist list [--json]                 every entry, its reason, and whether it is signed
+cigo blacklist why <package|file|url|host>   which entry matched and why (exits 1 when one did)
+cigo blacklist remove <entry>                as list shows it
+cigo blacklist reload                        sign a list you edited by hand, at a terminal
+```
+
+The entries live one per line in `~/.config/cigscript/blacklist.d/mine.list`
+(`#` starts the reason, `expires=2027-03-01` ends it), signed with the tin's
+key under cigo's own label. A list changed by anything but `cigo blacklist`
+does not verify: the run says so (`E587`), and its entries still count
+together with the last copy of it that verified. Taking an entry out of the
+file therefore lets nothing through, until you sign the change with `cigo
+blacklist reload`, which shows what changed and is refused under CI. Inside
+cig's box the key folder is empty, so a task cannot sign a list. An expired
+entry stays listed and no longer refuses anything. Running something
+blacklisted anyway, and the built-in list cigo will ship, come with #62's
+later steps; until then `cigo run <task> --run-untrusted=<task>`, at a
+terminal only, is the way through, as for any critical verdict.
 
 ### The rehearsal: the dry run is the real run
 
@@ -435,6 +470,7 @@ holds the before-bytes of what a task's `touches` named) under
 |---|---|
 | `config` | your settings (`cigo config`) |
 | `osv/` | OSV's answers and the advisories read (online), and one database per ecosystem (`cigo audit --update-db`) |
+| `blacklist/` | the last signed copy of each blacklist, which still counts when the list itself is changed by hand |
 | `crashes/<id>.json` | crash reports, yours until you send them (`cigo crash`) |
 | `update/<tag>/` | the last release `cigo update` downloaded and verified |
 
@@ -451,6 +487,7 @@ holds the before-bytes of what a task's `touches` named) under
 | `CIGO_VERSIONS=0` | no version warnings |
 | `CIGO_BOX=0`, `CIGO_BOX=1` | tasks on the tin, or in the box, where the manifest and the task say nothing (the default is the box on Linux and the tin elsewhere) |
 | `CIGO_UPDATE_MANIFEST`, `CIGO_YANKED_FILE` | a local releases list and YANKED file for `cigo update`, instead of GitHub's (the suite uses them) |
+| `CIGO_BLACKLIST_DIR` | where your blacklists live, instead of `~/.config/cigscript/blacklist.d` (the suite uses it) |
 | `CIGO_OSV_API`, `CIGO_OSV_DUMPS` | another OSV to ask (`https://api.osv.dev`) and another place for its dumps (`https://osv-vulnerabilities.storage.googleapis.com`): a mirror, or a fixture (the suite uses them) |
 | `CIGO_INTERNAL_PANIC=<command>` | crash on purpose at that command (`mid-run` for inside a run), for the suite |
 

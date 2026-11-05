@@ -5,6 +5,30 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.8.0 — 2026-11-05
+
+Your own blacklist (#62 step 1).
+
+- **`cigo blacklist add`** takes a package (one version, or every version:
+  npm, PyPI, crates.io, Go, RubyGems, Composer, Maven, NuGet), a file by its
+  sha256, a domain and its subdomains, an IPv4 range or a URL pattern, each
+  with `--reason` and `--expires`. `list`, `remove`, `why` and `reload` keep
+  it.
+- **Refused wherever the guard reads** (`E580`, critical): a task whose
+  lockfiles pin it, whose scripts hash to it, or whose text holds a URL it
+  matches; `cigo rehearse` of it is refused before the box is asked for, and
+  `rehearse --changed` reports it without rehearsing it. SARIF and Markdown
+  place it like any finding.
+- **Signed, so a script cannot quietly take an entry out.** The list is
+  signed with the tin's key under cigo's own label; a list changed by
+  anything but `cigo blacklist` is said (`E587`) and counts together with
+  the last copy that verified, until `cigo blacklist reload` (at a terminal,
+  never under CI) shows the change and signs it.
+- **`cigo update`** says when the build attestation was not checked because
+  this gh has no `gh attestation` (2.49 or later does), instead of
+  suggesting `gh auth login`.
+- Needs cig 1.12.3 for `cig explain E580` and `E587`; runs on 1.12.0.
+
 ## 1.7.0 — 2026-11-05
 
 The guard's findings where a team reads them (#56 step 6).
