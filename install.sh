@@ -35,10 +35,25 @@ if ! command -v cig >/dev/null 2>&1; then
   echo "install: cig is not on PATH. Install CigScript first: https://github.com/otmof-ops/CigScript#install" >&2
   exit 1
 fi
-version=$(cig --version | awk '{print $2}')
+# The same floor as the launcher and the tool's `# cig` pin.
+needs_major=1
+needs_minor=12
+needs_patch=0
+version=$(cig --version 2>/dev/null | awk '{print $2}')
 case "$version" in
-  ""|0.*|1.0.*|1.1.*|1.2.*|1.3.*|1.4.0|1.4.1)
-    echo "install: cig $version is too old; cig-orchestrator needs 1.7.0 or newer (cig update)" >&2
+  [0-9]*.[0-9]*.[0-9]*)
+    major=${version%%.*}; rest=${version#*.}; minor=${rest%%.*}; patch=${rest#*.}; patch=${patch%%[!0-9]*}
+    too_old=0
+    if [ "$major" -lt "$needs_major" ]; then too_old=1
+    elif [ "$major" -eq "$needs_major" ] && [ "$minor" -lt "$needs_minor" ]; then too_old=1
+    elif [ "$major" -eq "$needs_major" ] && [ "$minor" -eq "$needs_minor" ] && [ "${patch:-0}" -lt "$needs_patch" ]; then too_old=1
+    fi
+    if [ "$too_old" -eq 1 ]; then
+      echo "install: cig $version is too old; cig-orchestrator needs $needs_major.$needs_minor.$needs_patch or newer (cig update)" >&2
+      exit 1
+    fi ;;
+  *)
+    echo "install: could not read the version of cig (\`cig --version\` said: $version)" >&2
     exit 1 ;;
 esac
 
