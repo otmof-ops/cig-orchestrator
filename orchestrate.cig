@@ -29,7 +29,7 @@
 
 pack { "." }
 
-stick VERSION = "1.6.0"
+stick VERSION = "1.7.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
 stick CIG_NEEDS = ">=1.12.0"
 stick REPO = "otmof-ops/cig-orchestrator"
@@ -3890,13 +3890,15 @@ pull do_help() {
   exhale "  cigo plan [<task>...] [--only]"
   exhale "                              the order a run would take"
   exhale "  cigo show <task>            where a task comes from and everything it will do"
-  exhale "  cigo audit [<task>...] [--json] [--offline]"
+  exhale "  cigo audit [<task>...] [--json|--sarif|--markdown] [--offline]"
   exhale "                              what the guard reads before a task runs: install hooks, findings, and"
   exhale "                              the lockfiles' packages against OSV (name@version alone is sent)"
   exhale "  cigo audit --update-db [<ecosystem>...]"
   exhale "                              build the offline OSV database (npm, PyPI, crates.io, Go, RubyGems, Packagist, Maven, NuGet)"
   exhale "  cigo rehearse <npm:name[@version]|pypi:name[==version]|crates:name[@version]|./script.sh> [--json] [--keep]"
   exhale "                              install it in cig's contained box (Linux) and say what it did beyond its footprint"
+  exhale "  cigo rehearse --changed [--base=<rev>] [--list] [--max=N] [--json|--sarif|--markdown]"
+  exhale "                              every package the lockfiles add or change since the default branch, rehearsed"
   exhale "  cigo trust [<task>|list|show <task>|revoke <task>|revoke --all]"
   exhale "                              approve a task as it is now (signed with the tin's key), or see and drop approvals"
   exhale "  cigo check [--strict]       the manifest, checked before anything runs"
@@ -5930,7 +5932,7 @@ pull install_hooks(t) {
       if type_of(scripts) == "map" {
         for k in ["preinstall", "install", "postinstall"] {
           if scripts.has(k) {
-            hooks.push({where: str(pj.get("name", rel)) + " " + k, text: str(scripts[k]), hook: "npm"})
+            hooks.push({where: str(pj.get("name", rel)) + " " + k, text: str(scripts[k]), hook: "npm", file: path.join(ROOT, rel)})
           }
         }
       }
@@ -5941,7 +5943,7 @@ pull install_hooks(t) {
     stick p = path.join(task_dir(t), f)
     if fs.is_file(p) {
       try {
-        hooks.push({where: f, text: fs.read_text(p)})
+        hooks.push({where: f, text: fs.read_text(p), file: p})
       } ashtray e {
       }
     }
@@ -5993,7 +5995,7 @@ pull static_read(t, name) {
   }
   for f in task_files(t).filter(pack(p) => SCAN_EXTS.any(pack(e) => p.ends_with(e))) {
     try {
-      sources.push({where: tilde(f), text: fs.read_text(f)})
+      sources.push({where: tilde(f), text: fs.read_text(f), file: f})
     } ashtray e {
     }
   }
@@ -6001,7 +6003,7 @@ pull static_read(t, name) {
   if str(t.get("stage", "")) == "setup" {
     hooks = install_hooks(t)
     for h in hooks {
-      sources.push({where: h.where, text: h.text, hook: h.get("hook", "")})
+      sources.push({where: h.where, text: h.text, hook: h.get("hook", ""), file: h.get("file", null)})
     }
   }
   roll findings = []
@@ -6011,7 +6013,8 @@ pull static_read(t, name) {
     # Shell text: the task's own, a shell script it names, an npm install
     # hook (npm runs those with sh).
     stick shellish = inline or SHELL_EXTS.any(pack(e) => s.where.ends_with(e)) or s.get("hook", "") == "npm"
-    findings = findings + scan_text(s.where, s.text, shellish, not inline, 0, budget)
+    stick file = s.get("file", null)
+    findings = findings + scan_text(s.where, s.text, shellish, not inline, 0, budget).map(pack(x) => x.merge({file: file}))
   }
   snuff {risk: risk_of(findings), findings: findings, hooks: hooks}
 }
@@ -6302,15 +6305,22 @@ pull pkg(eco, name, version, where) {
 # The packages a lockfile names, each with its ecosystem; [] for a file this
 # does not read (or cannot parse).
 pull lock_packages(file) {
-  stick base = path.base(file)
-  stick where = tilde(file)
-  roll out = []
   roll body = ""
   try {
     body = unbom(fs.read_text(file))
   } ashtray e {
-    snuff out
+    snuff []
   }
+  roll out = lock_packages_in(path.base(file), body, tilde(file))
+  for p in out {
+    p["file"] = file
+  }
+  snuff out
+}
+
+# The packages a lockfile's text names (its name says which format).
+pull lock_packages_in(base, body, where) {
+  roll out = []
   try {
     if base == "package-lock.json" or base == "npm-shrinkwrap.json" {
       stick j = json.parse(body)
@@ -6424,11 +6434,11 @@ pull lock_packages(file) {
         }
       }
     } else if base == "go.sum" {
-      roll seen = []
+      roll seen = {}
       for line in body.lines() {
         stick c = text.captures(line, '^(\S+) (v[^\s/]+)(?:/go\.mod)? ')
-        if c != null and not seen.contains(c[1] + "@" + c[2]) {
-          seen.push(c[1] + "@" + c[2])
+        if c != null and not seen.has(c[1] + "@" + c[2]) {
+          seen[c[1] + "@" + c[2]] = true
           out.push(pkg("Go", c[1], c[2], where))
         }
       }
@@ -6488,7 +6498,7 @@ pull lock_packages(file) {
 # The packages a task's lockfiles name, each once.
 pull task_packages(t) {
   roll out = []
-  roll seen = []
+  roll seen = {}
   for f in task_lockfiles(t) {
     stick key = f + "#" + file_digest(f)
     if not OSV_PARSED.has(key) {
@@ -6496,8 +6506,8 @@ pull task_packages(t) {
     }
     for p in OSV_PARSED[key] {
       stick k = osv_key(p)
-      if not seen.contains(k) {
-        seen.push(k)
+      if not seen.has(k) {
+        seen[k] = true
         out.push(p)
       }
     }
@@ -6885,13 +6895,13 @@ pull osv_findings(t) {
       stick vuln = these.filter(pack(id) => not about.get(id, {}).get("malware", false))
       stick named = p.name + "@" + p.version
       if not bad.is_empty() {
-        found.push({code: "E870", cat: "known-bad", w: 1.0, rule: "osv-malware", where: p.where, text: named, says: "a known malicious package (" + bad.join(", ") + ")"})
+        found.push({code: "E870", cat: "known-bad", w: 1.0, rule: "osv-malware", where: p.where, file: p.get("file", null), pkg: p.name, text: named, says: "a known malicious package (" + bad.join(", ") + ")"})
       }
       if not vuln.is_empty() {
         stick sevs = vuln.map(pack(id) => str(about.get(id, {}).get("severity", "")))
         stick worst = pick(sevs.contains("CRITICAL"), "critical", pick(sevs.contains("HIGH"), "high", pick(sevs.contains("MODERATE") or sevs.contains("MEDIUM"), "moderate", pick(sevs.contains("LOW"), "low", ""))))
         stick shown = vuln.slice(0, math.min(4, vuln.len())).join(", ") + pick(vuln.len() > 4, " and " + str(vuln.len() - 4) + " more", "")
-        found.push({code: "E885", cat: "vulnerable", w: pick(worst == "critical", 0.45, 0.3), rule: "osv-vuln", where: p.where, text: named, says: str(vuln.len()) + " known vulnerabilit" + pick(vuln.len() == 1, "y", "ies") + pick(worst == "", "", ", the worst " + worst) + " (" + shown + "); " + osv_fix_text(p, vuln, about)})
+        found.push({code: "E885", cat: "vulnerable", w: pick(worst == "critical", 0.45, 0.3), rule: "osv-vuln", where: p.where, file: p.get("file", null), pkg: p.name, text: named, says: str(vuln.len()) + " known vulnerabilit" + pick(vuln.len() == 1, "y", "ies") + pick(worst == "", "", ", the worst " + worst) + " (" + shown + "); " + osv_fix_text(p, vuln, about)})
       }
     }
   }
@@ -7059,6 +7069,178 @@ pull do_update_db(g) {
     remove_tree_outside(tmp)
     exhale "osv: ${eco}: ${n} advisories: ${versions.len()} versions named, ${ranged.len()} packages by range, ${every.len()} bad in every version (${duration(time.now_ms() - started)})"
   }
+}
+
+# ----- reports for code scanning and pull requests: SARIF and Markdown (#56 step 6) ---
+
+# The registry's titles for the codes the guard reports (`cig explain <code>`).
+stick CODE_TITLES = {E870: "a known malicious package", E871: "reads credentials", E872: "tries to send data out", E873: "persistence", E874: "fetch and run", E875: "obfuscation", E877: "wiper shape", E878: "asks for privilege", E879: "eyes cigo or the tin", E880: "outside the footprint", E885: "a known vulnerability", E886: "prompt injection", E887: "invisible instructions", E889: "a forged approval"}
+
+# A path as the project names it (forward slashes, from its root), or null
+# when it is not in the project.
+pull project_rel(file) {
+  if file == null {
+    snuff null
+  }
+  roll f = str(file)
+  if f.starts_with("~/") {
+    f = path.join(fs.home(), f.slice(2))
+  }
+  if not path.is_abs(f) {
+    f = path.join(ROOT, f)
+  }
+  stick root = path.normalize(ROOT).replace("\\", "/")
+  stick full = path.normalize(f).replace("\\", "/")
+  if full.starts_with(root + "/") {
+    snuff full.slice(root.len() + 1)
+  }
+  snuff null
+}
+
+# The first line of a file holding a piece of text (from 1), 0 when none.
+pull line_naming(file, needle) {
+  roll n = 0
+  roll body = ""
+  try {
+    body = fs.read_text(file)
+  } ashtray e {
+    snuff 0
+  }
+  for line in body.lines() {
+    n += 1
+    if line.contains(needle) {
+      snuff n
+    }
+  }
+  snuff 0
+}
+
+# Where a finding is in the project: {file, line} (line 0 when it is not
+# known), or null when what it names is not a file here (a path in your home).
+pull finding_place(f, task_name) {
+  roll w = str(f.get("where", ""))
+  while w.starts_with("decoded from ") {
+    w = w.slice(13)
+  }
+  roll line = 0
+  stick c = text.captures(w, '^(.*):([0-9]+)$')
+  if c != null {
+    line = int(c[2])
+    w = c[1]
+  }
+  if w == "shell" or w == "cmd" {
+    snuff {file: MANIFEST, line: line_naming(path.join(ROOT, MANIFEST), "\"" + task_name + "\"")}
+  }
+  stick file = f.get("file", null) ?? w
+  stick rel = project_rel(file)
+  if rel == null {
+    snuff null
+  }
+  if str(file).ends_with("package.json") and w.contains(" ") {
+    # An npm install hook ("<package> <hook>"): the line that declares it.
+    snuff {file: rel, line: line_naming(path.join(ROOT, rel), "\"" + w.split(" ").last() + "\"")}
+  }
+  if f.get("pkg", null) != null {
+    snuff {file: rel, line: package_line(path.join(ROOT, rel), str(f.pkg))}
+  }
+  snuff {file: rel, line: line}
+}
+
+# The line of a lockfile that names a package: its own entry where the
+# format has one (npm's node_modules path, a quoted name), else any mention.
+pull package_line(file, name) {
+  for needle in ["node_modules/" + name + "\"", "\"" + name + "\"", "name = \"" + name + "\"", name] {
+    stick n = line_naming(file, needle)
+    if n > 0 {
+      snuff n
+    }
+  }
+  snuff 0
+}
+
+# One finding's own level: critical for a known malicious package or a
+# finding that weighs it alone, then high, medium and low by weight.
+pull finding_level(f) {
+  if f.code == "E870" or f.w >= 1.0 {
+    snuff "critical"
+  }
+  if f.w >= 0.8 {
+    snuff "high"
+  }
+  if f.w >= 0.5 {
+    snuff "medium"
+  }
+  snuff "low"
+}
+
+# GitHub's code scanning reads a rule's `security-severity`: critical from
+# 9.0, high from 7.0, medium from 4.0.
+stick SECURITY_SEVERITY = {critical: 9.5, high: 8.0, medium: 5.5, low: 3.0}
+stick SARIF_LEVEL = {critical: "error", high: "error", medium: "warning", low: "note"}
+
+# One SARIF 2.1.0 log: a result per finding, at its place in the project
+# when it has one, and a rule per code with the registry's title and the
+# heaviest severity it was seen at. Items are {finding, subject, place, risk}.
+pull sarif_log(items) {
+  roll sev = {}
+  for it in items {
+    stick v = SECURITY_SEVERITY[finding_level(it.finding)]
+    if v > sev.get(it.finding.code, 0.0) {
+      sev[it.finding.code] = v
+    }
+  }
+  roll rules = []
+  for code in sev.keys().sort() {
+    stick title = CODE_TITLES.get(code, code)
+    rules.push({id: code, name: title, shortDescription: {text: title}, helpUri: "https://github.com/otmof-ops/CigScript/blob/main/docs/ERRORS.md#" + code.lower() + "-" + title.replace(" ", "-"), help: {text: "cig explain " + code}, properties: {"security-severity": str(sev[code]), tags: ["security"]}})
+  }
+  roll results = []
+  for it in items {
+    stick f = it.finding
+    roll r = {ruleId: f.code, level: SARIF_LEVEL[finding_level(f)], message: {text: it.subject + ": " + str(f.text) + ": " + str(f.says)}, properties: {risk: it.risk, category: f.cat}}
+    if it.place != null {
+      roll loc = {artifactLocation: {uri: it.place.file, uriBaseId: "%SRCROOT%"}}
+      if it.place.line > 0 {
+        loc["region"] = {startLine: it.place.line}
+      }
+      r["locations"] = [{physicalLocation: loc}]
+    }
+    results.push(r)
+  }
+  roll log = {}
+  log["\$schema"] = "https://json.schemastore.org/sarif-2.1.0.json"
+  log["version"] = "2.1.0"
+  log["runs"] = [{tool: {driver: {name: "cig-orchestrator", semanticVersion: VERSION, informationUri: "https://github.com/" + REPO, rules: rules}}, results: results}]
+  snuff log
+}
+
+pull md_cell(v) {
+  snuff str(v).replace("|", "\\|").replace("\n", " ")
+}
+
+# A Markdown table for a pull request comment, the heaviest finding first.
+pull markdown_report(title, worst, items, clean) {
+  roll out = ["### " + title + ": " + worst, ""]
+  if items.is_empty() {
+    out.push(clean)
+    snuff out.join("\n")
+  }
+  out.push("| level | in | finding | where | what |")
+  out.push("|---|---|---|---|---|")
+  for it in items.sort_by(pack(x) => 0 - x.finding.w) {
+    stick f = it.finding
+    roll at = "-"
+    if it.place != null {
+      at = "`" + it.place.file + "`"
+      if it.place.line > 0 {
+        at = "`" + it.place.file + ":" + str(it.place.line) + "`"
+      }
+    }
+    out.push("| " + finding_level(f) + " | " + md_cell(it.subject) + " | `" + f.code + "` " + md_cell(CODE_TITLES.get(f.code, f.cat)) + " | " + at + " | " + md_cell(str(f.text) + ": " + str(f.says)) + " |")
+  }
+  out.push("")
+  out.push("`cig explain <code>` says what a code means.")
+  snuff out.join("\n")
 }
 
 # Scored per category: self-defense, or credentials with exfiltration, is
@@ -7468,7 +7650,12 @@ pull guard_run(tasks, names, defaults) {
 
 stick REHEARSE_DIR = ".cigo-rehearse"
 
+# What to rehearse for a spec: the job, carrying the spec it was asked as.
 pull rehearse_spec(spec) {
+  snuff rehearse_job(spec).merge({spec: spec})
+}
+
+pull rehearse_job(spec) {
   stick safe = '^[A-Za-z0-9@/._~^=<>*+!-]+$'
   roll eco = ""
   roll rest = spec
@@ -7518,12 +7705,51 @@ pull rehearse_spec(spec) {
     script: "mkdir -p ${d} && cd ${d} && cargo init --lib --vcs none --name cigo_rehearse -q && printf '\n[dependencies]\n%s = \"%s\"\n' '${crate}' '${version}' >> Cargo.toml && cargo build -q"}
 }
 
+# The exit code a verdict gives: what CI picks its line with.
+stick RISK_EXIT = {none: 0, low: 0, medium: 1, high: 2, critical: 3}
+
 pull do_rehearse() {
-  expect_flags(["--json", "--plain", "--keep"])
+  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max"])
+  if flags.contains("--changed") {
+    do_rehearse_changed()
+    snuff
+  }
   stick spec = targets.get(0, "")
   if spec == "" or targets.len() > 1 {
-    fail("cigo rehearse <npm:name[@version] | pypi:name[==version] | crates:name[@version] | ./script.sh>")
+    fail("cigo rehearse <npm:name[@version] | pypi:name[==version] | crates:name[@version] | ./script.sh>, or --changed")
   }
+  rehearse_ready()
+  stick job = rehearse_spec(spec)
+  if proc.which(job.tool) == null {
+    fail("${job.tool} not found: the rehearsal installs with the ecosystem's own tool")
+  }
+  stick human = not flags.contains("--json") and not flags.contains("--sarif") and not flags.contains("--markdown")
+  if human {
+    exhale "rehearsing ${job.label} (${job.eco}) in the box: nothing it does is applied"
+  }
+  stick r = rehearse_one(job, flags.contains("--keep"))
+  stick items = r.findings.map(pack(f) => {finding: f, subject: spec, place: null, risk: r.risk})
+  if flags.contains("--sarif") {
+    exhale json.stringify(sarif_log(items), 2)
+  } else if flags.contains("--markdown") {
+    exhale markdown_report("cigo rehearse " + spec, r.risk, items, "Nothing outside the ${job.eco} footprint.")
+  } else if flags.contains("--json") {
+    exhale json.stringify(r, 2)
+  } else {
+    say_rehearsal(r)
+  }
+  # The verdict is the answer, not a failure: the exit code says the risk
+  # (CI picks its line with it) and nothing is rolled back, as nothing of the
+  # rehearsal was applied.
+  stick code = RISK_EXIT.get(r.risk, 0)
+  if code != 0 {
+    exit(code)
+  }
+}
+
+# The rehearsal needs cig's contained box, and a place that is not your home
+# for its scratch project.
+pull rehearse_ready() {
   if not rehearsal_possible() {
     fail("the rehearsal needs cig 1.12.0 or later on Linux (this is cig ${cig.version()} on ${cig.os()}); cig update installs it")
   }
@@ -7533,10 +7759,11 @@ pull do_rehearse() {
   if path.normalize(ROOT) == path.normalize(fs.home()) {
     fail("cigo rehearse runs in a project or an empty folder, not in your home: its scratch project is made where you are, inside the box")
   }
-  stick job = rehearse_spec(spec)
-  if proc.which(job.tool) == null {
-    fail("${job.tool} not found: the rehearsal installs with the ecosystem's own tool")
-  }
+}
+
+# One rehearsal of a job (rehearse_spec), nothing printed: what it did and
+# the verdict. The layer is discarded unless kept.
+pull rehearse_one(job, keep) {
   roll expect = [REHEARSE_DIR + "/**", RUN_DIR + "/**"]
   for w in job.fp.writes {
     if w.starts_with("~/") {
@@ -7550,9 +7777,6 @@ pull do_rehearse() {
     }
   }
   stick box = {network: pick(allow.is_empty(), "off", "registry"), allow_hosts: allow, contain: true, apply: "never", expect: expect}
-  if not flags.contains("--json") {
-    exhale "rehearsing ${job.label} (${job.eco}) in the box: nothing it does is applied"
-  }
   stick started = time.now_ms()
   roll r = null
   burn {
@@ -7563,38 +7787,217 @@ pull do_rehearse() {
     }
   }
   stick findings = behaviour_findings(r.get("outside", []), r.get("refused", []))
-  stick risk = risk_of(findings)
-  stick ok = r.get("code", -1) == 0
   stick layer = r.get("layer", null)
-  if flags.contains("--json") {
-    exhale json.stringify({target: spec, ecosystem: job.eco, risk: risk, installed: ok, error: r.get("message", null), findings: findings, outside: r.get("outside", []), refused: r.get("refused", []), changed: r.get("changed", {}), layer: pick(flags.contains("--keep"), layer, null), seconds: (time.now_ms() - started) / 1000}, 2)
+  if layer != null and not keep {
+    burn {
+      proc.discard_layer(layer)
+    }
+  }
+  stick ok = r.get("code", -1) == 0
+  roll tail = ""
+  if not ok {
+    tail = clip(str(r.get("message", r.get("err", ""))).trim_end().lines().last() ?? "", 200)
+  }
+  snuff {target: job.spec, label: job.label, ecosystem: job.eco, risk: risk_of(findings), installed: ok, exit: r.get("code", null), error: r.get("message", null), last_line: tail, findings: findings, outside: r.get("outside", []), refused: r.get("refused", []), changed: r.get("changed", {}), layer: pick(keep, layer, null), seconds: (time.now_ms() - started) / 1000}
+}
+
+pull say_rehearsal(r) {
+  exhale "rehearsed ${r.label} in ${duration(int(r.seconds * 1000))}" + pick(r.installed, "", "; the install itself failed (exit ${r.exit ?? "?"})")
+  if r.findings.is_empty() {
+    exhale "  nothing outside the ${r.ecosystem} footprint: verdict none"
   } else {
-    exhale "rehearsed ${job.label} in ${duration(time.now_ms() - started)}" + pick(ok, "", "; the install itself failed (exit ${r.get("code", "?")})")
-    if findings.is_empty() {
-      exhale "  nothing outside the ${job.eco} footprint: verdict none"
-    } else {
-      report_verdict(job.label, {risk: risk, findings: findings})
+    report_verdict(r.label, {risk: r.risk, findings: r.findings})
+  }
+  if r.last_line != "" {
+    exhale "  last line: " + r.last_line
+  }
+  if r.layer != null {
+    exhale "  kept to be read: cig box list (cig box discard ${r.layer.replace("/", " ")} drops it)"
+  }
+}
+
+# ----- cigo rehearse --changed: what a pull request adds (#56 step 6) ---------------
+
+# The revision --changed compares with: --base, or the default branch.
+pull changed_base() {
+  stick given = flag_value("--base", "")
+  if given != "" {
+    if given.starts_with("-") or not text.matches(given, '^[A-Za-z0-9._/@{}~^-]+$') {
+      fail("--base=${given}: not a git revision this reads")
     }
-    if not ok {
-      stick tail = str(r.get("message", r.get("err", ""))).trim_end().lines().last() ?? ""
-      if tail != "" {
-        exhale "  last line: " + clip(tail, 200)
-      }
+    snuff given
+  }
+  roll inside = null
+  burn {
+    inside = proc.run("git", ["rev-parse", "--is-inside-work-tree"], {cwd: ROOT, timeout_ms: 10000})
+  }
+  if inside.code != 0 {
+    fail("cigo rehearse --changed reads the lockfiles' history: run it in a git checkout")
+  }
+  for ref in ["origin/HEAD", "origin/main", "origin/master", "main", "master"] {
+    roll r = null
+    burn {
+      r = proc.run("git", ["rev-parse", "--verify", "--quiet", ref + "^{commit}"], {cwd: ROOT, timeout_ms: 10000})
+    }
+    if r.code == 0 {
+      snuff ref
     }
   }
-  if layer != null {
-    if flags.contains("--keep") {
-      exhale "  kept to be read: cig box list (cig box discard ${layer.replace("/", " ")} drops it)"
-    } else {
+  fail("--changed compares with a base, and none of origin/HEAD, origin/main, origin/master, main or master is here: --base=<revision>")
+}
+
+# Every package a lockfile adds or changes since base: the lockfiles git
+# says differ (committed or not, and new ones), each read now and at base.
+pull changed_packages(base) {
+  stick specs = LOCKFILES.map(pack(n) => ":(glob)**/" + n)
+  roll d = null
+  roll u = null
+  burn {
+    d = proc.run("git", ["diff", "--name-only", "--relative", base, "--"] + specs, {cwd: ROOT, timeout_ms: 60000})
+    u = proc.run("git", ["ls-files", "--others", "--exclude-standard", "--"] + specs, {cwd: ROOT, timeout_ms: 60000})
+  }
+  if d.code != 0 {
+    fail("git could not compare with ${base}: " + clip(str(d.err).trim(), 200))
+  }
+  roll files = []
+  for line in (d.out + "\n" + pick(u.code == 0, u.out, "")).lines() {
+    stick f = line.trim()
+    if f != "" and not files.contains(f) {
+      files.push(f)
+    }
+  }
+  roll out = []
+  roll seen = {}
+  for rel in files {
+    stick abs = path.join(ROOT, rel)
+    if fs.is_file(abs) {
+      roll had = {}
+      roll b = null
       burn {
-        proc.discard_layer(layer)
+        b = proc.run("git", ["show", base + ":./" + rel], {cwd: ROOT, timeout_ms: 60000})
+      }
+      if b.code == 0 {
+        for p in lock_packages_in(path.base(rel), unbom(b.out), rel) {
+          had[osv_key(p)] = true
+        }
+      }
+      for p in lock_packages(abs) {
+        stick k = osv_key(p)
+        if not had.has(k) and not seen.has(k) {
+          seen[k] = true
+          out.push(p)
+        }
       }
     }
   }
-  # The verdict is the answer, not a failure: the exit code says the risk
-  # (CI picks its line with it) and nothing is rolled back, as nothing of the
-  # rehearsal was applied.
-  stick code = {none: 0, low: 0, medium: 1, high: 2, critical: 3}.get(risk, 0)
+  snuff out
+}
+
+# What rehearse calls a package, or null for one it does not rehearse (an
+# ecosystem it does not know yet, or a version that is not a registry's).
+pull rehearse_spec_of(p) {
+  stick safe = '^[A-Za-z0-9@/._~^=<>*+!-]+$'
+  roll spec = null
+  if p.eco == "npm" {
+    spec = "npm:" + p.name + "@" + p.version
+  } else if p.eco == "PyPI" {
+    spec = "pypi:" + p.name + "==" + p.version
+  } else if p.eco == "crates.io" {
+    spec = "crates:" + p.name + "@" + p.version
+  }
+  if spec == null or not text.matches(spec.slice(spec.find(":") + 1), safe) {
+    snuff null
+  }
+  snuff spec
+}
+
+# `cigo rehearse --changed [--base=<rev>] [--list] [--max=N]`: every package
+# the lockfiles add or change since base, rehearsed one by one, the verdict
+# blamed on the package and placed at its line in the lockfile.
+pull do_rehearse_changed() {
+  if not targets.is_empty() {
+    fail("cigo rehearse --changed takes no package: it finds them in the lockfiles")
+  }
+  stick most = int(flag_value("--max", "50"))
+  stick base = changed_base()
+  roll todo = []
+  roll skipped = []
+  for p in changed_packages(base) {
+    stick spec = rehearse_spec_of(p)
+    if spec == null {
+      skipped.push(p)
+    } else {
+      todo.push({spec: spec, pkg: p})
+    }
+  }
+  stick human = not flags.contains("--json") and not flags.contains("--sarif") and not flags.contains("--markdown")
+  stick over = math.max(0, todo.len() - most)
+  if over > 0 {
+    todo = todo.slice(0, most)
+  }
+  if flags.contains("--list") {
+    if flags.contains("--json") {
+      exhale json.stringify({base: base, rehearse: todo.map(pack(x) => x.spec), not_rehearsed: skipped.map(pack(p) => p.eco + ":" + p.name + "@" + p.version), over_max: over}, 2)
+    } else {
+      exhale "since ${base}: ${todo.len()} package" + pick(todo.len() == 1, "", "s") + " to rehearse"
+      for x in todo {
+        exhale "  ${x.spec}   (" + (project_rel(x.pkg.get("file", null)) ?? x.pkg.where) + ")"
+      }
+      for p in skipped {
+        exhale "  not rehearsed: ${p.eco} ${p.name}@${p.version} (npm, PyPI and crates.io are rehearsed)"
+      }
+      if over > 0 {
+        exhale "  and ${over} more past --max=${most}"
+      }
+    }
+    snuff
+  }
+  rehearse_ready()
+  roll worst = "none"
+  roll results = []
+  roll items = []
+  if human {
+    exhale "since ${base}: ${todo.len()} package" + pick(todo.len() == 1, "", "s") + " new or changed in the lockfiles; each is rehearsed in the box and nothing is applied"
+  }
+  for x in todo {
+    stick job = rehearse_spec(x.spec)
+    if proc.which(job.tool) == null {
+      skipped.push(x.pkg)
+      continue
+    }
+    stick r = rehearse_one(job, false)
+    results.push(r.merge({where: x.pkg.where}))
+    if RISKS.index_of(r.risk) > RISKS.index_of(worst) {
+      worst = r.risk
+    }
+    stick rel = project_rel(x.pkg.get("file", null))
+    stick place = pick(rel == null, null, {file: rel, line: package_line(x.pkg.get("file", ""), x.pkg.name)})
+    for f in r.findings {
+      items.push({finding: f, subject: x.spec, place: place, risk: r.risk})
+    }
+    if human {
+      exhale "  ${x.spec}: ${r.risk} (${duration(int(r.seconds * 1000))})" + pick(r.installed, "", "; the install itself failed")
+      if not r.findings.is_empty() {
+        report_verdict(r.label, {risk: r.risk, findings: r.findings})
+      }
+    }
+  }
+  if flags.contains("--sarif") {
+    exhale json.stringify(sarif_log(items), 2)
+  } else if flags.contains("--markdown") {
+    exhale markdown_report("cigo rehearse --changed (since " + base + ")", worst, items, "${results.len()} package" + pick(results.len() == 1, "", "s") + " rehearsed; nothing outside their footprints.")
+  } else if flags.contains("--json") {
+    exhale json.stringify({base: base, worst: worst, packages: results, not_rehearsed: skipped.map(pack(p) => p.eco + ":" + p.name + "@" + p.version), over_max: over}, 2)
+  } else {
+    for p in skipped {
+      exhale "  not rehearsed: ${p.eco} ${p.name}@${p.version}"
+    }
+    if over > 0 {
+      exhale "  and ${over} more past --max=${most}"
+    }
+    exhale "worst: ${worst}"
+  }
+  stick code = RISK_EXIT.get(worst, 0)
   if code != 0 {
     exit(code)
   }
@@ -7602,13 +8005,15 @@ pull do_rehearse() {
 
 # `cigo audit [<task>...]`: the guard's read of each task, with nothing run.
 pull do_audit(g) {
-  expect_flags(["--json", "--plain", "--offline"])
+  expect_flags(["--json", "--plain", "--offline", "--sarif", "--markdown"])
   roll names = targets
   if names.is_empty() {
     names = g.tasks.keys().sort().filter(pack(n) => not g.tasks[n].get("group", false) and not g.tasks[n].get("bad", false))
   }
   roll all = {}
   roll worst = "none"
+  roll items = []
+  stick human = not flags.contains("--json") and not flags.contains("--sarif") and not flags.contains("--markdown")
   for n in names {
     if not g.tasks.has(n) {
       fail("no task `${n}`; `cigo list` shows them")
@@ -7620,7 +8025,10 @@ pull do_audit(g) {
     if RISKS.index_of(v.risk) > RISKS.index_of(worst) {
       worst = v.risk
     }
-    if not flags.contains("--json") {
+    for f in v.findings {
+      items.push({finding: f, subject: n, place: finding_place(f, n), risk: v.risk})
+    }
+    if human {
       exhale "${n}: ${v.risk}" + pick(tr.trusted, " (approved as it is now)", "") + pick(v.hooks.is_empty(), "", "; ${v.hooks.len()} install hook" + pick(v.hooks.len() == 1, "", "s") + ": " + v.hooks.map(pack(h) => h.where).join(", "))
       for f in v.findings {
         exhale "  ${f.code}  ${f.cat}  ${f.where}: ${f.text}"
@@ -7628,7 +8036,11 @@ pull do_audit(g) {
       }
     }
   }
-  if flags.contains("--json") {
+  if flags.contains("--sarif") {
+    exhale json.stringify(sarif_log(items), 2)
+  } else if flags.contains("--markdown") {
+    exhale markdown_report("cigo audit", worst, items, "Every task reads `none`: nothing found.")
+  } else if flags.contains("--json") {
     exhale json.stringify({worst: worst, tasks: all}, 2)
   } else if names.len() > 1 {
     exhale "worst: ${worst}"

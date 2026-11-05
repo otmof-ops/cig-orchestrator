@@ -2987,6 +2987,135 @@ test("OSV: a project cannot turn it off, off asks nothing, and OSV out of reach 
   assert(there(dir, "done.txt"), "the task did not run")
 })
 
+# ----- reports for code scanning and pull requests (#56 step 6) -------------------
+
+# The line of a file that holds a piece of text, from 1.
+pull line_of(file, needle) {
+  roll n = 0
+  for line in fs.read_text(file).lines() {
+    n += 1
+    if line.contains(needle) {
+      snuff n
+    }
+  }
+  snuff 0
+}
+
+pull sarif_result(doc, code, where_has) {
+  for r in doc.runs[0].results {
+    if r.ruleId == code and json.stringify(r).contains(where_has) {
+      snuff r
+    }
+  }
+  snuff null
+}
+
+test("audit --sarif: a result per finding at its line in the project, a rule per code with the registry's title", pack() {
+  stick dir = fresh("tests/fixtures/guard")
+  stick r = guard_tool(dir, ["audit", "--sarif"], {})
+  exits(r, 0)
+  stick sarif = json.parse(r.out)
+  assert(sarif.version == "2.1.0", "version ${sarif.version}")
+  stick driver = sarif.runs[0].tool.driver
+  assert(driver.name == "cig-orchestrator", driver.name)
+  stick rule = driver.rules.filter(pack(x) => x.id == "E879").first()
+  assert(rule != null, json.stringify(driver.rules))
+  assert(rule.name == "eyes cigo or the tin", rule.name)
+  assert(rule.properties["security-severity"] == "9.5", json.stringify(rule))
+  # An inline command sits at its task's line in the manifest; a script finding at its own line.
+  stick tin = sarif_result(sarif, "E879", "cig-tasks.json")
+  assert(tin != null, r.out)
+  assert(tin.level == "error", json.stringify(tin))
+  stick at = tin.locations[0].physicalLocation
+  assert(at.artifactLocation.uri == "cig-tasks.json", json.stringify(at))
+  assert(at.region.startLine == line_of(path.join(dir, "cig-tasks.json"), "\"tin\""), json.stringify(at))
+  stick key = sarif_result(sarif, "E871", "install.sh")
+  assert(key != null, r.out)
+  assert(key.locations[0].physicalLocation.region.startLine == line_of(path.join(dir, "install.sh"), "id_ed25519"), json.stringify(key))
+  # Nothing but the project's own paths: no home, no absolute path.
+  assert(not r.out.contains(fs.home()), "a path from the home went into the report")
+})
+
+test("audit --markdown: one table for a pull request, the heaviest finding first", pack() {
+  stick dir = fresh("tests/fixtures/guard")
+  stick r = guard_tool(dir, ["audit", "--markdown"], {})
+  exits(r, 0)
+  says(r.out, "### cigo audit: critical")
+  says(r.out, "| level | in | finding | where | what |")
+  stick rows = r.out.lines().filter(pack(l) => l.starts_with("| ") and not l.starts_with("| level"))
+  assert(rows.first().starts_with("| critical | tin | `E879` eyes cigo or the tin | `cig-tasks.json:"), rows.first())
+  # A pipe in the evidence is escaped, so the table holds together.
+  says(r.out, "id_ed25519 \\| curl")
+  stick clean = guard_tool(dir, ["audit", "--markdown", "clean"], {})
+  says(clean.out, "### cigo audit: none")
+  says(clean.out, "nothing found")
+})
+
+test("audit --sarif places a known-bad package at its entry in the lockfile", pack() {
+  if not has_sh_and_curl() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/osv")
+  stick r = guard_tool(dir, ["audit", "--sarif", "install"], osv_online_env(dir))
+  exits(r, 0)
+  stick sarif = json.parse(r.out)
+  stick bad = sarif_result(sarif, "E870", "package-lock.json")
+  assert(bad != null, r.out)
+  assert(bad.level == "error", json.stringify(bad))
+  assert(bad.locations[0].physicalLocation.region.startLine == line_of(path.join(dir, "package-lock.json"), "node_modules/event-stream"), json.stringify(bad))
+  stick vuln = sarif_result(sarif, "E885", "package-lock.json")
+  assert(vuln != null and vuln.level == "note", json.stringify(vuln))
+})
+
+# A git history for --changed: the osv fixture at base with lodash older and
+# no event-stream, then the fixture as it is, and a new requirements.txt.
+pull changed_repo() {
+  stick dir = fresh("tests/fixtures/osv")
+  burn {
+    fs.rm(path.join(dir, "api"))
+    stick lock = path.join(dir, "package-lock.json")
+    stick now = fs.read_text(lock)
+    stick j = json.parse(now)
+    j.packages.remove("node_modules/event-stream")
+    j.packages["node_modules/lodash"].version = "4.17.10"
+    fs.write_text(lock, json.stringify(j, 2))
+    for words in [["init", "-q"], ["checkout", "-q", "-b", "main"], ["add", "-A"], ["-c", "user.name=suite", "-c", "user.email=suite@example.invalid", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"], ["checkout", "-q", "-b", "feature"]] {
+      stick g = proc.run("git", words, {cwd: dir, timeout_ms: 30000})
+      assert(g.code == 0, "git ${words.join(" ")}: ${g.err}")
+    }
+    fs.write_text(lock, now)
+    fs.write_text(path.join(dir, "requirements.txt"), "six==1.16.0\n")
+  }
+  snuff dir
+}
+
+test("rehearse --changed --list: what a branch adds or changes in its lockfiles, and nothing else", pack() {
+  if proc.which("git") == null {
+    exhale "      (skipped: needs git)"
+    snuff
+  }
+  stick dir = changed_repo()
+  stick r = guard_tool(dir, ["rehearse", "--changed", "--list", "--json"], {})
+  exits(r, 0)
+  stick j = json.parse(r.out)
+  assert(j.base == "main", "base ${j.base}")
+  assert(j.rehearse == ["npm:event-stream@3.3.6", "npm:lodash@4.17.15", "pypi:six==1.16.0"], json.stringify(j.rehearse))
+  # --max keeps the first N and counts the rest.
+  stick capped = json.parse(guard_tool(dir, ["rehearse", "--changed", "--list", "--json", "--max=1"], {}).out)
+  assert(capped.rehearse.len() == 1 and capped.over_max == 2, json.stringify(capped))
+  stick text_list = guard_tool(dir, ["rehearse", "--changed", "--list", "--base=main"], {})
+  says(text_list.out, "since main: 3 packages to rehearse")
+  says(text_list.out, "npm:lodash@4.17.15   (package-lock.json)")
+  # A base that would read as an option is refused before git sees it.
+  stick odd = guard_tool(dir, ["rehearse", "--changed", "--list", "--base=--output=x"], {})
+  exits(odd, 2)
+  says(odd.err, "not a git revision this reads")
+  # Outside git there is no history to compare.
+  stick plain = fresh("tests/fixtures/osv")
+  stick none = guard_tool(plain, ["rehearse", "--changed", "--list", "--base=main"], {GIT_CEILING_DIRECTORIES: path.dir(plain)})
+  exits(none, 2)
+})
+
 # ----- the end --------------------------------------------------------------
 
 # A contained hop's scratch folder lives outside the project (in /var/tmp),

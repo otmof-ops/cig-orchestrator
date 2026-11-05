@@ -37,7 +37,7 @@ jobs:
       - name: Install cigo
         run: |
           cd "$RUNNER_TEMP"
-          tag=v1.6.0
+          tag=v1.7.0
           base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
           curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz"
           curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
@@ -74,7 +74,7 @@ ci:
     - base=https://github.com/otmof-ops/CigScript/releases/download/v1.12.1
     - curl -fsSLO "$base/cig-v1.12.1-linux-x86_64" && curl -fsSLO "$base/cig-v1.12.1-linux-x86_64.sha256"
     - sha256sum -c cig-v1.12.1-linux-x86_64.sha256 && install -m 755 cig-v1.12.1-linux-x86_64 "$HOME/.local/bin/cig"
-    - tag=v1.6.0; base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
+    - tag=v1.7.0; base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
     - curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz" && curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
     - sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256" && tar -xzf "cig-orchestrator-$tag.tar.gz" && "cig-orchestrator-$tag/install.sh"
   script:
@@ -106,7 +106,7 @@ writes both directories to `GITHUB_PATH` for the steps that follow:
         run: |
           irm https://raw.githubusercontent.com/otmof-ops/CigScript/main/install.ps1 | iex
           $env:Path = "$env:LOCALAPPDATA\Programs\cig;$env:Path"
-          $tag = 'v1.6.0'
+          $tag = 'v1.7.0'
           $base = "https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
           irm "$base/cig-orchestrator-$tag.tar.gz" -OutFile cigo.tar.gz
           irm "$base/cig-orchestrator-$tag.tar.gz.sha256" -OutFile cigo.tar.gz.sha256
@@ -117,6 +117,43 @@ writes both directories to `GITHUB_PATH` for the steps that follow:
       - run: cigo doctor
       - run: cigo --no-rollback run ci
 ```
+
+## The guard in code scanning
+
+`cigo audit --sarif` writes the guard's read of every task (the static read
+and the lockfiles' packages against OSV) as a SARIF 2.1.0 log, each finding
+placed at its line in the project, so GitHub shows it in the pull request's
+Security tab. `cigo rehearse --changed --sarif` does the same for every
+package the pull request adds or changes in its lockfiles, each rehearsed in
+cig's contained box and placed at its entry in the lockfile.
+
+```yaml
+  guard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # --changed compares with the base branch
+      # Install cig and cigo as above, and the ecosystems' own tools.
+      - run: cigo audit --sarif > audit.sarif
+      # The box needs unprivileged user namespaces, which Ubuntu 24.04
+      # restricts; the runner is thrown away afterwards.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: cigo rehearse --changed --base=origin/${{ github.base_ref }} --sarif > rehearse.sarif
+        continue-on-error: true  # the exit code is the risk; the Security tab shows why
+      - uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: audit.sarif, category: cigo-audit }
+      - uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: rehearse.sarif, category: cigo-rehearse }
+```
+
+`--markdown` writes the same findings as one table for a pull request
+comment. The exit codes say the risk (`0` none or low, `1` medium, `2` high,
+`3` critical) for a job that should stop on its own line; `cigo audit`
+itself exits `0` and leaves that to the report.
 
 ## Worth knowing
 

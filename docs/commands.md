@@ -198,6 +198,7 @@ places (`decoded from scripts/x.sh:4`). All of it is text: nothing runs.
 
 ```
 cigo audit [<task>...] [--json]        the read, with nothing run
+cigo audit --sarif | --markdown        the same as a SARIF log for code scanning, or a table for a pull request
 cigo audit --offline [<task>...]       the same, with OSV read from this machine's database
 cigo audit --update-db [<ecosystem>...] fetch OSV's dumps and build that database
 cigo trust <task>                      approve a task as it is now (never critical)
@@ -298,7 +299,19 @@ cigo rehearse pypi:name[==version]     pip install in a scratch venv
 cigo rehearse crates:name[@version]    cargo build of a scratch crate
 cigo rehearse ./install.sh             a script you were told to run
               [--json] [--keep]        the full evidence; keep the layer to read (cig box list)
+cigo rehearse --changed [--base=<rev>] every package the lockfiles add or change since the base
+              [--list] [--max=N]       name them and rehearse nothing; at most N (50)
+              [--sarif | --markdown]   for code scanning or a pull request comment
 ```
+
+**`--changed`** is the pull request's question: which packages does this
+change bring in? It compares the lockfiles with the base (`--base=<rev>`, or
+the first of `origin/HEAD`, `origin/main`, `origin/master`, `main` and
+`master` that exists), committed or not, new lockfiles included, and takes
+every package that is new or at a new version. Each npm, PyPI and crates.io
+package is rehearsed on its own and its findings are placed at its entry in
+the lockfile; the rest are named as not rehearsed. `--list` stops at the
+names, and `--max` (50) keeps a lockfile refresh from rehearsing for an hour.
 
 It exits by risk: `0` none or low, `1` medium, `2` high, `3` critical. Off
 Linux, with an older cig, or where cig cannot make a contained box (root,
