@@ -82,8 +82,10 @@ pull hop_env(dir, program, words, more) {
       # for it: the fixtures' stub tools log outside the project, which the
       # box keeps read-only, and their writes are no toolchain's footprint.
       # Any report the tool's cig would file goes to a file tracker in the
-      # test folder, never a real one.
-      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CIG_SEAL_KEY: "file", CI: "", DEMO_REMOTE: dir + "-remote", CIGO_REHEARSE: "never", CIG_INTERNAL_TRACKER_DIR: path.join(work, "tracker")}.merge(more),
+      # test folder, never a real one. OSV is never asked: off, and under CI
+      # (where the environment cannot loosen it) pointed at nothing, so it
+      # fails at once; a test that wants it points it at a fixture.
+      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CIG_SEAL_KEY: "file", CI: "", DEMO_REMOTE: dir + "-remote", CIGO_REHEARSE: "never", CIGO_OSV: "off", CIGO_OSV_API: "file:///nonexistent/osv-api", CIGO_OSV_DUMPS: "file:///nonexistent/osv-dumps", CIG_INTERNAL_TRACKER_DIR: path.join(work, "tracker")}.merge(more),
       timeout_ms: 120000,
     })
   }
@@ -2441,8 +2443,8 @@ test("a preset sets the keys it names, and config diff shows what differs from i
   stick dir = fresh("tests/fixtures/chain")
   exits(tool_layers(dir, ["config", "preset", "paranoid"], {}), 0)
   says(tool_layers(dir, ["config", "versions"], {}).out, "always")
-  # The suite turns the rehearsal off in the environment; not here.
-  says(tool_layers(dir, ["config", "diff"], {CIGO_REHEARSE: ""}).out, "every setting is as the paranoid preset has it")
+  # The suite turns the rehearsal and OSV off in the environment; not here.
+  says(tool_layers(dir, ["config", "diff"], {CIGO_REHEARSE: "", CIGO_OSV: ""}).out, "every setting is as the paranoid preset has it")
   exits(tool_layers(dir, ["config", "install", "never"], {}), 0)
   stick d = tool_layers(dir, ["config", "diff"], {})
   says(d.out, "install")
@@ -2479,13 +2481,14 @@ test("the environment loosens a setting only at a terminal, never under CI", pac
 # ----- 1.3.0: the guard, first half (#55): the trust store, the static read, the verdict ------
 
 pull guard_tool(dir, words, more) {
-  # The static read's tests run without the rehearsal, at a terminal or not:
-  # `rehearse = never` in this test's own cigo home (the environment's
-  # loosening is ignored under CI). A test that wants the rehearsal passes
-  # CIGO_REHEARSE, which tightens it back.
+  # The static read's tests run without the rehearsal or OSV, at a terminal
+  # or not: `rehearse = never` and `osv = off` in this test's own cigo home
+  # (the environment's loosening is ignored under CI). A test that wants
+  # either passes CIGO_REHEARSE or CIGO_OSV, which tightens it back.
   stick marker = path.join(cigo_home(dir), ".rehearse-off")
   if not fs.exists(marker) {
     hop_env(dir, "cig", ["run", tool, "--", "config", "rehearse", "never"], {CIGO_HOME: cigo_home(dir)})
+    hop_env(dir, "cig", ["run", tool, "--", "config", "osv", "off"], {CIGO_HOME: cigo_home(dir)})
     burn {
       fs.write_text(marker, "")
     }
@@ -2845,6 +2848,141 @@ test("cigo toolchains shows a toolchain's footprint", pack() {
   says(r.out, "registry.npmjs.org")
   stick m = tool_in(dir, ["toolchains", "make"])
   says(m.out, "task runner")
+})
+
+# ----- known-bad packages, from OSV (#55 step 3) ---------------------------------
+
+# OSV's answers for the osv fixture, served from disk: a POST to a file://
+# URL reads the file. The wrapper writes down what curl was handed (its
+# words, and its stdin, the batch) and passes it on to the real curl.
+pull osv_online_env(dir) {
+  stick bin = dir + "-bin"
+  stick log = dir + "-curl"
+  burn {
+    fs.mkdir(bin)
+    fs.mkdir(log)
+    fs.write_text(path.join(bin, "curl"), [
+      '#!/bin/sh',
+      'cat > "$CURL_LOG/in.$$"',
+      'printf "%s\n" "$*" >> "$CURL_LOG/words"',
+      'exec "$REAL_CURL" "$@" < "$CURL_LOG/in.$$"',
+    ].join("\n") + "\n")
+    stick m = proc.run("chmod", ["755", path.join(bin, "curl")], {timeout_ms: 10000})
+    assert(m.code == 0, m.err)
+  }
+  snuff {CIGO_OSV: "online", CIGO_OSV_API: "file://" + path.join(dir, "api"), CURL_LOG: log, REAL_CURL: proc.which("curl"), PATH: bin + path_sep + env.get("PATH", "")}
+}
+
+# What went out to OSV: each batch curl read on stdin.
+pull osv_batches(dir) {
+  roll sent = []
+  for f in fs.list(dir + "-curl") {
+    if path.base(f).starts_with("in.") and fs.read_text(f).trim() != "" {
+      sent.push(json.parse(fs.read_text(f)))
+    }
+  }
+  snuff sent
+}
+
+pull has_sh_and_curl() {
+  if on_windows or proc.which("curl") == null {
+    exhale "      (skipped: needs sh and curl)"
+    snuff false
+  }
+  snuff true
+}
+
+test("OSV online: a malicious package is refused, a vulnerable one reported, and only ecosystem, name and version go out", pack() {
+  if not has_sh_and_curl() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/osv")
+  stick osv = osv_online_env(dir)
+  stick a = guard_tool(dir, ["audit", "install"], osv)
+  exits(a, 0)
+  says(a.out, "install: critical")
+  says(a.out, "E870")
+  says(a.out, "event-stream@3.3.6")
+  says(a.out, "a known malicious package (MAL-0000-test-1)")
+  says(a.out, "E885")
+  says(a.out, "lodash@4.17.15")
+  says(a.out, "1 known vulnerability, the worst high (GHSA-test-0002); fixed in 4.17.21")
+  assert(not a.out.contains("left-pad"), "a clean package was reported:\n" + a.out)
+  # One batch went out, and in it each package's ecosystem, name and version, nothing else.
+  stick sent = osv_batches(dir)
+  assert(sent.len() == 1, "expected one batch, got ${sent.len()}")
+  stick qs = sent[0].queries
+  assert(qs.map(pack(q) => q.package.name).sort() == ["event-stream", "left-pad", "lodash"], json.stringify(qs))
+  for q in qs {
+    assert(q.keys().sort() == ["package", "version"], json.stringify(q))
+    assert(q.package.keys().sort() == ["ecosystem", "name"], json.stringify(q))
+    assert(q.package.ecosystem == "npm", json.stringify(q))
+  }
+  assert(not json.stringify(sent).contains(path.base(dir)), "the project's path went out: " + json.stringify(sent))
+  # The run is refused before anything is installed, on the answers kept: OSV is not asked again.
+  stick r = guard_tool(dir, ["run", "install"], osv)
+  exits(r, 1)
+  says(r.out, "E870")
+  says(r.err, "refused")
+  assert(not there(dir, "done.txt"), "the refused install ran")
+  assert(osv_batches(dir).len() == 1, "OSV was asked again within the day")
+})
+
+test("OSV offline: the database built from OSV's dump finds the same, by version and by range, and asks OSV nothing", pack() {
+  if not has_sh_and_curl() {
+    snuff
+  }
+  if proc.which("python3") == null {
+    exhale "      (skipped: needs python3 to zip the dump)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/osv")
+  stick dumps = dir + "-dumps"
+  burn {
+    fs.mkdir(path.join(dumps, "npm"))
+    stick z = proc.run("python3", ["-c", "import os, sys, zipfile\nsrc, out = sys.argv[1], sys.argv[2]\nwith zipfile.ZipFile(out, 'w') as z:\n    for f in sorted(os.listdir(src)):\n        z.write(os.path.join(src, f), f)\n", path.join(root, "tests", "fixtures", "osv-dump", "npm"), path.join(dumps, "npm", "all.zip")], {timeout_ms: 30000})
+    assert(z.code == 0, z.err)
+  }
+  # OSV's API is a folder that does not exist: asking it would be said.
+  stick off = {CIGO_OSV_DUMPS: "file://" + dumps, CIGO_OSV_API: "file://" + path.join(dir, "no-api")}
+  stick u = guard_tool(dir, ["audit", "--update-db", "npm"], off)
+  exits(u, 0)
+  says(u.out, "osv: npm: 3 advisories: 1 versions named, 2 packages by range, 0 bad in every version")
+  stick a = guard_tool(dir, ["audit", "install"], off.merge({CIGO_OSV: "offline"}))
+  exits(a, 0)
+  says(a.out, "install: critical")
+  says(a.out, "a known malicious package (MAL-0000-test-1)")
+  says(a.out, "lodash@4.17.15")
+  says(a.out, "the worst high (GHSA-test-0002); fixed in 4.17.21")
+  assert(not a.out.contains("left-pad"), "left-pad 1.3.0 is where the fix landed, not affected:\n" + a.out)
+  assert(not a.err.contains("could not be reached"), "offline asked OSV:\n" + a.err)
+  # --offline asks for the same for one audit, whatever the setting.
+  stick once = guard_tool(dir, ["audit", "--offline", "install"], off)
+  exits(once, 0)
+  says(once.out, "install: critical")
+  # A dump that cannot be fetched is said, and no database is made of it.
+  stick missing = guard_tool(dir, ["audit", "--update-db", "PyPI"], off)
+  exits(missing, 2)
+  says(missing.err, "osv: PyPI: the dump could not be fetched or unpacked")
+})
+
+test("OSV: a project cannot turn it off, off asks nothing, and OSV out of reach is said once while the run goes on", pack() {
+  stick dir = fresh("tests/fixtures/osv")
+  edit_manifest(dir, pack(m) {
+    m.settings = {osv: "off"}
+  })
+  stick chk = tool_layers(dir, ["check"], {CIGO_OSV: ""})
+  says(chk.out + chk.err, "`settings.osv` asks for `off`, looser than your `online`")
+  says(tool_layers(dir, ["config", "osv"], {CIGO_OSV: ""}).out, "online")
+  # Off by the user's own choice: nothing is read against OSV.
+  stick quiet = guard_tool(dir, ["audit", "install"], {})
+  exits(quiet, 0)
+  says(quiet.out, "install: none")
+  # Online and out of reach: said once, and the run goes on with the rest of the guard.
+  stick far = guard_tool(dir, ["run", "install"], {CIGO_OSV: "online"})
+  exits(far, 0)
+  says(far.err, "known-bad packages were not checked: OSV could not be reached")
+  assert(there(dir, "done.txt"), "the task did not run")
 })
 
 # ----- the end --------------------------------------------------------------

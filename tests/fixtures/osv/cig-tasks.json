@@ -1,0 +1,6 @@
+{
+  "project": "osv",
+  "tasks": {
+    "install": {"cmd": ["sh", "-c", "echo installed > done.txt"], "desc": "stands in for npm ci: the lockfile beside it names what it would install"}
+  }
+}

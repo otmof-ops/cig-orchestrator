@@ -1,0 +1,1 @@
+{"id": "GHSA-test-0002", "summary": "Prototype pollution in lodash (a fixture)", "database_specific": {"severity": "HIGH", "cwe_ids": ["CWE-1321"]}, "affected": [{"package": {"ecosystem": "npm", "name": "lodash"}, "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "4.17.21"}]}]}]}

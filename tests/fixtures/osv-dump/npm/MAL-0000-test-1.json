@@ -1,0 +1,1 @@
+{"id": "MAL-0000-test-1", "summary": "Malicious code in event-stream (a fixture)", "affected": [{"package": {"ecosystem": "npm", "name": "event-stream"}, "versions": ["3.3.6"]}]}

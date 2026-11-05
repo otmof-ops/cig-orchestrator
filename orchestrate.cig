@@ -29,7 +29,7 @@
 
 pack { "." }
 
-stick VERSION = "1.5.0"
+stick VERSION = "1.6.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
 stick CIG_NEEDS = ">=1.12.0"
 stick REPO = "otmof-ops/cig-orchestrator"
@@ -5953,7 +5953,10 @@ pull install_hooks(t) {
 stick OSV_DIR = path.join(CIGO_HOME, "osv")
 stick OSV_API = env.get("CIGO_OSV_API", "https://api.osv.dev")
 stick OSV_DUMPS = env.get("CIGO_OSV_DUMPS", "https://osv-vulnerabilities.storage.googleapis.com")
+# An answer naming advisories is kept a day; a clean one an hour, so a
+# package reported malicious today is refused today.
 stick OSV_CACHE_MS = 86400000
+stick OSV_CLEAN_MS = 3600000
 stick OSV_DETAIL_CAP = 200
 stick OSV_ECOSYSTEMS = ["npm", "PyPI", "crates.io", "Go", "RubyGems", "Packagist", "Maven", "NuGet"]
 roll OSV_NOTED = false
@@ -6540,7 +6543,7 @@ pull osv_online(pkgs) {
   for p in pkgs {
     stick k = osv_key(p)
     stick c = cache.get(k, null)
-    if type_of(c) == "map" and now - int(c.get("at", 0)) < OSV_CACHE_MS {
+    if type_of(c) == "map" and now - int(c.get("at", 0)) < osv_keep_ms(c) {
       out[k] = c.get("ids", [])
     } else {
       need.push(p)
@@ -6554,7 +6557,7 @@ pull osv_online(pkgs) {
     roll r = null
     burn {
       try {
-        r = proc.run("curl", ["-sS", "--max-time", "60", "-X", "POST", OSV_API + "/v1/querybatch", "-H", "Content-Type: application/json", "--data-binary", "@-"], {stdin: body, timeout_ms: 90000})
+        r = proc.run("curl", ["-fsS", "--max-time", "60", "-X", "POST", OSV_API + "/v1/querybatch", "-H", "Content-Type: application/json", "--data-binary", "@-"], {stdin: body, timeout_ms: 90000})
       } ashtray e {
         r = {code: -1, out: "", err: e.message}
       }
@@ -6563,10 +6566,15 @@ pull osv_online(pkgs) {
       osv_note("known-bad packages were not checked: OSV could not be reached (" + clip(str(r.err).trim(), 120) + "); cigo audit --update-db builds a database to check offline")
       snuff null
     }
-    roll results = []
+    # One answer per package asked, or none of it is believed: an error
+    # page that parses is not a clean bill.
+    roll results = null
     try {
-      results = json.parse(r.out).get("results", [])
+      results = map_get(json.parse(r.out), "results", null)
     } ashtray e {
+      results = null
+    }
+    if type_of(results) != "list" or results.len() != chunk.len() {
       osv_note("known-bad packages were not checked: OSV's answer could not be read")
       snuff null
     }
@@ -6582,13 +6590,48 @@ pull osv_online(pkgs) {
   if not need.is_empty() {
     roll kept = {}
     for k in cache {
-      if now - int(cache[k].get("at", 0)) < OSV_CACHE_MS {
+      if type_of(cache[k]) == "map" and now - int(cache[k].get("at", 0)) < osv_keep_ms(cache[k]) {
         kept[k] = cache[k]
       }
     }
     write_outside(cache_file, json.stringify(kept) + "\n")
   }
   snuff out
+}
+
+# The versions an advisory says fix it, by package (`eco|name`), from its
+# SEMVER and ECOSYSTEM ranges (a GIT range's fix is a commit, not a version).
+pull osv_fixes(v) {
+  roll out = {}
+  for a in as_list(v.get("affected", [])) {
+    stick pk = map_get(a, "package", {})
+    stick eco = str(map_get(pk, "ecosystem", ""))
+    stick key = eco + "|" + osv_name(eco, map_get(pk, "name", ""))
+    for rg in as_list(map_get(a, "ranges", [])) {
+      if ["SEMVER", "ECOSYSTEM"].contains(str(map_get(rg, "type", ""))) {
+        for e in as_list(map_get(rg, "events", [])) {
+          stick f = map_get(e, "fixed", null)
+          if f != null {
+            roll l = out.get(key, [])
+            if not l.contains(str(f)) {
+              l.push(str(f))
+            }
+            out[key] = l
+          }
+        }
+      }
+    }
+  }
+  snuff out
+}
+
+# How long a cached answer stands: a day when it names advisories, an hour
+# when it is clean.
+pull osv_keep_ms(c) {
+  if as_list(c.get("ids", [])).is_empty() {
+    snuff OSV_CLEAN_MS
+  }
+  snuff OSV_CACHE_MS
 }
 
 # Is this advisory a malicious package? MAL- ids are; otherwise its
@@ -6613,8 +6656,8 @@ pull osv_details_online(ids) {
   roll need = []
   for id in ids {
     if id.starts_with("MAL-") {
-      out[id] = {malware: true, severity: "", summary: ""}
-    } else if cache.has(id) {
+      out[id] = {malware: true, severity: "", summary: "", fixed: {}}
+    } else if type_of(cache.get(id, null)) == "map" and cache[id].has("fixed") {
       out[id] = cache[id]
     } else if need.len() < OSV_DETAIL_CAP and not need.contains(id) {
       need.push(id)
@@ -6624,7 +6667,7 @@ pull osv_details_online(ids) {
     snuff out
   }
   stick tmp = path.join(OSV_DIR, "tmp-details")
-  roll words = ["-sS", "--max-time", "120", "--create-dirs", "--parallel", "--parallel-max", "16"]
+  roll words = ["-fsS", "--max-time", "120", "--create-dirs", "--parallel", "--parallel-max", "16"]
   for id in need {
     words = words + ["-o", path.join(tmp, id + ".json"), OSV_API + "/v1/vulns/" + id]
   }
@@ -6635,9 +6678,10 @@ pull osv_details_online(ids) {
     }
   }
   for id in need {
+    # The advisory asked for, or nothing: an error body is not an advisory.
     stick v = read_json_or(path.join(tmp, id + ".json"), null)
-    if type_of(v) == "map" {
-      stick d = {malware: osv_malware(id, v), severity: str(map_get(v.get("database_specific", null), "severity", "")), summary: clip(str(v.get("summary", "")), 120)}
+    if type_of(v) == "map" and str(v.get("id", "")) == id {
+      stick d = {malware: osv_malware(id, v), severity: str(map_get(v.get("database_specific", null), "severity", "")), summary: clip(str(v.get("summary", "")), 120), fixed: osv_fixes(v)}
       out[id] = d
       cache[id] = d
     }
@@ -6758,21 +6802,38 @@ pull osv_offline(pkgs) {
 pull osv_details_offline(ids, pkgs) {
   roll out = {}
   for id in ids {
+    roll d = null
     if id.starts_with("MAL-") {
-      out[id] = {malware: true, severity: "", summary: ""}
-    } else {
-      roll found = null
-      for p in pkgs {
-        if found == null {
-          stick idx = osv_index(p.eco)
-          if idx != null and idx.meta.has(id) {
-            found = idx.meta[id]
+      d = {malware: true, severity: "", summary: ""}
+    }
+    roll fixed = {}
+    for p in pkgs {
+      stick idx = osv_index(p.eco)
+      if idx != null {
+        if d == null and idx.meta.has(id) {
+          stick m = idx.meta[id]
+          d = {malware: m.get(0, 0) == 1, severity: str(m.get(1, "")), summary: str(m.get(2, ""))}
+        }
+        stick name = osv_name(p.eco, p.name)
+        for r in map_get(idx, "ranges", {}).get(name, []) {
+          if r[0] == id {
+            for e in r[1] {
+              if e[0] == "f" {
+                stick key = p.eco + "|" + name
+                roll l = fixed.get(key, [])
+                if not l.contains(e[1]) {
+                  l.push(e[1])
+                }
+                fixed[key] = l
+              }
+            }
           }
         }
       }
-      if found != null {
-        out[id] = {malware: found.get(0, 0) == 1, severity: str(found.get(1, "")), summary: str(found.get(2, ""))}
-      }
+    }
+    if d != null {
+      d["fixed"] = fixed
+      out[id] = d
     }
   }
   snuff out
@@ -6830,11 +6891,40 @@ pull osv_findings(t) {
         stick sevs = vuln.map(pack(id) => str(about.get(id, {}).get("severity", "")))
         stick worst = pick(sevs.contains("CRITICAL"), "critical", pick(sevs.contains("HIGH"), "high", pick(sevs.contains("MODERATE") or sevs.contains("MEDIUM"), "moderate", pick(sevs.contains("LOW"), "low", ""))))
         stick shown = vuln.slice(0, math.min(4, vuln.len())).join(", ") + pick(vuln.len() > 4, " and " + str(vuln.len() - 4) + " more", "")
-        found.push({code: "E885", cat: "vulnerable", w: pick(worst == "critical", 0.45, 0.3), rule: "osv-vuln", where: p.where, text: named, says: str(vuln.len()) + " known vulnerabilit" + pick(vuln.len() == 1, "y", "ies") + pick(worst == "", "", ", the worst " + worst) + " (" + shown + "); upgrading it is the fix"})
+        found.push({code: "E885", cat: "vulnerable", w: pick(worst == "critical", 0.45, 0.3), rule: "osv-vuln", where: p.where, text: named, says: str(vuln.len()) + " known vulnerabilit" + pick(vuln.len() == 1, "y", "ies") + pick(worst == "", "", ", the worst " + worst) + " (" + shown + "); " + osv_fix_text(p, vuln, about)})
       }
     }
   }
   snuff found
+}
+
+# The version that fixes every advisory a package has: for each, the lowest
+# fixed version above the one installed; the highest of those is the one
+# to move to. An advisory with no fix named is counted, not guessed.
+pull osv_fix_text(p, vuln, about) {
+  stick key = p.eco + "|" + osv_name(p.eco, p.name)
+  roll need_at = ""
+  roll unfixed = 0
+  for id in vuln {
+    roll lowest = ""
+    for f in as_list(map_get(map_get(about.get(id, {}), "fixed", {}), key, [])) {
+      if ver_cmp(f, p.version) > 0 and (lowest == "" or ver_cmp(f, lowest) < 0) {
+        lowest = f
+      }
+    }
+    if lowest == "" {
+      unfixed += 1
+    } else if need_at == "" or ver_cmp(lowest, need_at) > 0 {
+      need_at = lowest
+    }
+  }
+  if unfixed == 0 {
+    snuff "fixed in " + need_at
+  }
+  if unfixed == vuln.len() {
+    snuff "no fixed version is named"
+  }
+  snuff "fixed in " + need_at + " for all but " + str(unfixed)
 }
 
 # Remove a folder outside the pack (a hop, as write_outside).

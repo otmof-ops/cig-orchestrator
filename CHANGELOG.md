@@ -5,6 +5,33 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.6.0 — 2026-11-05
+
+Known-bad packages (#55 step 3): what a task's lockfiles pin is checked
+against [OSV](https://osv.dev) with the rest of the guard's read.
+
+- **A malicious package is refused** before anything is installed: a `MAL-`
+  advisory, or one whose weakness is embedded malicious code (CWE-506,
+  CWE-912), is `E870`, critical.
+- **A known vulnerability is reported**, one line per package (`E885`): the
+  worst severity, the advisories, and the version that fixes all of them
+  when OSV names one ("fixed in 1.2.6"). It holds nothing.
+- **Sixteen lockfile formats** are read at the versions they pin: npm,
+  pnpm, yarn, bun, uv, Poetry, PDM, Pipfile, a pinned `requirements.txt`,
+  Cargo, Go, Bundler, Composer, Gradle and NuGet.
+- **`osv`**, a floored setting: `online` (the default) sends one batch per
+  run that needs it, with each package's ecosystem, name and version and
+  nothing else, and keeps the answers (a day when they name advisories, an
+  hour when clean); `offline` reads the database `cigo audit --update-db
+  [<ecosystem>...]` builds from OSV's own dumps, ranges included, and
+  nothing leaves the machine; `off` does not look. A project cannot loosen
+  it. OSV out of reach is said once, and the run goes on with the rest of
+  the guard.
+- **`cigo audit --offline`** reads the local database for one audit,
+  whatever the setting.
+- The suite never asks the real OSV: its tests serve OSV's answers and a
+  dump from fixtures, and check what would have been sent.
+
 ## 1.5.0 — 2026-11-05
 
 The static read, harder to fool (#69). It is the cheap first layer that

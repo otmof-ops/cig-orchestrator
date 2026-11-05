@@ -1,0 +1,1 @@
+{"id": "GHSA-test-0003", "summary": "An issue in left-pad fixed in 1.3.0 (a fixture)", "database_specific": {"severity": "LOW"}, "affected": [{"package": {"ecosystem": "npm", "name": "left-pad"}, "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.3.0"}]}]}]}
