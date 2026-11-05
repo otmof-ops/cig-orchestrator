@@ -5,6 +5,32 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.7.0 — 2026-11-05
+
+The guard's findings where a team reads them (#56 step 6).
+
+- **`cigo audit --sarif`** writes the read of every task as a SARIF 2.1.0
+  log for GitHub code scanning: a result per finding at its line in the
+  project (a task's own command at its line in the manifest, a script at
+  its line, an npm install hook at the line that declares it, a known-bad
+  package at its entry in the lockfile), and a rule per code with the
+  registry's title and a severity GitHub ranks by.
+- **`cigo audit --markdown`** writes the same as one table for a pull
+  request comment, the heaviest finding first.
+- **`cigo rehearse --changed [--base=<rev>]`** rehearses every package a
+  change adds or moves to a new version in its lockfiles, against the base
+  (the default branch when none is named), committed or not; npm, PyPI and
+  crates.io packages one by one in the box, each finding blamed on its
+  package and placed at its entry in the lockfile. `--list` names them and
+  rehearses nothing; `--max` (50) caps a lockfile refresh; `--sarif`,
+  `--markdown` and `--json` as for audit; the exit code is the worst risk.
+- **cigo in CI** gains the code-scanning job: audit and rehearse as SARIF,
+  uploaded to the pull request's Security tab.
+- A lockfile with thousands of packages is read in linear time (two lists
+  that were searched once per package are maps now).
+- The one hop that asks whether cig can make a contained box no longer
+  leaves cig's note about a held layer (`E780`) behind it.
+
 ## 1.6.0 — 2026-11-05
 
 Known-bad packages (#55 step 3): what a task's lockfiles pin is checked
