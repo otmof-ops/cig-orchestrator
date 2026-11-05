@@ -29,9 +29,9 @@
 
 pack { "." }
 
-stick VERSION = "1.3.0"
+stick VERSION = "1.4.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
-stick CIG_NEEDS = ">=1.7.1"
+stick CIG_NEEDS = ">=1.12.0"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
@@ -58,6 +58,8 @@ stick SETTINGS = {
     doc: "what the guard's verdict stops before a task runs: standard (critical refused; medium and high held at a terminal until approved, run with the report unattended), strict (also fail high unattended), report (say it, run anyway), off (do not look)"},
   trust: {values: ["on", "off"], default: "on", floor: true, presets: {paranoid: "off"},
     doc: "the trust store: a task approved as it is (its command, the scripts it names, its lockfiles) is not checked again; off checks every run"},
+  rehearse: {values: ["never", "auto", "always"], default: "auto", floor: true, presets: {paranoid: "always", chill: "never"},
+    doc: "the rehearsal (Linux, cig 1.12.0): auto runs a stage that runs code you did not write (an install, a build that runs its dependencies' scripts) or that the guard flagged in cig's contained box first, and judges what it did against its toolchain's footprint; always does it for every task not approved; never only reads"},
 }
 # The old shape, kept for the places that read a default and a doc.
 roll CONFIG_KEYS = {}
@@ -73,6 +75,10 @@ roll PROJECT_SETTINGS = {}
 # Project settings a layer below refused (the floor): [{key, wanted, kept}].
 roll FLOORED = []
 stick ROOT = fs.cwd()
+# The tasks the guard's pass chose to rehearse (#55), and whether the note
+# that this cig cannot was said.
+roll REHEARSE = {}
+roll REHEARSAL_NOTED = false
 # The `versions` and `install` settings (the switch to pinned toolchain
 # versions, below) and where the answer and the version probes are kept.
 stick VERSION_SETTINGS = ["ask", "always", "never", "off"]
@@ -802,7 +808,7 @@ stick TOOLCHAINS = {
     detect: [["file:cpanfile", "file:Makefile.PL", "file:Build.PL"]], tools: ["perl"], versions: {perl: ["perl", "-v"]},
     pins: {perl: [".perl-version"]}, install: "https://www.perl.org/get.html",
     stages: {
-      setup: [{when: ["file:cpanfile"], cmd: ["cpanm", "--installdeps", "--notest", "."]}],
+      setup: [{when: ["file:cpanfile"], cmd: ["cpanm", "--from", "https://www.cpan.org", "--installdeps", "--notest", "."]}],
       lint: [{when: ["file:.perlcriticrc"], cmd: ["perlcritic", "lib"]}],
       build: [{when: ["file:Makefile.PL"], cmds: [["perl", "Makefile.PL"], ["{make}"]]}],
       test: [{when: ["dir:t"], cmd: ["prove", "-lr", "t"]}],
@@ -942,6 +948,305 @@ stick TOOLCHAINS = {
     detect: [["dir:script", "dir:scripts", "dir:bin", "dir:tools", "glob:*.sh", "glob:*.bash"]], tools: [],
     targets: "scripts",
   },
+}
+
+# ----- footprints: what each stage that runs code you did not write is known to do ------
+#
+# For the rehearsal (#55): what a toolchain's stage writes (globs under the
+# component, or `~/` for the home), the hosts it fetches from, the files the
+# tool itself reads and the programs it runs. Anything a rehearsed stage does
+# beyond its footprint is the evidence. Drawn from each tool's documentation
+# or source (2026-11-05); `confidence` says how sure. `registry_env` names the
+# variables a project points the tool at another registry with, whose hosts
+# join the footprint at run time. A task adds to its toolchain's with
+# `footprint` in the manifest.
+
+stick FOOTPRINTS = {
+  "android-gradle": {
+    "build": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**", "~/.android/**", "~/Android/Sdk/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io", "dl.google.com", "maven.google.com"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git", "aapt2", "cmake", "ninja", "clang", "clang++"], registry_env: [], confidence: "medium"},
+    "check": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**", "~/.android/**", "~/Android/Sdk/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io", "dl.google.com", "maven.google.com"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git", "aapt2", "cmake", "ninja", "clang", "clang++"], registry_env: [], confidence: "medium"},
+    "clean": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**", "~/.android/**", "~/Android/Sdk/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io", "dl.google.com", "maven.google.com"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git", "aapt2", "cmake", "ninja", "clang", "clang++"], registry_env: [], confidence: "medium"},
+    "lint": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**", "~/.android/**", "~/Android/Sdk/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io", "dl.google.com", "maven.google.com"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git", "aapt2", "cmake", "ninja", "clang", "clang++"], registry_env: [], confidence: "medium"},
+    "package": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**", "~/.android/**", "~/Android/Sdk/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io", "dl.google.com", "maven.google.com"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git", "aapt2", "cmake", "ninja", "clang", "clang++"], registry_env: [], confidence: "medium"},
+    "test": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**", "~/.android/**", "~/Android/Sdk/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io", "dl.google.com", "maven.google.com"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git", "aapt2", "cmake", "ninja", "clang", "clang++"], registry_env: [], confidence: "medium"},
+  },
+  "bazel": {
+    "build": {writes: ["bazel-*", "MODULE.bazel.lock", "~/.cache/bazel/**", "~/.cache/bazelisk/**"], reads: ["~/.bazelrc", "~/.bazeliskrc", "~/.netrc"], network: ["bcr.bazel.build", "releases.bazel.build", "www.googleapis.com", "mirror.bazel.build", "github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["bazel", "bazelisk", "java", "sh", "bash", "python3", "git", "patch", "process-wrapper", "linux-sandbox", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["BAZELISK_BASE_URL"], confidence: "medium"},
+    "check": {writes: ["bazel-*", "MODULE.bazel.lock", "~/.cache/bazel/**", "~/.cache/bazelisk/**"], reads: ["~/.bazelrc", "~/.bazeliskrc", "~/.netrc"], network: ["bcr.bazel.build", "releases.bazel.build", "www.googleapis.com", "mirror.bazel.build", "github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["bazel", "bazelisk", "java", "sh", "bash", "python3", "git", "patch", "process-wrapper", "linux-sandbox", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["BAZELISK_BASE_URL"], confidence: "medium"},
+    "setup": {writes: ["bazel-*", "MODULE.bazel.lock", "~/.cache/bazel/**", "~/.cache/bazelisk/**"], reads: ["~/.bazelrc", "~/.bazeliskrc", "~/.netrc"], network: ["bcr.bazel.build", "releases.bazel.build", "www.googleapis.com", "mirror.bazel.build", "github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["bazel", "bazelisk", "java", "sh", "bash", "python3", "git", "patch", "process-wrapper", "linux-sandbox", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["BAZELISK_BASE_URL"], confidence: "medium"},
+    "test": {writes: ["bazel-*", "MODULE.bazel.lock", "~/.cache/bazel/**", "~/.cache/bazelisk/**"], reads: ["~/.bazelrc", "~/.bazeliskrc", "~/.netrc"], network: ["bcr.bazel.build", "releases.bazel.build", "www.googleapis.com", "mirror.bazel.build", "github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["bazel", "bazelisk", "java", "sh", "bash", "python3", "git", "patch", "process-wrapper", "linux-sandbox", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["BAZELISK_BASE_URL"], confidence: "medium"},
+  },
+  "buck2": {
+    "build": {writes: ["buck-out/**", "~/.buck/**"], reads: [], network: ["github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["buck2", "sh", "bash", "python3", "git", "rustc", "cc", "c++", "gcc", "g++", "clang", "clang++", "ld", "ar"], registry_env: [], confidence: "low"},
+    "test": {writes: ["buck-out/**", "~/.buck/**"], reads: [], network: ["github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["buck2", "sh", "bash", "python3", "git", "rustc", "cc", "c++", "gcc", "g++", "clang", "clang++", "ld", "ar"], registry_env: [], confidence: "low"},
+  },
+  "clojure-cli": {
+    "clean": {writes: [".cpcache/**", "target/**", "~/.m2/repository/**", "~/.gitlibs/**", "~/.clojure/.cpcache/**", "~/.cache/clojure/**", "~/.clojure/deps.edn", "~/.clojure/tools/**"], reads: ["~/.clojure/deps.edn", "~/.config/clojure/**", "~/.m2/settings.xml"], network: ["repo1.maven.org", "repo.clojars.org"], execs: ["clojure", "bash", "java", "git"], registry_env: [], confidence: "medium"},
+    "package": {writes: [".cpcache/**", "target/**", "~/.m2/repository/**", "~/.gitlibs/**", "~/.clojure/.cpcache/**", "~/.cache/clojure/**", "~/.clojure/deps.edn", "~/.clojure/tools/**"], reads: ["~/.clojure/deps.edn", "~/.config/clojure/**", "~/.m2/settings.xml"], network: ["repo1.maven.org", "repo.clojars.org"], execs: ["clojure", "bash", "java", "git"], registry_env: [], confidence: "medium"},
+    "setup": {writes: [".cpcache/**", "target/**", "~/.m2/repository/**", "~/.gitlibs/**", "~/.clojure/.cpcache/**", "~/.cache/clojure/**", "~/.clojure/deps.edn", "~/.clojure/tools/**"], reads: ["~/.clojure/deps.edn", "~/.config/clojure/**", "~/.m2/settings.xml"], network: ["repo1.maven.org", "repo.clojars.org"], execs: ["clojure", "bash", "java", "git"], registry_env: [], confidence: "medium"},
+    "test": {writes: [".cpcache/**", "target/**", "~/.m2/repository/**", "~/.gitlibs/**", "~/.clojure/.cpcache/**", "~/.cache/clojure/**", "~/.clojure/deps.edn", "~/.clojure/tools/**"], reads: ["~/.clojure/deps.edn", "~/.config/clojure/**", "~/.m2/settings.xml"], network: ["repo1.maven.org", "repo.clojars.org"], execs: ["clojure", "bash", "java", "git"], registry_env: [], confidence: "medium"},
+  },
+  "clojure-lein": {
+    "build": {writes: ["target/**", ".lein-*", "~/.m2/repository/**", "~/.lein/self-installs/**"], reads: ["~/.lein/profiles.clj", "~/.lein/profiles.d/**", "~/.lein/credentials.clj.gpg"], network: ["repo1.maven.org", "repo.clojars.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["lein", "java", "sh", "bash", "curl", "wget", "gpg", "git"], registry_env: [], confidence: "high"},
+    "check": {writes: ["target/**", ".lein-*", "~/.m2/repository/**", "~/.lein/self-installs/**"], reads: ["~/.lein/profiles.clj", "~/.lein/profiles.d/**", "~/.lein/credentials.clj.gpg"], network: ["repo1.maven.org", "repo.clojars.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["lein", "java", "sh", "bash", "curl", "wget", "gpg", "git"], registry_env: [], confidence: "high"},
+    "clean": {writes: ["target/**", ".lein-*", "~/.m2/repository/**", "~/.lein/self-installs/**"], reads: ["~/.lein/profiles.clj", "~/.lein/profiles.d/**", "~/.lein/credentials.clj.gpg"], network: ["repo1.maven.org", "repo.clojars.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["lein", "java", "sh", "bash", "curl", "wget", "gpg", "git"], registry_env: [], confidence: "high"},
+    "package": {writes: ["target/**", ".lein-*", "~/.m2/repository/**", "~/.lein/self-installs/**"], reads: ["~/.lein/profiles.clj", "~/.lein/profiles.d/**", "~/.lein/credentials.clj.gpg"], network: ["repo1.maven.org", "repo.clojars.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["lein", "java", "sh", "bash", "curl", "wget", "gpg", "git"], registry_env: [], confidence: "high"},
+    "run": {writes: ["target/**", ".lein-*", "~/.m2/repository/**", "~/.lein/self-installs/**"], reads: ["~/.lein/profiles.clj", "~/.lein/profiles.d/**", "~/.lein/credentials.clj.gpg"], network: ["repo1.maven.org", "repo.clojars.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["lein", "java", "sh", "bash", "curl", "wget", "gpg", "git"], registry_env: [], confidence: "high"},
+    "setup": {writes: ["target/**", ".lein-*", "~/.m2/repository/**", "~/.lein/self-installs/**"], reads: ["~/.lein/profiles.clj", "~/.lein/profiles.d/**", "~/.lein/credentials.clj.gpg"], network: ["repo1.maven.org", "repo.clojars.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["lein", "java", "sh", "bash", "curl", "wget", "gpg", "git"], registry_env: [], confidence: "high"},
+    "test": {writes: ["target/**", ".lein-*", "~/.m2/repository/**", "~/.lein/self-installs/**"], reads: ["~/.lein/profiles.clj", "~/.lein/profiles.d/**", "~/.lein/credentials.clj.gpg"], network: ["repo1.maven.org", "repo.clojars.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["lein", "java", "sh", "bash", "curl", "wget", "gpg", "git"], registry_env: [], confidence: "high"},
+  },
+  "cmake": {
+    "build": {writes: ["build/**"], reads: [], network: ["github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["cmake", "git", "sh", "make", "ninja", "python3", "cc", "c++", "gcc", "g++", "clang", "clang++", "ld", "ar"], registry_env: [], confidence: "low"},
+    "setup": {writes: ["build/**", "~/.cache/vcpkg/**"], reads: ["~/.cmake/packages/**"], network: ["github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["cmake", "git", "sh", "make", "ninja", "pkg-config", "python3", "vcpkg", "cc", "c++", "gcc", "g++", "clang", "clang++", "ld", "ar"], registry_env: ["X_VCPKG_ASSET_SOURCES"], confidence: "low"},
+  },
+  "compose": {
+    "build": {writes: ["~/.docker/buildx/**", "~/.local/share/containers/**"], reads: ["~/.docker/config.json", "~/.docker/contexts/**", "~/.docker/cli-plugins/**", "~/.config/containers/**"], network: ["registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com", "index.docker.io"], execs: ["docker", "docker-compose", "docker-buildx", "docker-credential-*", "podman"], registry_env: [], confidence: "medium"},
+  },
+  "crystal": {
+    "build": {writes: ["lib/**", "shard.lock", "bin/**", "~/.cache/shards/**", "~/.cache/crystal/**"], reads: ["~/.gitconfig"], network: ["github.com"], execs: ["shards", "git", "crystal", "make", "sh", "pkg-config", "cc", "gcc", "ld"], registry_env: [], confidence: "medium"},
+    "package": {writes: ["lib/**", "shard.lock", "bin/**", "~/.cache/shards/**", "~/.cache/crystal/**"], reads: ["~/.gitconfig"], network: ["github.com"], execs: ["shards", "git", "crystal", "make", "sh", "pkg-config", "cc", "gcc", "ld"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["lib/**", "shard.lock", "bin/**", "~/.cache/shards/**", "~/.cache/crystal/**"], reads: ["~/.gitconfig"], network: ["github.com"], execs: ["shards", "git", "crystal", "make", "sh", "pkg-config", "cc", "gcc", "ld"], registry_env: [], confidence: "medium"},
+  },
+  "dart": {
+    "setup": {writes: [".dart_tool/**", "pubspec.lock", "~/.pub-cache/hosted/**", "~/.pub-cache/hosted-hashes/**", "~/.pub-cache/git/**", "~/.pub-cache/_temp/**", "~/.pub-cache/active_roots/**", "~/.pub-cache/README.md", "~/.dart-tool/**", "~/.dart/**"], reads: ["~/.config/dart/pub-credentials.json", "~/.config/dart/pub-tokens.json"], network: ["pub.dev", "www.google-analytics.com"], execs: ["dart", "git"], registry_env: ["PUB_HOSTED_URL"], confidence: "high"},
+    "test": {writes: [".dart_tool/**", "~/.dart-tool/**"], reads: [], network: ["www.google-analytics.com"], execs: ["dart", "sh", "cc", "c++", "gcc", "g++", "clang", "clang++", "ld", "ar"], registry_env: [], confidence: "low"},
+  },
+  "deno": {
+    "setup": {writes: ["~/.cache/deno/**", "node_modules/**", "deno.lock", "vendor/**"], reads: ["~/.npmrc"], network: ["jsr.io", "registry.npmjs.org", "deno.land", "dl.deno.land"], execs: ["deno"], registry_env: ["NPM_CONFIG_REGISTRY", "JSR_URL"], confidence: "medium"},
+  },
+  "docker": {
+    "lint": {writes: ["~/.docker/buildx/**", "~/.local/share/containers/**"], reads: ["~/.docker/config.json", "~/.docker/contexts/**", "~/.docker/cli-plugins/**", "~/.config/containers/**"], network: ["registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com", "index.docker.io"], execs: ["docker", "docker-buildx", "docker-credential-*", "podman"], registry_env: [], confidence: "medium"},
+    "package": {writes: ["~/.docker/buildx/**", "~/.local/share/containers/**"], reads: ["~/.docker/config.json", "~/.docker/contexts/**", "~/.docker/cli-plugins/**", "~/.config/containers/**"], network: ["registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com", "index.docker.io"], execs: ["docker", "docker-buildx", "docker-credential-*", "podman"], registry_env: [], confidence: "medium"},
+  },
+  "dotnet": {
+    "build": {writes: ["bin/**", "**/bin/**", "obj/**", "**/obj/**", "~/.dotnet/TelemetryStorageService/**", "~/.dotnet/*Sentinel*"], reads: ["~/.nuget/NuGet/NuGet.Config", "~/.nuget/config/**", "~/.nuget/packages/**"], network: ["dc.services.visualstudio.com", "*.in.applicationinsights.azure.com"], execs: ["dotnet", "sh", "git", "protoc", "grpc_csharp_plugin"], registry_env: [], confidence: "medium"},
+    "format": {writes: ["obj/**", "**/obj/**", "**/packages.lock.json", "~/.nuget/packages/**", "~/.local/share/NuGet/**", "~/.dotnet/TelemetryStorageService/**", "~/.dotnet/toolResolverCache/**", "~/.dotnet/sdk-advertising/**", "~/.dotnet/corefx/**", "~/.dotnet/metadata/**", "~/.dotnet/*Sentinel*"], reads: ["~/.nuget/NuGet/NuGet.Config", "~/.nuget/config/**", "~/.config/NuGet/**", "~/.nuget/plugins/**"], network: ["api.nuget.org", "dc.services.visualstudio.com", "*.in.applicationinsights.azure.com"], execs: ["dotnet", "sh", "git"], registry_env: [], confidence: "medium"},
+    "format-check": {writes: ["obj/**", "**/obj/**", "**/packages.lock.json", "~/.nuget/packages/**", "~/.local/share/NuGet/**", "~/.dotnet/TelemetryStorageService/**", "~/.dotnet/toolResolverCache/**", "~/.dotnet/sdk-advertising/**", "~/.dotnet/corefx/**", "~/.dotnet/metadata/**", "~/.dotnet/*Sentinel*"], reads: ["~/.nuget/NuGet/NuGet.Config", "~/.nuget/config/**", "~/.config/NuGet/**", "~/.nuget/plugins/**"], network: ["api.nuget.org", "dc.services.visualstudio.com", "*.in.applicationinsights.azure.com"], execs: ["dotnet", "sh", "git"], registry_env: [], confidence: "medium"},
+    "package": {writes: ["bin/**", "**/bin/**", "obj/**", "**/obj/**", "**/packages.lock.json", "~/.nuget/packages/**", "~/.local/share/NuGet/**", "~/.dotnet/TelemetryStorageService/**", "~/.dotnet/toolResolverCache/**", "~/.dotnet/sdk-advertising/**", "~/.dotnet/corefx/**", "~/.dotnet/metadata/**", "~/.dotnet/*Sentinel*"], reads: ["~/.nuget/NuGet/NuGet.Config", "~/.nuget/config/**", "~/.config/NuGet/**", "~/.nuget/plugins/**"], network: ["api.nuget.org", "dc.services.visualstudio.com", "*.in.applicationinsights.azure.com"], execs: ["dotnet", "sh", "git", "protoc", "grpc_csharp_plugin", "node", "npm", "clang", "ld", "objcopy"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["obj/**", "**/obj/**", "**/packages.lock.json", "~/.nuget/packages/**", "~/.local/share/NuGet/**", "~/.dotnet/TelemetryStorageService/**", "~/.dotnet/toolResolverCache/**", "~/.dotnet/sdk-advertising/**", "~/.dotnet/corefx/**", "~/.dotnet/metadata/**", "~/.dotnet/*Sentinel*"], reads: ["~/.nuget/NuGet/NuGet.Config", "~/.nuget/config/**", "~/.config/NuGet/**", "~/.nuget/plugins/**"], network: ["api.nuget.org", "dc.services.visualstudio.com", "*.in.applicationinsights.azure.com"], execs: ["dotnet", "sh", "git"], registry_env: [], confidence: "medium"},
+    "test": {writes: ["bin/**", "**/bin/**", "obj/**", "**/obj/**", "~/.dotnet/TelemetryStorageService/**", "~/.dotnet/*Sentinel*"], reads: ["~/.nuget/NuGet/NuGet.Config", "~/.nuget/config/**", "~/.nuget/packages/**"], network: ["dc.services.visualstudio.com", "*.in.applicationinsights.azure.com"], execs: ["dotnet", "sh", "git", "protoc", "grpc_csharp_plugin"], registry_env: [], confidence: "medium"},
+  },
+  "elixir-mix": {
+    "build": {writes: ["_build/**", "deps/**", "~/.cache/mix/**", "~/.cache/rustler_precompiled/**", "~/.cache/elixir_make/**", "~/.cargo/registry/**", "~/.cargo/git/**"], reads: ["~/.hex/hex.config", "~/.config/rebar3/**"], network: [], execs: ["mix", "elixir", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "sh", "make", "rebar3", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "check": {writes: ["_build/**", "deps/**", "~/.cache/mix/**", "~/.cache/rustler_precompiled/**", "~/.cache/elixir_make/**", "~/.cargo/registry/**", "~/.cargo/git/**"], reads: ["~/.hex/hex.config", "~/.config/rebar3/**"], network: [], execs: ["mix", "elixir", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "sh", "make", "rebar3", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "package": {writes: ["_build/**", "deps/**", "~/.cache/mix/**", "~/.cache/rustler_precompiled/**", "~/.cache/elixir_make/**", "~/.cargo/registry/**", "~/.cargo/git/**"], reads: ["~/.hex/hex.config", "~/.config/rebar3/**"], network: [], execs: ["mix", "elixir", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "sh", "make", "rebar3", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["deps/**", "mix.lock", "_build/**", "~/.mix/archives/hex-*", "~/.mix/archives/hex-*/**", "~/.mix/elixir/**", "~/.local/share/mix/archives/hex-*", "~/.local/share/mix/archives/hex-*/**", "~/.local/share/mix/elixir/**", "~/.hex/**", "~/.cache/mix/**"], reads: ["~/.hex/hex.config"], network: ["builds.hex.pm", "repo.hex.pm"], execs: ["mix", "elixir", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "git", "sh"], registry_env: ["HEX_MIRROR", "HEX_BUILDS_URL"], confidence: "high"},
+    "test": {writes: ["_build/**", "deps/**", "~/.cache/mix/**", "~/.cache/rustler_precompiled/**", "~/.cache/elixir_make/**", "~/.cargo/registry/**", "~/.cargo/git/**"], reads: ["~/.hex/hex.config", "~/.config/rebar3/**"], network: [], execs: ["mix", "elixir", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "sh", "make", "rebar3", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: [], confidence: "medium"},
+  },
+  "erlang-rebar3": {
+    "build": {writes: ["_build/**", "rebar.lock", "~/.cache/rebar3/**"], reads: ["~/.config/rebar3/rebar.config", "~/.config/rebar3/hex.config"], network: ["repo.hex.pm"], execs: ["rebar3", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "escript", "git", "sh", "make", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["HEX_CDN"], confidence: "medium"},
+    "check": {writes: ["_build/**", "rebar.lock", "~/.cache/rebar3/**"], reads: ["~/.config/rebar3/rebar.config", "~/.config/rebar3/hex.config"], network: ["repo.hex.pm"], execs: ["rebar3", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "escript", "git", "sh", "make", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["HEX_CDN"], confidence: "medium"},
+    "format": {writes: ["_build/**", "rebar.lock", "~/.cache/rebar3/**"], reads: ["~/.config/rebar3/rebar.config", "~/.config/rebar3/hex.config"], network: ["repo.hex.pm"], execs: ["rebar3", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "escript", "git", "sh", "make", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["HEX_CDN"], confidence: "medium"},
+    "format-check": {writes: ["_build/**", "rebar.lock", "~/.cache/rebar3/**"], reads: ["~/.config/rebar3/rebar.config", "~/.config/rebar3/hex.config"], network: ["repo.hex.pm"], execs: ["rebar3", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "escript", "git", "sh", "make", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["HEX_CDN"], confidence: "medium"},
+    "lint": {writes: ["_build/**", "rebar.lock", "~/.cache/rebar3/**"], reads: ["~/.config/rebar3/rebar.config", "~/.config/rebar3/hex.config"], network: ["repo.hex.pm"], execs: ["rebar3", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "escript", "git", "sh", "make", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["HEX_CDN"], confidence: "medium"},
+    "package": {writes: ["_build/**", "rebar.lock", "~/.cache/rebar3/**"], reads: ["~/.config/rebar3/rebar.config", "~/.config/rebar3/hex.config"], network: ["repo.hex.pm"], execs: ["rebar3", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "escript", "git", "sh", "make", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["HEX_CDN"], confidence: "medium"},
+    "setup": {writes: ["_build/**", "rebar.lock", "~/.cache/rebar3/**"], reads: ["~/.config/rebar3/rebar.config", "~/.config/rebar3/hex.config"], network: ["repo.hex.pm"], execs: ["rebar3", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "escript", "git", "sh", "make", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["HEX_CDN"], confidence: "medium"},
+    "test": {writes: ["_build/**", "rebar.lock", "~/.cache/rebar3/**"], reads: ["~/.config/rebar3/rebar.config", "~/.config/rebar3/hex.config"], network: ["repo.hex.pm"], execs: ["rebar3", "erl", "erlexec", "beam.smp", "erl_child_setup", "inet_gethost", "escript", "git", "sh", "make", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["HEX_CDN"], confidence: "medium"},
+  },
+  "flutter": {
+    "setup": {writes: [".dart_tool/**", "pubspec.lock", ".flutter-plugins", ".flutter-plugins-dependencies", "android/local.properties", "ios/Flutter/**", "macos/Flutter/**", "linux/flutter/**", "windows/flutter/**", "~/.pub-cache/hosted/**", "~/.pub-cache/hosted-hashes/**", "~/.pub-cache/git/**", "~/.pub-cache/_temp/**", "~/.pub-cache/active_roots/**", "~/.pub-cache/README.md", "~/.dart-tool/**", "~/.dart/**", "~/.flutter", "~/.flutter_tool_state", "~/.config/flutter/**", "~/.flutter-devtools/**", "~/flutter/bin/cache/**", "~/fvm/**", "~/snap/flutter/**"], reads: ["~/.config/dart/pub-credentials.json", "~/.config/dart/pub-tokens.json"], network: ["pub.dev", "storage.googleapis.com", "www.google-analytics.com", "github.com"], execs: ["flutter", "dart", "bash", "sh", "git", "uname", "curl", "unzip", "tar"], registry_env: ["PUB_HOSTED_URL", "FLUTTER_STORAGE_BASE_URL"], confidence: "medium"},
+    "test": {writes: [".dart_tool/**", "build/**", "~/.dart-tool/**", "~/.config/flutter/**", "~/flutter/bin/cache/**", "~/fvm/**", "~/snap/flutter/**"], reads: [], network: ["storage.googleapis.com", "www.google-analytics.com"], execs: ["flutter", "dart", "flutter_tester", "bash", "sh", "git", "uname", "curl", "unzip", "tar", "cc", "c++", "clang", "clang++", "ld"], registry_env: ["FLUTTER_STORAGE_BASE_URL"], confidence: "low"},
+  },
+  "fortran-fpm": {
+    "build": {writes: ["build/**", "~/.local/share/fpm/**"], reads: ["~/.config/fpm/**", "~/.gitconfig"], network: ["github.com"], execs: ["fpm", "git", "gfortran", "gcc", "cc", "ld", "ar", "sh"], registry_env: [], confidence: "low"},
+    "run": {writes: ["build/**", "~/.local/share/fpm/**"], reads: ["~/.config/fpm/**", "~/.gitconfig"], network: ["github.com"], execs: ["fpm", "git", "gfortran", "gcc", "cc", "ld", "ar", "sh"], registry_env: [], confidence: "low"},
+    "test": {writes: ["build/**", "~/.local/share/fpm/**"], reads: ["~/.config/fpm/**", "~/.gitconfig"], network: ["github.com"], execs: ["fpm", "git", "gfortran", "gcc", "cc", "ld", "ar", "sh"], registry_env: [], confidence: "low"},
+  },
+  "foundry": {
+    "build": {writes: ["out/**", "cache/**", "~/.svm/**", "~/.foundry/cache/**"], reads: ["~/.foundry/foundry.toml"], network: ["binaries.soliditylang.org"], execs: ["forge", "solc", "solc-*"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["lib/**", ".gitmodules", "foundry.lock", ".git/modules/**", ".git/config"], reads: ["~/.gitconfig", "~/.foundry/foundry.toml"], network: ["github.com"], execs: ["forge", "git", "git-remote-https"], registry_env: [], confidence: "medium"},
+    "test": {writes: ["out/**", "cache/**", "~/.svm/**", "~/.foundry/cache/**"], reads: ["~/.foundry/foundry.toml"], network: ["binaries.soliditylang.org"], execs: ["forge", "solc", "solc-*"], registry_env: [], confidence: "medium"},
+  },
+  "gleam": {
+    "build": {writes: ["build/**", "manifest.toml", "~/.cache/gleam/**"], reads: [], network: ["repo.hex.pm"], execs: ["gleam", "erl", "erlc", "escript", "erlexec", "beam.smp", "erl_child_setup", "elixir", "mix", "rebar3", "node", "sh", "git"], registry_env: [], confidence: "medium"},
+    "package": {writes: ["build/**", "manifest.toml", "~/.cache/gleam/**"], reads: [], network: ["repo.hex.pm"], execs: ["gleam", "erl", "erlc", "escript", "erlexec", "beam.smp", "erl_child_setup", "elixir", "mix", "rebar3", "node", "sh", "git"], registry_env: [], confidence: "medium"},
+    "run": {writes: ["build/**", "manifest.toml", "~/.cache/gleam/**"], reads: [], network: ["repo.hex.pm"], execs: ["gleam", "erl", "erlc", "escript", "erlexec", "beam.smp", "erl_child_setup", "elixir", "mix", "rebar3", "node", "sh", "git"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["build/packages/**", "manifest.toml", "~/.cache/gleam/**"], reads: [], network: ["repo.hex.pm"], execs: ["gleam", "git"], registry_env: [], confidence: "high"},
+    "test": {writes: ["build/**", "manifest.toml", "~/.cache/gleam/**"], reads: [], network: ["repo.hex.pm"], execs: ["gleam", "erl", "erlc", "escript", "erlexec", "beam.smp", "erl_child_setup", "elixir", "mix", "rebar3", "node", "sh", "git"], registry_env: [], confidence: "medium"},
+  },
+  "go": {
+    "setup": {writes: ["~/go/pkg/mod/**", "~/.cache/go-build/**", "~/.config/go/telemetry/**", "go.sum"], reads: ["~/.config/go/env", "~/.netrc", "~/.gitconfig"], network: ["proxy.golang.org", "sum.golang.org"], execs: ["go", "git"], registry_env: ["GOPROXY", "GOSUMDB", "GOPRIVATE", "GONOPROXY", "GONOSUMDB"], confidence: "high"},
+  },
+  "haskell-cabal": {
+    "build": {writes: ["dist-newstyle/**", "~/.cache/cabal/**", "~/.local/state/cabal/**", "~/.config/cabal/config", "~/.cabal/packages/**", "~/.cabal/store/**", "~/.cabal/logs/**"], reads: ["~/.config/cabal/config", "~/.cabal/config"], network: ["hackage.haskell.org"], execs: ["cabal", "ghc", "ghc-pkg", "hsc2hs", "happy", "alex", "git", "sh", "make", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "high"},
+    "setup": {writes: ["dist-newstyle/**", "~/.cache/cabal/**", "~/.local/state/cabal/**", "~/.config/cabal/config", "~/.cabal/packages/**", "~/.cabal/store/**", "~/.cabal/logs/**"], reads: ["~/.config/cabal/config", "~/.cabal/config"], network: ["hackage.haskell.org"], execs: ["cabal", "ghc", "ghc-pkg", "hsc2hs", "happy", "alex", "git", "sh", "make", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "high"},
+    "test": {writes: ["dist-newstyle/**", "~/.cache/cabal/**", "~/.local/state/cabal/**", "~/.config/cabal/config", "~/.cabal/packages/**", "~/.cabal/store/**", "~/.cabal/logs/**"], reads: ["~/.config/cabal/config", "~/.cabal/config"], network: ["hackage.haskell.org"], execs: ["cabal", "ghc", "ghc-pkg", "hsc2hs", "happy", "alex", "git", "sh", "make", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "high"},
+  },
+  "haskell-stack": {
+    "build": {writes: [".stack-work/**", "**/.stack-work/**", "stack.yaml.lock", "*.cabal", "**/*.cabal", "~/.stack/**", "~/.local/share/stack/**", "~/.config/stack/**"], reads: ["~/.stack/config.yaml", "~/.config/stack/config.yaml"], network: ["hackage.haskell.org", "raw.githubusercontent.com", "github.com", "downloads.haskell.org"], execs: ["stack", "ghc", "ghc-pkg", "runghc", "hsc2hs", "happy", "alex", "git", "sh", "make", "tar", "xz", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "setup": {writes: [".stack-work/**", "**/.stack-work/**", "stack.yaml.lock", "*.cabal", "**/*.cabal", "~/.stack/**", "~/.local/share/stack/**", "~/.config/stack/**"], reads: ["~/.stack/config.yaml", "~/.config/stack/config.yaml"], network: ["hackage.haskell.org", "raw.githubusercontent.com", "github.com", "downloads.haskell.org"], execs: ["stack", "ghc", "ghc-pkg", "runghc", "hsc2hs", "happy", "alex", "git", "sh", "make", "tar", "xz", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "test": {writes: [".stack-work/**", "**/.stack-work/**", "stack.yaml.lock", "*.cabal", "**/*.cabal", "~/.stack/**", "~/.local/share/stack/**", "~/.config/stack/**"], reads: ["~/.stack/config.yaml", "~/.config/stack/config.yaml"], network: ["hackage.haskell.org", "raw.githubusercontent.com", "github.com", "downloads.haskell.org"], execs: ["stack", "ghc", "ghc-pkg", "runghc", "hsc2hs", "happy", "alex", "git", "sh", "make", "tar", "xz", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "medium"},
+  },
+  "helm": {
+    "setup": {writes: ["charts/**", "Chart.lock", "~/.cache/helm/**"], reads: ["~/.config/helm/repositories.yaml", "~/.config/helm/registry/config.json", "~/.docker/config.json"], network: ["registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com", "ghcr.io", "pkg-containers.githubusercontent.com", "charts.bitnami.com"], execs: ["helm", "docker-credential-*"], registry_env: [], confidence: "low"},
+  },
+  "java-gradle": {
+    "build": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git"], registry_env: [], confidence: "medium"},
+    "check": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git"], registry_env: [], confidence: "medium"},
+    "clean": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git"], registry_env: [], confidence: "medium"},
+    "format": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git"], registry_env: [], confidence: "medium"},
+    "format-check": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git"], registry_env: [], confidence: "medium"},
+    "lint": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git"], registry_env: [], confidence: "medium"},
+    "package": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git"], registry_env: [], confidence: "medium"},
+    "run": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git"], registry_env: [], confidence: "medium"},
+    "test": {writes: [".gradle/**", "**/.gradle/**", "build/**", "**/build/**", ".kotlin/**", "**/.kotlin/**", "~/.gradle/caches/**", "~/.gradle/wrapper/**", "~/.gradle/daemon/**", "~/.gradle/native/**", "~/.gradle/jdks/**", "~/.gradle/notifications/**", "~/.gradle/.tmp/**", "~/.kotlin/**", "~/.local/share/kotlin/**"], reads: ["~/.gradle/gradle.properties", "~/.gradle/init.d/**", "~/.gradle/init.gradle*", "~/.m2/settings.xml", "~/.m2/repository/**"], network: ["services.gradle.org", "downloads.gradle.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org", "api.foojay.io"], execs: ["java", "sh", "bash", "gradle", "uname", "xargs", "git"], registry_env: [], confidence: "medium"},
+  },
+  "java-maven": {
+    "build": {writes: ["target/**", "**/target/**", ".mvn/wrapper/**", "~/.m2/repository/**", "~/.m2/wrapper/**"], reads: ["~/.m2/settings.xml", "~/.m2/settings-security.xml", "~/.m2/toolchains.xml", "~/.m2/extensions.xml", "~/.mavenrc"], network: ["repo.maven.apache.org", "repo1.maven.org"], execs: ["mvn", "java", "javac", "sh", "curl", "wget", "git"], registry_env: ["MVNW_REPOURL"], confidence: "high"},
+    "check": {writes: ["target/**", "**/target/**", ".mvn/wrapper/**", "~/.m2/repository/**", "~/.m2/wrapper/**"], reads: ["~/.m2/settings.xml", "~/.m2/settings-security.xml", "~/.m2/toolchains.xml", "~/.m2/extensions.xml", "~/.mavenrc"], network: ["repo.maven.apache.org", "repo1.maven.org"], execs: ["mvn", "java", "javac", "sh", "curl", "wget", "git"], registry_env: ["MVNW_REPOURL"], confidence: "high"},
+    "clean": {writes: ["target/**", "**/target/**", ".mvn/wrapper/**", "~/.m2/repository/**", "~/.m2/wrapper/**"], reads: ["~/.m2/settings.xml", "~/.m2/settings-security.xml", "~/.m2/toolchains.xml", "~/.m2/extensions.xml", "~/.mavenrc"], network: ["repo.maven.apache.org", "repo1.maven.org"], execs: ["mvn", "java", "javac", "sh", "curl", "wget", "git"], registry_env: ["MVNW_REPOURL"], confidence: "high"},
+    "format": {writes: ["target/**", "**/target/**", ".mvn/wrapper/**", "~/.m2/repository/**", "~/.m2/wrapper/**"], reads: ["~/.m2/settings.xml", "~/.m2/settings-security.xml", "~/.m2/toolchains.xml", "~/.m2/extensions.xml", "~/.mavenrc"], network: ["repo.maven.apache.org", "repo1.maven.org"], execs: ["mvn", "java", "javac", "sh", "curl", "wget", "git"], registry_env: ["MVNW_REPOURL"], confidence: "high"},
+    "format-check": {writes: ["target/**", "**/target/**", ".mvn/wrapper/**", "~/.m2/repository/**", "~/.m2/wrapper/**"], reads: ["~/.m2/settings.xml", "~/.m2/settings-security.xml", "~/.m2/toolchains.xml", "~/.m2/extensions.xml", "~/.mavenrc"], network: ["repo.maven.apache.org", "repo1.maven.org"], execs: ["mvn", "java", "javac", "sh", "curl", "wget", "git"], registry_env: ["MVNW_REPOURL"], confidence: "high"},
+    "lint": {writes: ["target/**", "**/target/**", ".mvn/wrapper/**", "~/.m2/repository/**", "~/.m2/wrapper/**"], reads: ["~/.m2/settings.xml", "~/.m2/settings-security.xml", "~/.m2/toolchains.xml", "~/.m2/extensions.xml", "~/.mavenrc"], network: ["repo.maven.apache.org", "repo1.maven.org"], execs: ["mvn", "java", "javac", "sh", "curl", "wget", "git"], registry_env: ["MVNW_REPOURL"], confidence: "high"},
+    "setup": {writes: ["target/**", "**/target/**", ".mvn/wrapper/**", "~/.m2/repository/**", "~/.m2/wrapper/**"], reads: ["~/.m2/settings.xml", "~/.m2/settings-security.xml", "~/.m2/toolchains.xml", "~/.m2/extensions.xml", "~/.mavenrc"], network: ["repo.maven.apache.org", "repo1.maven.org"], execs: ["mvn", "java", "javac", "sh", "curl", "wget", "git"], registry_env: ["MVNW_REPOURL"], confidence: "high"},
+    "test": {writes: ["target/**", "**/target/**", ".mvn/wrapper/**", "~/.m2/repository/**", "~/.m2/wrapper/**"], reads: ["~/.m2/settings.xml", "~/.m2/settings-security.xml", "~/.m2/toolchains.xml", "~/.m2/extensions.xml", "~/.mavenrc"], network: ["repo.maven.apache.org", "repo1.maven.org"], execs: ["mvn", "java", "javac", "sh", "curl", "wget", "git"], registry_env: ["MVNW_REPOURL"], confidence: "high"},
+  },
+  "julia": {
+    "build": {writes: ["~/.julia/compiled/**", "~/.julia/scratchspaces/**", "~/.julia/logs/**"], reads: ["~/.julia/config/**"], network: [], execs: ["julia", "ld", "lld", "sh"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["Manifest.toml", "~/.julia/registries/**", "~/.julia/packages/**", "~/.julia/artifacts/**", "~/.julia/compiled/**", "~/.julia/logs/**", "~/.julia/scratchspaces/**", "~/.julia/clones/**"], reads: ["~/.julia/config/**", "~/.netrc"], network: ["pkg.julialang.org", "*.pkg.julialang.org", "github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["julia", "7z", "git", "sh", "make", "cmake", "cc", "c++", "gcc", "g++", "ld", "ar"], registry_env: ["JULIA_PKG_SERVER"], confidence: "medium"},
+    "test": {writes: ["Manifest.toml", "~/.julia/registries/**", "~/.julia/packages/**", "~/.julia/artifacts/**", "~/.julia/compiled/**", "~/.julia/logs/**", "~/.julia/scratchspaces/**", "~/.julia/clones/**"], reads: ["~/.julia/config/**", "~/.netrc"], network: ["pkg.julialang.org", "*.pkg.julialang.org", "github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["julia", "7z", "git", "sh", "make", "cmake", "cc", "c++", "gcc", "g++", "ld", "ar"], registry_env: ["JULIA_PKG_SERVER"], confidence: "medium"},
+  },
+  "lua-luarocks": {
+    "build": {writes: ["lua_modules/**", "~/.cache/luarocks/**", "~/.luarocks/lib/**", "~/.luarocks/share/**"], reads: ["~/.config/luarocks/**", "~/.luarocks/config-*.lua"], network: ["luarocks.org", "raw.githubusercontent.com", "loadk.com", "github.com", "codeload.github.com"], execs: ["luarocks", "lua", "curl", "wget", "git", "unzip", "tar", "gzip", "make", "cmake", "sh", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["lua_modules/**", "~/.cache/luarocks/**", "~/.luarocks/lib/**", "~/.luarocks/share/**"], reads: ["~/.config/luarocks/**", "~/.luarocks/config-*.lua"], network: ["luarocks.org", "raw.githubusercontent.com", "loadk.com", "github.com", "codeload.github.com"], execs: ["luarocks", "lua", "curl", "wget", "git", "unzip", "tar", "gzip", "make", "cmake", "sh", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "medium"},
+  },
+  "meson": {
+    "build": {writes: ["builddir/**"], reads: [], network: [], execs: ["meson", "ninja", "python3", "sh", "cc", "c++", "gcc", "g++", "clang", "clang++", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["builddir/**", "subprojects/**"], reads: [], network: ["wrapdb.mesonbuild.com", "github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["meson", "python3", "git", "patch", "sh", "pkg-config", "cmake", "cc", "c++", "gcc", "g++", "clang", "clang++", "ld", "ar"], registry_env: [], confidence: "medium"},
+  },
+  "nim": {
+    "build": {writes: ["nimbledeps/**", "~/.cache/nim/**", "~/.nimble/pkgs2/**", "~/.nimble/pkgs/**", "~/.nimble/pkgcache/**", "~/.nimble/nimbinaries/**", "~/.nimble/packages_*.json", "~/.nimble/nimbledata*.json"], reads: ["~/.config/nimble/nimble.ini", "~/.gitconfig"], network: ["packages.nim-lang.org", "raw.githubusercontent.com", "nim-lang.org", "github.com", "codeload.github.com"], execs: ["nimble", "nim", "git", "tar", "sh", "cc", "gcc", "clang", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "run": {writes: ["nimbledeps/**", "~/.cache/nim/**", "~/.nimble/pkgs2/**", "~/.nimble/pkgs/**", "~/.nimble/pkgcache/**", "~/.nimble/nimbinaries/**", "~/.nimble/packages_*.json", "~/.nimble/nimbledata*.json"], reads: ["~/.config/nimble/nimble.ini", "~/.gitconfig"], network: ["packages.nim-lang.org", "raw.githubusercontent.com", "nim-lang.org", "github.com", "codeload.github.com"], execs: ["nimble", "nim", "git", "tar", "sh", "cc", "gcc", "clang", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["nimbledeps/**", "~/.cache/nim/**", "~/.nimble/pkgs2/**", "~/.nimble/pkgs/**", "~/.nimble/pkgcache/**", "~/.nimble/nimbinaries/**", "~/.nimble/packages_*.json", "~/.nimble/nimbledata*.json"], reads: ["~/.config/nimble/nimble.ini", "~/.gitconfig"], network: ["packages.nim-lang.org", "raw.githubusercontent.com", "nim-lang.org", "github.com", "codeload.github.com"], execs: ["nimble", "nim", "git", "tar", "sh", "cc", "gcc", "clang", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "test": {writes: ["nimbledeps/**", "~/.cache/nim/**", "~/.nimble/pkgs2/**", "~/.nimble/pkgs/**", "~/.nimble/pkgcache/**", "~/.nimble/nimbinaries/**", "~/.nimble/packages_*.json", "~/.nimble/nimbledata*.json"], reads: ["~/.config/nimble/nimble.ini", "~/.gitconfig"], network: ["packages.nim-lang.org", "raw.githubusercontent.com", "nim-lang.org", "github.com", "codeload.github.com"], execs: ["nimble", "nim", "git", "tar", "sh", "cc", "gcc", "clang", "ld", "ar"], registry_env: [], confidence: "medium"},
+  },
+  "node-bun": {
+    "setup": {writes: ["node_modules/**", "**/node_modules/**", "~/.bun/install/cache/**", "~/.cache/node-gyp/**"], reads: ["~/.bunfig.toml", "~/.config/.bunfig.toml", "~/.npmrc"], network: ["registry.npmjs.org", "nodejs.org"], execs: ["bun", "node", "sh", "node-gyp", "python3", "make", "git", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["BUN_CONFIG_REGISTRY", "NPM_CONFIG_REGISTRY", "npm_config_registry"], confidence: "medium"},
+  },
+  "node-npm": {
+    "setup": {writes: ["node_modules/**", "**/node_modules/**", "package-lock.json", "npm-shrinkwrap.json", "~/.npm/**", "~/.cache/node-gyp/**"], reads: ["~/.npmrc"], network: ["registry.npmjs.org", "nodejs.org"], execs: ["npm", "node", "sh", "node-gyp", "python3", "make", "git", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["npm_config_registry", "NPM_CONFIG_REGISTRY", "NODEJS_ORG_MIRROR"], confidence: "high"},
+  },
+  "node-pnpm": {
+    "setup": {writes: ["node_modules/**", "**/node_modules/**", "~/.local/share/pnpm/store/**", "~/.local/share/pnpm/.tools/**", "~/.cache/pnpm/**", "~/.local/state/pnpm/**", "~/.cache/node/corepack/**", "~/.cache/node-gyp/**"], reads: ["~/.npmrc", "~/.config/pnpm/**"], network: ["registry.npmjs.org", "nodejs.org"], execs: ["pnpm", "node", "sh", "node-gyp", "python3", "make", "git", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["npm_config_registry", "NPM_CONFIG_REGISTRY", "pnpm_config_registry", "COREPACK_NPM_REGISTRY", "NODEJS_ORG_MIRROR"], confidence: "medium"},
+  },
+  "node-yarn": {
+    "setup": {writes: ["node_modules/**", "**/node_modules/**", ".yarn/**", ".pnp.cjs", ".pnp.loader.mjs", ".pnp.data.json", "~/.yarn/berry/**", "~/.cache/yarn/**", "~/.yarnrc", "~/.cache/node/corepack/**", "~/.cache/node-gyp/**"], reads: ["~/.yarnrc.yml", "~/.yarnrc", "~/.npmrc"], network: ["registry.yarnpkg.com", "registry.npmjs.org", "repo.yarnpkg.com", "classic.yarnpkg.com", "browser-http-intake.logs.datadoghq.eu", "nodejs.org"], execs: ["yarn", "node", "sh", "node-gyp", "python3", "make", "git", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["YARN_NPM_REGISTRY_SERVER", "YARN_REGISTRY", "npm_config_registry", "COREPACK_NPM_REGISTRY", "NODEJS_ORG_MIRROR"], confidence: "medium"},
+  },
+  "ocaml-dune": {
+    "build": {writes: ["_build/**", "*.opam", "~/.cache/dune/**"], reads: [], network: [], execs: ["dune", "ocamlc", "ocamlopt", "ocamldep", "ocamlfind", "ppx.exe", "sh", "bash", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "check": {writes: ["_build/**", "*.opam", "~/.cache/dune/**"], reads: [], network: [], execs: ["dune", "ocamlc", "ocamlopt", "ocamldep", "ocamlfind", "ppx.exe", "sh", "bash", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["_opam/**", "~/.opam/**"], reads: ["~/.opam/config"], network: ["opam.ocaml.org"], execs: ["opam", "curl", "wget", "bwrap", "sh", "make", "patch", "tar", "gzip", "bzip2", "xz", "unzip", "git", "dune", "ocaml", "ocamlfind", "ocamlc", "ocamlopt", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "medium"},
+    "test": {writes: ["_build/**", "*.opam", "~/.cache/dune/**"], reads: [], network: [], execs: ["dune", "ocamlc", "ocamlopt", "ocamldep", "ocamlfind", "ppx.exe", "sh", "bash", "cc", "gcc", "ld", "ar"], registry_env: [], confidence: "medium"},
+  },
+  "pants": {
+    "check": {writes: ["dist/**", ".pants.d/**", ".pids/**", "~/.cache/pants/**", "~/.cache/nce/**"], reads: ["~/.pants.rc"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"], execs: ["pants", "python", "python3", "sh", "bash", "git"], registry_env: [], confidence: "low"},
+    "format": {writes: ["dist/**", ".pants.d/**", ".pids/**", "~/.cache/pants/**", "~/.cache/nce/**"], reads: ["~/.pants.rc"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"], execs: ["pants", "python", "python3", "sh", "bash", "git"], registry_env: [], confidence: "low"},
+    "format-check": {writes: ["dist/**", ".pants.d/**", ".pids/**", "~/.cache/pants/**", "~/.cache/nce/**"], reads: ["~/.pants.rc"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"], execs: ["pants", "python", "python3", "sh", "bash", "git"], registry_env: [], confidence: "low"},
+    "lint": {writes: ["dist/**", ".pants.d/**", ".pids/**", "~/.cache/pants/**", "~/.cache/nce/**"], reads: ["~/.pants.rc"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"], execs: ["pants", "python", "python3", "sh", "bash", "git"], registry_env: [], confidence: "low"},
+    "package": {writes: ["dist/**", ".pants.d/**", ".pids/**", "~/.cache/pants/**", "~/.cache/nce/**"], reads: ["~/.pants.rc"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"], execs: ["pants", "python", "python3", "sh", "bash", "git"], registry_env: [], confidence: "low"},
+    "test": {writes: ["dist/**", ".pants.d/**", ".pids/**", "~/.cache/pants/**", "~/.cache/nce/**"], reads: ["~/.pants.rc"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org"], execs: ["pants", "python", "python3", "sh", "bash", "git"], registry_env: [], confidence: "low"},
+  },
+  "perl": {
+    "setup": {writes: ["~/.cpanm/**", "~/perl5/**", "local/**", "~/.plenv/versions/*/lib/**", "~/.plenv/versions/*/bin/**"], reads: [], network: ["www.cpan.org", "cpanmetadb.plackperl.org", "fastapi.metacpan.org", "cpan.metacpan.org"], execs: ["cpanm", "perl", "make", "sh", "tar", "gzip", "bzip2", "unzip", "curl", "wget", "git", "cc", "gcc", "ld", "ar"], registry_env: ["PERL_CPANM_OPT"], confidence: "high"},
+  },
+  "php-composer": {
+    "setup": {writes: ["vendor/**", "composer.lock", "~/.cache/composer/**", "~/.composer/cache/**", "~/.config/composer/.htaccess", "~/.composer/.htaccess"], reads: ["~/.config/composer/auth.json", "~/.config/composer/config.json", "~/.composer/auth.json", "~/.composer/config.json"], network: ["repo.packagist.org", "packagist.org", "api.github.com", "codeload.github.com", "github.com", "gitlab.com", "bitbucket.org"], execs: ["composer", "php", "sh", "git", "unzip", "7z", "7zz"], registry_env: [], confidence: "high"},
+  },
+  "python-hatch": {
+    "format": {writes: ["~/.local/share/hatch/**", "~/.cache/hatch/**", ".venv/**", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**"], reads: ["~/.config/hatch/**", "~/.config/pip/pip.conf", "~/.pip/pip.conf", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["hatch", "python", "python3", "pip", "uv", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX"], confidence: "medium"},
+    "format-check": {writes: ["~/.local/share/hatch/**", "~/.cache/hatch/**", ".venv/**", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**"], reads: ["~/.config/hatch/**", "~/.config/pip/pip.conf", "~/.pip/pip.conf", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["hatch", "python", "python3", "pip", "uv", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX"], confidence: "medium"},
+    "lint": {writes: ["~/.local/share/hatch/**", "~/.cache/hatch/**", ".venv/**", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**"], reads: ["~/.config/hatch/**", "~/.config/pip/pip.conf", "~/.pip/pip.conf", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["hatch", "python", "python3", "pip", "uv", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX"], confidence: "medium"},
+    "package": {writes: ["~/.local/share/hatch/**", "~/.cache/hatch/**", ".venv/**", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**"], reads: ["~/.config/hatch/**", "~/.config/pip/pip.conf", "~/.pip/pip.conf", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["hatch", "python", "python3", "pip", "uv", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX"], confidence: "medium"},
+    "setup": {writes: ["~/.local/share/hatch/**", "~/.cache/hatch/**", ".venv/**", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**"], reads: ["~/.config/hatch/**", "~/.config/pip/pip.conf", "~/.pip/pip.conf", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["hatch", "python", "python3", "pip", "uv", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX"], confidence: "medium"},
+    "test": {writes: ["~/.local/share/hatch/**", "~/.cache/hatch/**", ".venv/**", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**"], reads: ["~/.config/hatch/**", "~/.config/pip/pip.conf", "~/.pip/pip.conf", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["hatch", "python", "python3", "pip", "uv", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX"], confidence: "medium"},
+  },
+  "python-pdm": {
+    "package": {writes: [".venv/**", "pdm.lock", ".pdm-python", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**", "~/.cache/pdm/**", "~/.local/share/pdm/**"], reads: ["~/.config/pdm/**", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org"], execs: ["pdm", "python", "python3", "uv", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["PDM_PYPI_URL"], confidence: "medium"},
+    "setup": {writes: [".venv/**", "pdm.lock", ".pdm-python", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**", "~/.cache/pdm/**", "~/.local/share/pdm/**"], reads: ["~/.config/pdm/**", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org"], execs: ["pdm", "python", "python3", "uv", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["PDM_PYPI_URL"], confidence: "medium"},
+  },
+  "python-pip": {
+    "package": {writes: [".venv/**", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**", "~/.cache/pip/**"], reads: ["~/.config/pip/pip.conf", "~/.pip/pip.conf", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org"], execs: ["python", "python3", "pip", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS"], confidence: "high"},
+    "setup": {writes: [".venv/**", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**", "~/.cache/pip/**"], reads: ["~/.config/pip/pip.conf", "~/.pip/pip.conf", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org"], execs: ["python", "python3", "pip", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS"], confidence: "high"},
+  },
+  "python-pipenv": {
+    "setup": {writes: ["~/.local/share/virtualenvs/**", ".venv/**", "Pipfile.lock", "*.egg-info/**", "src/*.egg-info/**", "~/.cache/pipenv/**", "~/.cache/pip/**"], reads: ["~/.config/pip/pip.conf", "~/.pip/pip.conf", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org"], execs: ["pipenv", "python", "python3", "pip", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["PIPENV_PYPI_MIRROR", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL"], confidence: "medium"},
+  },
+  "python-poetry": {
+    "setup": {writes: [".venv/**", "poetry.lock", ".poetry/**", "~/.cache/pypoetry/**"], reads: ["~/.config/pypoetry/**", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org"], execs: ["poetry", "python", "python3", "pip", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["POETRY_REPOSITORIES_*_URL"], confidence: "high"},
+  },
+  "python-uv": {
+    "package": {writes: [".venv/**", "uv.lock", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**", "~/.cache/uv/**", "~/.local/share/uv/python/**"], reads: ["~/.config/uv/**", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["uv", "python", "python3", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["UV_DEFAULT_INDEX", "UV_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_FIND_LINKS", "UV_PYTHON_INSTALL_MIRROR"], confidence: "high"},
+    "setup": {writes: [".venv/**", "uv.lock", "dist/**", "*.egg-info/**", "src/*.egg-info/**", "build/**", "~/.cache/uv/**", "~/.local/share/uv/python/**"], reads: ["~/.config/uv/**", "~/.netrc"], network: ["pypi.org", "files.pythonhosted.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["uv", "python", "python3", "sh", "make", "pkg-config", "git", "cmake", "ninja", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["UV_DEFAULT_INDEX", "UV_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_FIND_LINKS", "UV_PYTHON_INSTALL_MIRROR"], confidence: "high"},
+  },
+  "r": {
+    "setup": {writes: ["renv/**", "~/.cache/R/**"], reads: ["~/.Rprofile", "~/.Renviron", "~/.R/Makevars"], network: ["cloud.r-project.org", "cran.rstudio.com", "p3m.dev", "packagemanager.posit.co", "packagemanager.rstudio.com", "bioconductor.org", "api.github.com", "codeload.github.com", "github.com"], execs: ["Rscript", "R", "sh", "make", "tar", "gzip", "git", "pkg-config", "gfortran", "cc", "c++", "gcc", "g++", "ld", "ar"], registry_env: ["RENV_CONFIG_REPOS_OVERRIDE"], confidence: "medium"},
+  },
+  "ruby-bundler": {
+    "setup": {writes: ["Gemfile.lock", ".bundle/**", "vendor/bundle/**", "~/.bundle/cache/**", "~/.gem/ruby/**", "~/.gem/specs/**", "~/.local/share/gem/**", "~/.rbenv/versions/*/lib/ruby/gems/**", "~/.rbenv/versions/*/bin/**", "~/.rbenv/shims/**", "~/.local/share/mise/installs/ruby/*/lib/ruby/gems/**", "~/.local/share/mise/installs/ruby/*/bin/**", "~/.asdf/installs/ruby/*/lib/ruby/gems/**", "~/.asdf/installs/ruby/*/bin/**", "~/.rubies/*/lib/ruby/gems/**", "~/.rubies/*/bin/**", "~/.rvm/gems/**"], reads: ["~/.bundle/config", "~/.gemrc"], network: ["rubygems.org", "index.rubygems.org"], execs: ["bundle", "ruby", "gem", "rbenv", "sh", "make", "pkg-config", "git", "cmake", "cargo", "rustc", "cc", "c++", "gcc", "g++", "clang", "ld", "ar"], registry_env: ["BUNDLE_MIRROR__ALL"], confidence: "medium"},
+  },
+  "rust-cargo": {
+    "build": {writes: ["target/**", "Cargo.lock", "~/.cargo/registry/**", "~/.cargo/git/**", "~/.cargo/.package-cache*", "~/.cargo/.global-cache*"], reads: ["~/.cargo/config.toml", "~/.cargo/config", "~/.cargo/credentials.toml", "~/.cargo/credentials", "~/.gitconfig"], network: ["index.crates.io", "static.crates.io"], execs: ["cargo", "rustc", "rustup", "rustdoc", "clippy-driver", "cargo-clippy", "build-script-build", "sh", "make", "cmake", "perl", "nasm", "pkg-config", "git", "cc", "c++", "gcc", "g++", "clang", "ld", "ar", "ranlib"], registry_env: ["CARGO_REGISTRIES_CRATES_IO_PROTOCOL", "CARGO_REGISTRIES_*_INDEX"], confidence: "high"},
+    "check": {writes: ["target/**", "Cargo.lock", "~/.cargo/registry/**", "~/.cargo/git/**", "~/.cargo/.package-cache*", "~/.cargo/.global-cache*"], reads: ["~/.cargo/config.toml", "~/.cargo/config", "~/.cargo/credentials.toml", "~/.cargo/credentials", "~/.gitconfig"], network: ["index.crates.io", "static.crates.io"], execs: ["cargo", "rustc", "rustup", "rustdoc", "clippy-driver", "cargo-clippy", "build-script-build", "sh", "make", "cmake", "perl", "nasm", "pkg-config", "git", "cc", "c++", "gcc", "g++", "clang", "ld", "ar", "ranlib"], registry_env: ["CARGO_REGISTRIES_CRATES_IO_PROTOCOL", "CARGO_REGISTRIES_*_INDEX"], confidence: "high"},
+    "lint": {writes: ["target/**", "Cargo.lock", "~/.cargo/registry/**", "~/.cargo/git/**", "~/.cargo/.package-cache*", "~/.cargo/.global-cache*"], reads: ["~/.cargo/config.toml", "~/.cargo/config", "~/.cargo/credentials.toml", "~/.cargo/credentials", "~/.gitconfig"], network: ["index.crates.io", "static.crates.io"], execs: ["cargo", "rustc", "rustup", "rustdoc", "clippy-driver", "cargo-clippy", "build-script-build", "sh", "make", "cmake", "perl", "nasm", "pkg-config", "git", "cc", "c++", "gcc", "g++", "clang", "ld", "ar", "ranlib"], registry_env: ["CARGO_REGISTRIES_CRATES_IO_PROTOCOL", "CARGO_REGISTRIES_*_INDEX"], confidence: "high"},
+    "package": {writes: ["target/**", "Cargo.lock", "~/.cargo/registry/**", "~/.cargo/git/**", "~/.cargo/.package-cache*", "~/.cargo/.global-cache*"], reads: ["~/.cargo/config.toml", "~/.cargo/config", "~/.cargo/credentials.toml", "~/.cargo/credentials", "~/.gitconfig"], network: ["index.crates.io", "static.crates.io"], execs: ["cargo", "rustc", "rustup", "rustdoc", "clippy-driver", "cargo-clippy", "build-script-build", "sh", "make", "cmake", "perl", "nasm", "pkg-config", "git", "cc", "c++", "gcc", "g++", "clang", "ld", "ar", "ranlib"], registry_env: ["CARGO_REGISTRIES_CRATES_IO_PROTOCOL", "CARGO_REGISTRIES_*_INDEX"], confidence: "high"},
+    "run": {writes: ["target/**", "Cargo.lock", "~/.cargo/registry/**", "~/.cargo/git/**", "~/.cargo/.package-cache*", "~/.cargo/.global-cache*"], reads: ["~/.cargo/config.toml", "~/.cargo/config", "~/.cargo/credentials.toml", "~/.cargo/credentials", "~/.gitconfig"], network: ["index.crates.io", "static.crates.io"], execs: ["cargo", "rustc", "rustup", "rustdoc", "clippy-driver", "cargo-clippy", "build-script-build", "sh", "make", "cmake", "perl", "nasm", "pkg-config", "git", "cc", "c++", "gcc", "g++", "clang", "ld", "ar", "ranlib"], registry_env: ["CARGO_REGISTRIES_CRATES_IO_PROTOCOL", "CARGO_REGISTRIES_*_INDEX"], confidence: "high"},
+    "setup": {writes: ["Cargo.lock", "~/.cargo/registry/**", "~/.cargo/git/**", "~/.cargo/.package-cache*", "~/.cargo/.global-cache*", "~/.rustup/toolchains/**", "~/.rustup/downloads/**", "~/.rustup/tmp/**", "~/.rustup/update-hashes/**", "~/.rustup/settings.toml"], reads: ["~/.cargo/config.toml", "~/.cargo/config", "~/.cargo/credentials.toml", "~/.cargo/credentials", "~/.gitconfig"], network: ["index.crates.io", "static.crates.io", "static.rust-lang.org"], execs: ["cargo", "rustc", "rustup", "git"], registry_env: ["CARGO_REGISTRIES_CRATES_IO_PROTOCOL", "CARGO_REGISTRIES_*_INDEX", "RUSTUP_DIST_SERVER", "RUSTUP_UPDATE_ROOT"], confidence: "high"},
+    "test": {writes: ["target/**", "Cargo.lock", "~/.cargo/registry/**", "~/.cargo/git/**", "~/.cargo/.package-cache*", "~/.cargo/.global-cache*"], reads: ["~/.cargo/config.toml", "~/.cargo/config", "~/.cargo/credentials.toml", "~/.cargo/credentials", "~/.gitconfig"], network: ["index.crates.io", "static.crates.io"], execs: ["cargo", "rustc", "rustup", "rustdoc", "clippy-driver", "cargo-clippy", "build-script-build", "sh", "make", "cmake", "perl", "nasm", "pkg-config", "git", "cc", "c++", "gcc", "g++", "clang", "ld", "ar", "ranlib"], registry_env: ["CARGO_REGISTRIES_CRATES_IO_PROTOCOL", "CARGO_REGISTRIES_*_INDEX"], confidence: "high"},
+  },
+  "scala-mill": {
+    "build": {writes: ["out/**", "~/.cache/mill/**", "~/.cache/coursier/**"], reads: ["~/.config/coursier/**"], network: ["repo1.maven.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "cdn.azul.com"], execs: ["mill", "sh", "curl", "java", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "check": {writes: ["out/**", "~/.cache/mill/**", "~/.cache/coursier/**"], reads: ["~/.config/coursier/**"], network: ["repo1.maven.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "cdn.azul.com"], execs: ["mill", "sh", "curl", "java", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "clean": {writes: ["out/**", "~/.cache/mill/**", "~/.cache/coursier/**"], reads: ["~/.config/coursier/**"], network: ["repo1.maven.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "cdn.azul.com"], execs: ["mill", "sh", "curl", "java", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "format": {writes: ["out/**", "~/.cache/mill/**", "~/.cache/coursier/**"], reads: ["~/.config/coursier/**"], network: ["repo1.maven.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "cdn.azul.com"], execs: ["mill", "sh", "curl", "java", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "format-check": {writes: ["out/**", "~/.cache/mill/**", "~/.cache/coursier/**"], reads: ["~/.config/coursier/**"], network: ["repo1.maven.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "cdn.azul.com"], execs: ["mill", "sh", "curl", "java", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "package": {writes: ["out/**", "~/.cache/mill/**", "~/.cache/coursier/**"], reads: ["~/.config/coursier/**"], network: ["repo1.maven.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "cdn.azul.com"], execs: ["mill", "sh", "curl", "java", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "test": {writes: ["out/**", "~/.cache/mill/**", "~/.cache/coursier/**"], reads: ["~/.config/coursier/**"], network: ["repo1.maven.org", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "cdn.azul.com"], execs: ["mill", "sh", "curl", "java", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+  },
+  "scala-sbt": {
+    "build": {writes: ["target/**", "**/target/**", "project/project/**", ".bsp/**", "~/.sbt/boot/**", "~/.sbt/1.0/zinc/**", "~/.sbt/1.0/server/**", "~/.sbt/1.0/java9-rt-ext-*/**", "~/.ivy2/cache/**", "~/.ivy2/local/**", "~/.cache/coursier/**", "~/.cache/sbt/**"], reads: ["~/.sbt/repositories", "~/.sbt/1.0/plugins/**", "~/.sbt/1.0/*.sbt", "~/.ivy2/.credentials", "~/.sbtopts"], network: ["repo1.maven.org", "repo.scala-sbt.org", "repo.typesafe.com"], execs: ["sbt", "java", "sh", "bash", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "check": {writes: ["target/**", "**/target/**", "project/project/**", ".bsp/**", "~/.sbt/boot/**", "~/.sbt/1.0/zinc/**", "~/.sbt/1.0/server/**", "~/.sbt/1.0/java9-rt-ext-*/**", "~/.ivy2/cache/**", "~/.ivy2/local/**", "~/.cache/coursier/**", "~/.cache/sbt/**"], reads: ["~/.sbt/repositories", "~/.sbt/1.0/plugins/**", "~/.sbt/1.0/*.sbt", "~/.ivy2/.credentials", "~/.sbtopts"], network: ["repo1.maven.org", "repo.scala-sbt.org", "repo.typesafe.com"], execs: ["sbt", "java", "sh", "bash", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "clean": {writes: ["target/**", "**/target/**", "project/project/**", ".bsp/**", "~/.sbt/boot/**", "~/.sbt/1.0/zinc/**", "~/.sbt/1.0/server/**", "~/.sbt/1.0/java9-rt-ext-*/**", "~/.ivy2/cache/**", "~/.ivy2/local/**", "~/.cache/coursier/**", "~/.cache/sbt/**"], reads: ["~/.sbt/repositories", "~/.sbt/1.0/plugins/**", "~/.sbt/1.0/*.sbt", "~/.ivy2/.credentials", "~/.sbtopts"], network: ["repo1.maven.org", "repo.scala-sbt.org", "repo.typesafe.com"], execs: ["sbt", "java", "sh", "bash", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "format": {writes: ["target/**", "**/target/**", "project/project/**", ".bsp/**", "~/.sbt/boot/**", "~/.sbt/1.0/zinc/**", "~/.sbt/1.0/server/**", "~/.sbt/1.0/java9-rt-ext-*/**", "~/.ivy2/cache/**", "~/.ivy2/local/**", "~/.cache/coursier/**", "~/.cache/sbt/**"], reads: ["~/.sbt/repositories", "~/.sbt/1.0/plugins/**", "~/.sbt/1.0/*.sbt", "~/.ivy2/.credentials", "~/.sbtopts"], network: ["repo1.maven.org", "repo.scala-sbt.org", "repo.typesafe.com"], execs: ["sbt", "java", "sh", "bash", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "format-check": {writes: ["target/**", "**/target/**", "project/project/**", ".bsp/**", "~/.sbt/boot/**", "~/.sbt/1.0/zinc/**", "~/.sbt/1.0/server/**", "~/.sbt/1.0/java9-rt-ext-*/**", "~/.ivy2/cache/**", "~/.ivy2/local/**", "~/.cache/coursier/**", "~/.cache/sbt/**"], reads: ["~/.sbt/repositories", "~/.sbt/1.0/plugins/**", "~/.sbt/1.0/*.sbt", "~/.ivy2/.credentials", "~/.sbtopts"], network: ["repo1.maven.org", "repo.scala-sbt.org", "repo.typesafe.com"], execs: ["sbt", "java", "sh", "bash", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "package": {writes: ["target/**", "**/target/**", "project/project/**", ".bsp/**", "~/.sbt/boot/**", "~/.sbt/1.0/zinc/**", "~/.sbt/1.0/server/**", "~/.sbt/1.0/java9-rt-ext-*/**", "~/.ivy2/cache/**", "~/.ivy2/local/**", "~/.cache/coursier/**", "~/.cache/sbt/**"], reads: ["~/.sbt/repositories", "~/.sbt/1.0/plugins/**", "~/.sbt/1.0/*.sbt", "~/.ivy2/.credentials", "~/.sbtopts"], network: ["repo1.maven.org", "repo.scala-sbt.org", "repo.typesafe.com"], execs: ["sbt", "java", "sh", "bash", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "run": {writes: ["target/**", "**/target/**", "project/project/**", ".bsp/**", "~/.sbt/boot/**", "~/.sbt/1.0/zinc/**", "~/.sbt/1.0/server/**", "~/.sbt/1.0/java9-rt-ext-*/**", "~/.ivy2/cache/**", "~/.ivy2/local/**", "~/.cache/coursier/**", "~/.cache/sbt/**"], reads: ["~/.sbt/repositories", "~/.sbt/1.0/plugins/**", "~/.sbt/1.0/*.sbt", "~/.ivy2/.credentials", "~/.sbtopts"], network: ["repo1.maven.org", "repo.scala-sbt.org", "repo.typesafe.com"], execs: ["sbt", "java", "sh", "bash", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "setup": {writes: ["target/**", "**/target/**", "project/project/**", ".bsp/**", "~/.sbt/boot/**", "~/.sbt/1.0/zinc/**", "~/.sbt/1.0/server/**", "~/.sbt/1.0/java9-rt-ext-*/**", "~/.ivy2/cache/**", "~/.ivy2/local/**", "~/.cache/coursier/**", "~/.cache/sbt/**"], reads: ["~/.sbt/repositories", "~/.sbt/1.0/plugins/**", "~/.sbt/1.0/*.sbt", "~/.ivy2/.credentials", "~/.sbtopts"], network: ["repo1.maven.org", "repo.scala-sbt.org", "repo.typesafe.com"], execs: ["sbt", "java", "sh", "bash", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+    "test": {writes: ["target/**", "**/target/**", "project/project/**", ".bsp/**", "~/.sbt/boot/**", "~/.sbt/1.0/zinc/**", "~/.sbt/1.0/server/**", "~/.sbt/1.0/java9-rt-ext-*/**", "~/.ivy2/cache/**", "~/.ivy2/local/**", "~/.cache/coursier/**", "~/.cache/sbt/**"], reads: ["~/.sbt/repositories", "~/.sbt/1.0/plugins/**", "~/.sbt/1.0/*.sbt", "~/.ivy2/.credentials", "~/.sbtopts"], network: ["repo1.maven.org", "repo.scala-sbt.org", "repo.typesafe.com"], execs: ["sbt", "java", "sh", "bash", "git"], registry_env: ["COURSIER_REPOSITORIES"], confidence: "medium"},
+  },
+  "swift-spm": {
+    "build": {writes: [".build/**", "Package.resolved", "~/.cache/org.swift.swiftpm/**", "~/.swiftpm/security/**", "~/.config/swiftpm/security/**"], reads: ["~/.swiftpm/configuration/**", "~/.config/swiftpm/**", "~/.netrc", "~/.gitconfig"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "download.swift.org"], execs: ["swift", "swift-build", "swift-test", "swift-run", "swiftc", "swift-frontend", "swift-driver", "swift-autolink-extract", "git", "sh", "clang", "clang++", "cc", "ld", "lld", "ar"], registry_env: [], confidence: "medium"},
+    "check": {writes: [".build/**", "Package.resolved", "~/.cache/org.swift.swiftpm/**", "~/.swiftpm/security/**", "~/.config/swiftpm/security/**"], reads: ["~/.swiftpm/configuration/**", "~/.config/swiftpm/**", "~/.netrc", "~/.gitconfig"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "download.swift.org"], execs: ["swift", "swift-build", "swift-test", "swift-run", "swiftc", "swift-frontend", "swift-driver", "swift-autolink-extract", "git", "sh", "clang", "clang++", "cc", "ld", "lld", "ar"], registry_env: [], confidence: "medium"},
+    "package": {writes: [".build/**", "Package.resolved", "~/.cache/org.swift.swiftpm/**", "~/.swiftpm/security/**", "~/.config/swiftpm/security/**"], reads: ["~/.swiftpm/configuration/**", "~/.config/swiftpm/**", "~/.netrc", "~/.gitconfig"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "download.swift.org"], execs: ["swift", "swift-build", "swift-test", "swift-run", "swiftc", "swift-frontend", "swift-driver", "swift-autolink-extract", "git", "sh", "clang", "clang++", "cc", "ld", "lld", "ar"], registry_env: [], confidence: "medium"},
+    "run": {writes: [".build/**", "Package.resolved", "~/.cache/org.swift.swiftpm/**", "~/.swiftpm/security/**", "~/.config/swiftpm/security/**"], reads: ["~/.swiftpm/configuration/**", "~/.config/swiftpm/**", "~/.netrc", "~/.gitconfig"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "download.swift.org"], execs: ["swift", "swift-build", "swift-test", "swift-run", "swiftc", "swift-frontend", "swift-driver", "swift-autolink-extract", "git", "sh", "clang", "clang++", "cc", "ld", "lld", "ar"], registry_env: [], confidence: "medium"},
+    "setup": {writes: [".build/**", "Package.resolved", "~/.cache/org.swift.swiftpm/**", "~/.swiftpm/security/**", "~/.config/swiftpm/security/**"], reads: ["~/.swiftpm/configuration/**", "~/.config/swiftpm/**", "~/.netrc", "~/.gitconfig"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["swift", "swift-package", "swift-build", "swiftc", "swift-frontend", "swift-driver", "git", "clang", "ld"], registry_env: [], confidence: "medium"},
+    "test": {writes: [".build/**", "Package.resolved", "~/.cache/org.swift.swiftpm/**", "~/.swiftpm/security/**", "~/.config/swiftpm/security/**"], reads: ["~/.swiftpm/configuration/**", "~/.config/swiftpm/**", "~/.netrc", "~/.gitconfig"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "download.swift.org"], execs: ["swift", "swift-build", "swift-test", "swift-run", "swiftc", "swift-frontend", "swift-driver", "swift-autolink-extract", "git", "sh", "clang", "clang++", "cc", "ld", "lld", "ar"], registry_env: [], confidence: "medium"},
+  },
+  "terraform": {
+    "check": {writes: ["~/.terraform.d/checkpoint_cache", "~/.terraform.d/checkpoint_signature"], reads: ["~/.terraformrc", "~/.tofurc"], network: ["checkpoint-api.hashicorp.com"], execs: ["terraform", "tofu", "terraform-provider-*"], registry_env: [], confidence: "medium"},
+    "setup": {writes: [".terraform/**", ".terraform.lock.hcl", "~/.terraform.d/checkpoint_cache", "~/.terraform.d/checkpoint_signature", "~/.terraform.d/plugin-cache/**"], reads: ["~/.terraformrc", "~/.tofurc", "~/.terraform.d/credentials.tfrc.json", "~/.terraform.d/plugins/**", "~/.local/share/terraform/plugins/**"], network: ["registry.terraform.io", "releases.hashicorp.com", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "checkpoint-api.hashicorp.com", "registry.opentofu.org"], execs: ["terraform", "tofu", "git"], registry_env: [], confidence: "medium"},
+    "test": {writes: [".terraform/**", "~/.terraform.d/checkpoint_cache", "~/.terraform.d/checkpoint_signature"], reads: ["~/.terraformrc", "~/.tofurc", "~/.terraform.d/credentials.tfrc.json"], network: ["checkpoint-api.hashicorp.com"], execs: ["terraform", "tofu", "terraform-provider-*"], registry_env: [], confidence: "low"},
+  },
+  "zig": {
+    "build": {writes: ["zig-out/**", ".zig-cache/**", "zig-pkg/**", "~/.cache/zig/**"], reads: [], network: ["github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["zig", "build", "sh", "git", "pkg-config"], registry_env: [], confidence: "medium"},
+    "run": {writes: ["zig-out/**", ".zig-cache/**", "zig-pkg/**", "~/.cache/zig/**"], reads: [], network: ["github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["zig", "build", "sh", "git", "pkg-config"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["zig-pkg/**", ".zig-cache/**", "~/.cache/zig/**"], reads: [], network: ["github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["zig"], registry_env: [], confidence: "medium"},
+    "test": {writes: ["zig-out/**", ".zig-cache/**", "zig-pkg/**", "~/.cache/zig/**"], reads: [], network: ["github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["zig", "build", "sh", "git", "pkg-config"], registry_env: [], confidence: "medium"},
+  },
+}
+
+# Toolchains with no footprint of their own: they run the project's own
+# code (task runners), or hand their work to a daemon the box cannot see.
+stick FOOTPRINTLESS = {
+  "cigscript": "cig check reads the project's own .cig files; no dependencies",
+  "earthly": "task runner: runs the project's own Earthfile targets; its builds also run in BuildKit outside the sandbox, as with docker",
+  "just": "task runner: runs the project's own recipes",
+  "make": "task runner: runs the project's own targets",
+  "powershell": "no install or build stage: lint and test run PSScriptAnalyzer and Pester already installed",
+  "rake": "task runner: runs the project's own Rakefile tasks",
+  "scripts": "script folder: runs the project's own scripts",
+  "shell": "shellcheck and shfmt read the project's own scripts; no dependencies",
+  "task": "task runner: runs the project's own Taskfile tasks",
+  "xcode": "macOS only (detected only on macos) and the rehearsal sandbox is Linux; its SwiftPM resolution, macros and build-tool plugins would follow swift-spm once a macOS sandbox exists",
 }
 
 # ----- the command line -------------------------------------------------------
@@ -2047,6 +2352,7 @@ pull component_task(comp_name, r, stage, spec, needs) {
   }
   t.component = comp_name
   t.stage = stage
+  t.toolchain = r.toolchain
   t.origin = "component ${comp_name} (${r.toolchain}): ${spec.get("source", "")}"
   snuff t
 }
@@ -2847,6 +3153,26 @@ pull undo_of(t, where) {
 pull attempt(name, t, cmd, opts, n) {
   stick started = time.now_ms()
   roll r = null
+  # What a rehearsed hop's box returned: the layers it held back, what they
+  # hold outside the footprint, the hosts it refused. An error's value
+  # carries them too (a contained hop's layer is kept as evidence).
+  roll held = []
+  roll outside = []
+  roll refused = []
+  pull absorb(one) {
+    if type_of(one) != "map" {
+      snuff
+    }
+    if one.get("layer", null) != null {
+      held.push(one.layer)
+    }
+    outside = outside + as_list(one.get("outside", []))
+    for h in as_list(one.get("refused", [])) {
+      if not refused.contains(h) {
+        refused.push(h)
+      }
+    }
+  }
   burn {
     if fs.exists(opts.env.CIG_OUTPUT) {
       fs.rm(opts.env.CIG_OUTPUT)
@@ -2877,6 +3203,7 @@ pull attempt(name, t, cmd, opts, n) {
         }
         for argv in cmd.argvs {
           stick one = proc.run(argv.first(), argv.slice(1), opts)
+          absorb(one)
           out = out + one.out
           err = err + one.err
           code = one.code
@@ -2894,7 +3221,11 @@ pull attempt(name, t, cmd, opts, n) {
       } else {
         r = proc.run(cmd.argv.first(), cmd.argv.slice(1), opts)
       }
+      if cmd.has("shell") or cmd.has("argv") {
+        absorb(r)
+      }
     } ashtray e {
+      absorb(e)
       roll said = e.message
       # E557: the output is not text in the encoding asked for.
       if e.message.contains(" is not valid ") and e.message.contains(" at byte ") {
@@ -2925,7 +3256,7 @@ pull attempt(name, t, cmd, opts, n) {
     printed = true
     exhale "    (the task printed output, which it must not; the lines above are the reason)"
   }
-  snuff {code: r.code, ok: ok, printed: printed, ok_codes: ok_codes(t), ms: time.now_ms() - started, out: r.out, err: r.err, simulated: simulated}
+  snuff {code: r.code, ok: ok, printed: printed, ok_codes: ok_codes(t), ms: time.now_ms() - started, out: r.out, err: r.err, simulated: simulated, held: held, outside: outside, refused: refused}
 }
 
 pull failure(name, cmd, result, n) {
@@ -2999,6 +3330,10 @@ pull run_task(ctx, name, index, total) {
     }
   }
   stick opts = hop_options(name, t, cwd, d, where)
+  stick rehearsal = REHEARSE.get(name, null)
+  if rehearsal != null {
+    opts.box = rehearsal_box(rehearsal.fp, cwd, opts.env)
+  }
   if t.has("stdin_from") {
     opts.stdin = RAW.get(str(t.stdin_from), "")
   } else if t.has("stdin") {
@@ -3025,6 +3360,9 @@ pull run_task(ctx, name, index, total) {
     on_versions.push("${sw.var} ${sw.version} via ${sw.how.manager} (${sw.source})")
   }
   exhale "[${index}/${total}] ${name}: ${cmd.label}" + pick(cwd == ".", "", "   (in ${cwd})") + pick(on_versions.is_empty(), "", "   on ${on_versions.join(", ")}")
+  if rehearsal != null {
+    exhale "    rehearsed in the box: its writes judged against its footprint, its network the registries it names"
+  }
   # Up to date: its inputs are as they were after its last success, and what
   # it produces is still there.
   roll before = null
@@ -3054,8 +3392,19 @@ pull run_task(ctx, name, index, total) {
       }
       result = attempt(name, t, cmd, opts, n)
       if not result.ok and n < tries {
+        # A failed rehearsed attempt's layers go before the next attempt.
+        if rehearsal != null and not result.get("held", []).is_empty() {
+          burn {
+            for layer in result.held {
+              proc.discard_layer(layer)
+            }
+          }
+        }
         exhale "    exit ${result.code}; trying again (${n + 1} of ${tries})"
       }
+    }
+    if rehearsal != null and not result.get("simulated", false) {
+      settle_rehearsal(name, t, result, rehearsal)
     }
   }
   stick undo = undo_of(t, where)
@@ -3207,7 +3556,7 @@ pull do_run(g, wanted) {
     }
   }
   # The guard: what each task is about to run, read before anything runs.
-  guard_run(tasks, names)
+  guard_run(tasks, names, g.manifest.get("defaults", {}))
   # Versions: where the project's pins and this machine disagree, switch
   # through a manager when the answer is yes, and warn about the rest.
   stick comps = components_of(tasks, names)
@@ -3538,6 +3887,8 @@ pull do_help() {
   exhale "  cigo show <task>            where a task comes from and everything it will do"
   exhale "  cigo audit [<task>...] [--json]"
   exhale "                              what the guard reads before a task runs: install hooks and findings, with codes"
+  exhale "  cigo rehearse <npm:name[@version]|pypi:name[==version]|crates:name[@version]|./script.sh> [--json] [--keep]"
+  exhale "                              install it in cig's contained box (Linux) and say what it did beyond its footprint"
   exhale "  cigo trust [<task>|list|show <task>|revoke <task>|revoke --all]"
   exhale "                              approve a task as it is now (signed with the tin's key), or see and drop approvals"
   exhale "  cigo check [--strict]       the manifest, checked before anything runs"
@@ -5251,7 +5602,13 @@ pull do_toolchains() {
       if not kb.has(id) {
         fail("no toolchain `${id}`; ${close_toolchains(kb, id)}")
       }
-      exhale "${id}: " + json.stringify(kb[id], 2)
+      roll shown = kb[id]
+      if FOOTPRINTS.has(id) {
+        shown = shown.merge({footprints: FOOTPRINTS[id]})
+      } else if FOOTPRINTLESS.has(id) {
+        shown = shown.merge({footprints: FOOTPRINTLESS[id]})
+      }
+      exhale "${id}: " + json.stringify(shown, 2)
     }
     snuff
   }
@@ -5688,8 +6045,246 @@ pull refuse(message) {
   cough {message: message, exit_code: 1}
 }
 
-# The pass over a run's tasks, before anything runs.
-pull guard_run(tasks, names) {
+
+# ----- the rehearsal: the dry run is the real run ------------------------------------
+#
+# A stage that runs code the project did not write (an install and its hooks,
+# a build that runs its dependencies' build scripts), or that the static read
+# flagged, runs once, for real, in cig's contained box (cig 1.12.0, Linux):
+# everything it writes is a layer cig reads, the rest of the machine is
+# read-only to it, it opens no Unix socket, and its only way out is the
+# registries its toolchain's footprint names. What it wrote within the
+# footprint is applied as it is (no second run); what it did beyond it is the
+# verdict's evidence, with the guard's friction. A clean rehearsal approves
+# the task as it is, so the next run pays one hash lookup.
+
+# Where a rehearsal's writes show it starting again later.
+stick PERSIST_PATHS = ['(^|/)\.git/hooks/[^/]+$', '(^|/)\.git/config$', '^~/\.(bashrc|bash_profile|bash_login|bash_logout|profile|zshrc|zprofile|zshenv|zlogin|xprofile|xinitrc|xsessionrc|pam_environment)$', '^~/\.config/(autostart|systemd/user|environment\.d)/', '^~/\.config/fish/(config\.fish|conf\.d/)', '^~/\.local/share/systemd/', '^~/\.ssh/(authorized_keys|config|rc)$', '^~/Library/LaunchAgents/']
+# Files whose change gives something away or lets something in.
+stick SECRET_PATHS = ['^~/\.ssh/', '^~/\.aws/', '^~/\.config/gcloud/', '^~/\.azure/', '^~/\.kube/', '^~/\.docker/config\.json$', '^~/\.npmrc$', '^~/\.pypirc$', '^~/\.git-credentials$', '^~/\.netrc$', '^~/\.gnupg/', '^~/\.cargo/credentials']
+
+# A task's expected footprint: its toolchain's for its stage, with what the
+# manifest adds (`footprint`); null when neither says anything.
+pull footprint_of(t) {
+  roll base = null
+  stick tc = str(t.get("toolchain", ""))
+  stick stage = str(t.get("stage", ""))
+  if tc != "" and FOOTPRINTS.has(tc) and FOOTPRINTS[tc].has(stage) {
+    base = FOOTPRINTS[tc][stage]
+  }
+  stick add = t.get("footprint", null)
+  if base == null and type_of(add) != "map" {
+    snuff null
+  }
+  roll out = {writes: [], reads: [], network: [], execs: [], registry_env: []}
+  for k in ["writes", "reads", "network", "execs", "registry_env"] {
+    if base != null {
+      out[k] = out[k] + as_list(base.get(k, [])).map(pack(x) => str(x))
+    }
+    if type_of(add) == "map" {
+      out[k] = out[k] + as_list(add.get(k, [])).map(pack(x) => str(x))
+    }
+  }
+  snuff out
+}
+
+# The contained box is cig 1.12.0's, on Linux.
+pull rehearsal_possible() {
+  stick v = version_parts(cig.version())
+  snuff cig.os() == "linux" and v != null and (v[0] > 1 or (v[0] == 1 and v[1] >= 12))
+}
+
+# The host a registry URL names, with its port when that is not 443.
+pull url_host(u) {
+  stick c = text.captures(str(u), '^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/]*@)?(\[[^\]]+\]|[^:/?#]+)(?::(\d+))?')
+  if c == null {
+    snuff null
+  }
+  stick host = c[1].lower()
+  stick port = str(c.get(2, null) ?? "443")
+  if port == "443" {
+    snuff host
+  }
+  snuff host + ":" + port
+}
+
+# The hosts a project points its tools at instead of the public registry:
+# each `registry_env` variable (`*` stands for any part of a name) holding a URL.
+pull registry_hosts(fp, task_env) {
+  roll vars = env.all()
+  for k in task_env {
+    vars[k] = task_env[k]
+  }
+  roll hosts = []
+  for name in fp.registry_env {
+    stick re = "^" + name.replace("*", "[A-Za-z0-9_]*") + "$"
+    for k in vars {
+      if text.matches(k, re) {
+        stick h = url_host(vars[k])
+        if h != null and not hosts.contains(h) {
+          hosts.push(h)
+        }
+      }
+    }
+  }
+  snuff hosts
+}
+
+# The box a rehearsed task runs in: contained, the registry network its
+# footprint names, its writes judged against the footprint (under the task's
+# folder, or `~/`), and cigo's own outputs folder.
+pull rehearsal_box(fp, cwd, task_env) {
+  roll allow = []
+  for h in fp.network + registry_hosts(fp, task_env) {
+    if not allow.contains(h) {
+      allow.push(h)
+    }
+  }
+  roll expect = [RUN_DIR + "/**"]
+  for w in fp.writes {
+    if w.starts_with("~/") {
+      expect.push(w)
+    } else {
+      expect.push(touch_under(cwd, w))
+    }
+  }
+  snuff {network: "registry", allow_hosts: allow, contain: true, expect: expect}
+}
+
+# Does the task run a cig script (the `scripts` toolchain adopting a .cig
+# file)? That is CigScript's own journal at work, not code to rehearse.
+pull runs_cig(t) {
+  stick argv = as_list(argv_of(t.get("cmd", null)) ?? [])
+  snuff not argv.is_empty() and path.stem(str(argv.first())).lower() == "cig" and str(argv.get(1, "")) == "run"
+}
+
+# Is this task rehearsed? Not when the guard is off, the setting says never,
+# the task is approved or cannot be boxed; under auto, when its stage runs
+# code it did not write (it has a footprint) or the static read flagged it.
+pull should_rehearse(t, v, defaults) {
+  stick mode = config().rehearse
+  if mode == "never" or not guard_on() or not boxed(t, defaults) or runs_cig(t) {
+    snuff false
+  }
+  stick wanted = mode == "always" or str(t.get("trust", "")) == "never" or footprint_of(t) != null or v.risk != "none"
+  if not wanted {
+    snuff false
+  }
+  if not rehearsal_possible() {
+    if cig.os() == "linux" and not REHEARSAL_NOTED {
+      REHEARSAL_NOTED = true
+      log.warn("the rehearsal needs cig 1.12.0 or later (this is ${cig.version()}); tasks are read, not rehearsed. cig update installs it")
+    }
+    snuff false
+  }
+  snuff true
+}
+
+# What a rehearsal did beyond its footprint, as findings: where it would run
+# again later, credential files it changed, set-id files, links into your
+# home, folders it hid, what it removed, and the hosts the box refused.
+pull behaviour_findings(outside, refused) {
+  roll out = []
+  roll removed = 0
+  for u in as_list(outside) {
+    stick p = str(u.get("path", ""))
+    stick k = str(u.get("kind", ""))
+    stick where = p + " (" + k + ")"
+    if k == "delete" {
+      removed += 1
+    }
+    if k != "delete" and PERSIST_PATHS.any(pack(re) => text.matches(p, re)) {
+      out.push({code: "E873", cat: "persistence", w: 0.8, rule: "rehearsal", where: where, text: "in the rehearsal", says: "wrote where something runs again later (a shell's startup file, a git hook, an autostart entry)"})
+    } else if k != "delete" and SECRET_PATHS.any(pack(re) => text.matches(p, re)) {
+      out.push({code: "E871", cat: "credentials", w: 0.8, rule: "rehearsal", where: where, text: "in the rehearsal", says: "changed a credential or key file"})
+    } else if k == "setuid" {
+      out.push({code: "E878", cat: "privilege", w: 0.8, rule: "rehearsal", where: where, text: "in the rehearsal", says: "left a set-id file"})
+    } else if k == "link-out" {
+      out.push({code: "E880", cat: "footprint", w: 0.6, rule: "rehearsal", where: where, text: "in the rehearsal", says: "made a link into your home, outside its footprint"})
+    } else if k == "unreadable" {
+      out.push({code: "E880", cat: "footprint", w: 0.6, rule: "rehearsal", where: where, text: "in the rehearsal", says: "made a folder that cannot be read, so what is in it cannot be judged"})
+    } else if k == "delete" {
+      out.push({code: "E877", cat: "destructive", w: 0.5, rule: "rehearsal", where: where, text: "in the rehearsal", says: "removed something outside its footprint"})
+    } else {
+      out.push({code: "E880", cat: "footprint", w: pick(p.starts_with("~/"), 0.5, 0.3), rule: "rehearsal", where: where, text: "in the rehearsal", says: "wrote outside its footprint"})
+    }
+  }
+  if removed >= 20 {
+    out.push({code: "E877", cat: "destructive", w: 0.9, rule: "rehearsal", where: "${removed} paths", text: "in the rehearsal", says: "removed many paths outside its footprint, a wiper's shape"})
+  }
+  for h in as_list(refused) {
+    stick raw = text.matches(str(h), '^(\d{1,3}\.){3}\d{1,3}(:\d+)?$') or str(h).starts_with("[")
+    out.push({code: "E872", cat: "exfiltration", w: pick(raw, 0.8, 0.5), rule: "rehearsal", where: str(h), text: "refused by the box", says: pick(raw, "tried to reach a raw address, not a registry", "tried to reach a host its footprint does not name (add it to the task's footprint if the tool needs it)")})
+  }
+  snuff out
+}
+
+# After a rehearsed task's attempts: judge what it did, with the static read,
+# and apply what was held back, or hold it, or refuse it. A refusal fails the
+# run, which rolls back whatever the rehearsal did apply; held layers stay
+# kept, `cig box list` shows them.
+pull settle_rehearsal(name, t, result, rh) {
+  stick behaviour = behaviour_findings(result.get("outside", []), result.get("refused", []))
+  stick all = rh.static.findings + behaviour
+  stick held = as_list(result.get("held", []))
+  stick risk = risk_of(all)
+  if behaviour.is_empty() and held.is_empty() {
+    exhale "    rehearsed: nothing outside its footprint"
+    if result.ok and risk != "medium" and risk != "high" and risk != "critical" {
+      approve(t, name, {risk: risk, findings: all})
+    }
+    snuff
+  }
+  report_verdict(name, {risk: risk, findings: all})
+  if not result.ok {
+    if not held.is_empty() {
+      exhale "    what it did is kept to be read: cig box list (cig box discard <run> <hop> drops it)"
+    }
+    snuff
+  }
+  stick mode = config().security
+  stick accept = guard_flag("--accept-risk")
+  stick untrusted = guard_flag("--run-untrusted")
+  roll go = false
+  if risk == "none" or risk == "low" or mode == "report" {
+    go = true
+  } else if risk == "critical" {
+    if untrusted == name and attended() {
+      log.warn("applying what `${name}` did although its rehearsal is rated critical (--run-untrusted=${name})")
+      go = true
+    } else {
+      refuse("`${name}` is refused: its rehearsal is rated critical. What it did is kept apart (cig box list); at a terminal, cigo run ${name} --run-untrusted=${name} applies it anyway")
+    }
+  } else {
+    stick accepted = accept == name or (accept == "*" and risk == "medium")
+    if accepted and attended() {
+      go = true
+    } else if attended() {
+      refuse("`${name}` is held: its rehearsal is rated ${risk}. What it did is kept apart (cig box list); cigo run ${name} --accept-risk" + pick(risk == "high", "=${name}", "") + " applies it")
+    } else if mode == "strict" and risk == "high" {
+      refuse("`${name}` is rated high by its rehearsal and security = strict, unattended; nothing of it was applied")
+    } else {
+      log.warn("`${name}` is rated ${risk} by its rehearsal; what it did is applied (security = ${mode}, unattended)")
+      go = true
+    }
+  }
+  if go {
+    burn {
+      for layer in held {
+        proc.apply_layer(layer)
+      }
+    }
+    exhale "    rehearsed: what it did is applied" + pick(held.is_empty(), "", " (" + str(held.len()) + " held layer" + pick(held.len() == 1, "", "s") + ")")
+    if risk == "none" or risk == "low" {
+      approve(t, name, {risk: risk, findings: all})
+    }
+  }
+}
+
+# The pass over a run's tasks, before anything runs. A task that is
+# rehearsed is judged by what it does: its static findings are said here and
+# weighed with the rehearsal's (critical ones still refuse it outright).
+pull guard_run(tasks, names, defaults) {
   if not guard_on() {
     snuff
   }
@@ -5702,9 +6297,15 @@ pull guard_run(tasks, names) {
       stick tr = trusted(t, n)
       if not tr.trusted {
         stick v = static_read(t, n)
+        stick rehearsed = should_rehearse(t, v, defaults)
+        if rehearsed {
+          REHEARSE[n] = {static: v, fp: footprint_of(t) ?? {writes: [], reads: [], network: [], execs: [], registry_env: []}}
+        }
         if v.risk != "none" {
           report_verdict(n, v)
-          if v.risk == "low" or mode == "report" {
+          if rehearsed and v.risk != "critical" {
+            exhale "  it is rehearsed first: the verdict weighs what it does"
+          } else if v.risk == "low" or mode == "report" {
             exhale "  it runs (" + pick(mode == "report", "security = report", "rated low") + ")"
           } else if v.risk == "critical" {
             if untrusted == n and attended() {
@@ -5727,6 +6328,146 @@ pull guard_run(tasks, names) {
         }
       }
     }
+  }
+}
+
+
+# ----- cigo rehearse: a package checked before it touches anything (#56) ------------
+#
+# `cigo rehearse npm:name[@version]`, `pypi:name[==version]`,
+# `crates:name[@version]`, or `./script.sh`: installed (and, for npm, required
+# once) in a scratch project inside the contained box, never applied; the
+# verdict from what it did beyond the ecosystem's footprint. No project
+# needed. Exit 0 for none or low, 1 medium, 2 high, 3 critical.
+
+stick REHEARSE_DIR = ".cigo-rehearse"
+
+pull rehearse_spec(spec) {
+  stick safe = '^[A-Za-z0-9@/._~^=<>*+!-]+$'
+  roll eco = ""
+  roll rest = spec
+  for prefix in ["npm:", "pypi:", "crates:"] {
+    if spec.starts_with(prefix) {
+      eco = prefix.slice(0, prefix.len() - 1)
+      rest = spec.slice(prefix.len())
+    }
+  }
+  if eco == "" {
+    if spec.starts_with("./") or spec.starts_with("/") or spec.starts_with("../") {
+      if not fs.is_file(spec) {
+        fail("cigo rehearse ${spec}: no such file")
+      }
+      snuff {eco: "script", label: spec, tool: "sh", script: "sh " + sh_quote(spec), fp: {writes: [], network: [], registry_env: []}}
+    }
+    fail("cigo rehearse ${spec}: say which registry: npm:${spec}, pypi:${spec} or crates:${spec}")
+  }
+  if rest == "" or not text.matches(rest, safe) {
+    fail("cigo rehearse ${spec}: not a package name this rehearses (letters, digits and @/._~^=<>*+!- only)")
+  }
+  stick d = REHEARSE_DIR
+  if eco == "npm" {
+    roll name = rest
+    stick at = rest.slice(1).find("@")
+    if at >= 0 {
+      name = rest.slice(0, at + 1)
+    }
+    stick fp = FOOTPRINTS["node-npm"].setup
+    snuff {eco: "npm", label: rest, tool: "npm", fp: fp,
+      script: "mkdir -p ${d} && cd ${d} && printf '%s' '{\"name\":\"cigo-rehearse\",\"version\":\"0.0.0\",\"private\":true}' > package.json && npm install --no-audit --no-fund --loglevel=error '${rest}' && node -e 'require(process.argv[1])' '${name}'"}
+  }
+  if eco == "pypi" {
+    stick fp = FOOTPRINTS["python-pip"].setup
+    snuff {eco: "pypi", label: rest, tool: "python3", fp: fp,
+      script: "mkdir -p ${d} && cd ${d} && python3 -m venv .venv && .venv/bin/python -m pip install --disable-pip-version-check --no-input --no-cache-dir '${rest}'"}
+  }
+  roll crate = rest
+  roll version = "*"
+  stick at = rest.find("@")
+  if at >= 0 {
+    crate = rest.slice(0, at)
+    version = rest.slice(at + 1)
+  }
+  stick fp = FOOTPRINTS["rust-cargo"].build
+  snuff {eco: "crates", label: rest, tool: "cargo", fp: fp.merge({network: FOOTPRINTS["rust-cargo"].setup.network}),
+    script: "mkdir -p ${d} && cd ${d} && cargo init --lib --vcs none --name cigo_rehearse -q && printf '\n[dependencies]\n%s = \"%s\"\n' '${crate}' '${version}' >> Cargo.toml && cargo build -q"}
+}
+
+pull do_rehearse() {
+  expect_flags(["--json", "--plain", "--keep"])
+  stick spec = targets.get(0, "")
+  if spec == "" or targets.len() > 1 {
+    fail("cigo rehearse <npm:name[@version] | pypi:name[==version] | crates:name[@version] | ./script.sh>")
+  }
+  if not rehearsal_possible() {
+    fail("the rehearsal needs cig 1.12.0 or later on Linux (this is cig ${cig.version()} on ${cig.os()}); cig update installs it")
+  }
+  if path.normalize(ROOT) == path.normalize(fs.home()) {
+    fail("cigo rehearse runs in a project or an empty folder, not in your home: its scratch project is made where you are, inside the box")
+  }
+  stick job = rehearse_spec(spec)
+  if proc.which(job.tool) == null {
+    fail("${job.tool} not found: the rehearsal installs with the ecosystem's own tool")
+  }
+  roll expect = [REHEARSE_DIR + "/**", RUN_DIR + "/**"]
+  for w in job.fp.writes {
+    if w.starts_with("~/") {
+      expect.push(w)
+    }
+  }
+  roll allow = []
+  for h in as_list(job.fp.network) + registry_hosts({registry_env: as_list(job.fp.get("registry_env", []))}, {}) {
+    if not allow.contains(h) {
+      allow.push(h)
+    }
+  }
+  stick box = {network: pick(allow.is_empty(), "off", "registry"), allow_hosts: allow, contain: true, apply: "never", expect: expect}
+  if not flags.contains("--json") {
+    exhale "rehearsing ${job.label} (${job.eco}) in the box: nothing it does is applied"
+  }
+  stick started = time.now_ms()
+  roll r = null
+  burn {
+    try {
+      r = proc.shell(job.script, {box: box, timeout_ms: 900000, encoding: "lossy"})
+    } ashtray e {
+      r = e
+    }
+  }
+  stick findings = behaviour_findings(r.get("outside", []), r.get("refused", []))
+  stick risk = risk_of(findings)
+  stick ok = r.get("code", -1) == 0
+  stick layer = r.get("layer", null)
+  if flags.contains("--json") {
+    exhale json.stringify({target: spec, ecosystem: job.eco, risk: risk, installed: ok, error: r.get("message", null), findings: findings, outside: r.get("outside", []), refused: r.get("refused", []), changed: r.get("changed", {}), layer: pick(flags.contains("--keep"), layer, null), seconds: (time.now_ms() - started) / 1000}, 2)
+  } else {
+    exhale "rehearsed ${job.label} in ${duration(time.now_ms() - started)}" + pick(ok, "", "; the install itself failed (exit ${r.get("code", "?")})")
+    if findings.is_empty() {
+      exhale "  nothing outside the ${job.eco} footprint: verdict none"
+    } else {
+      report_verdict(job.label, {risk: risk, findings: findings})
+    }
+    if not ok {
+      stick tail = str(r.get("message", r.get("err", ""))).trim_end().lines().last() ?? ""
+      if tail != "" {
+        exhale "  last line: " + clip(tail, 200)
+      }
+    }
+  }
+  if layer != null {
+    if flags.contains("--keep") {
+      exhale "  kept to be read: cig box list (cig box discard ${layer.replace("/", " ")} drops it)"
+    } else {
+      burn {
+        proc.discard_layer(layer)
+      }
+    }
+  }
+  # The verdict is the answer, not a failure: the exit code says the risk
+  # (CI picks its line with it) and nothing is rolled back, as nothing of the
+  # rehearsal was applied.
+  stick code = {none: 0, low: 0, medium: 1, high: 2, critical: 3}.get(risk, 0)
+  if code != 0 {
+    exit(code)
   }
 }
 
@@ -6930,6 +7671,8 @@ pull dispatch() {
     do_config()
   } else if command == "toolchains" {
     do_toolchains()
+  } else if command == "rehearse" {
+    do_rehearse()
   } else if command == "adopt" {
     do_adopt()
   } else if command == "outputs" {

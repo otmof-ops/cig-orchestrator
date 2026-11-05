@@ -1,0 +1,7 @@
+{
+  "project": "rehearse",
+  "tasks": {
+    "within": {"shell": "echo made > made.txt", "footprint": {"writes": ["made.txt"]}, "desc": "a harmless replica: writes what its footprint names"},
+    "beyond": {"shell": "mkdir -p .git/hooks && echo 'echo marker' > .git/hooks/pre-commit && echo made > made.txt", "footprint": {"writes": ["made.txt"]}, "desc": "a harmless replica of a hook writer: the hook only echoes a marker"}
+  }
+}
