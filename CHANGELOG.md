@@ -54,6 +54,10 @@ judged by what it did. Needs cig 1.12.0.
   installs it in a scratch project inside the box, applies nothing, and
   says what it did beyond the ecosystem's footprint; `--json`, `--keep`;
   exit `0`/`1`/`2`/`3` by risk.
+- **Where the contained box cannot be had** (root, user namespaces turned
+  off as in many containers and some CI runners, a kernel before 5.12), the
+  rehearsal says so once and the guard reads instead: a task is never failed
+  for want of the box. cigo asks with one hop that does nothing.
 - **perl's setup fetches over HTTPS** (`cpanm --from https://www.cpan.org`):
   cpanm's default mirror is plain HTTP (CVE-2024-45321).
 - **cig 1.12.0 or later** is the floor (`CIG_NEEDS`).
