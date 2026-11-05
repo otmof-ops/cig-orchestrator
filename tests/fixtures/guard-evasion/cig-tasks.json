@@ -1,0 +1,65 @@
+{
+  "project": "guard-evasion",
+  "tasks": {
+    "split": {
+      "cmd": [
+        "sh",
+        "split.sh"
+      ]
+    },
+    "pieces": {
+      "cmd": [
+        "sh",
+        "pieces.sh"
+      ]
+    },
+    "unseen-upload": {
+      "cmd": [
+        "sh",
+        "unseen-upload.sh"
+      ]
+    },
+    "unseen-get": {
+      "cmd": [
+        "sh",
+        "unseen-get.sh"
+      ]
+    },
+    "dotpack": {
+      "cmd": [
+        "sh",
+        "dotpack.sh"
+      ]
+    },
+    "b64": {
+      "cmd": [
+        "sh",
+        "b64.sh"
+      ]
+    },
+    "b64-crit": {
+      "cmd": [
+        "sh",
+        "b64-crit.sh"
+      ]
+    },
+    "nested3": {
+      "cmd": [
+        "sh",
+        "nested3.sh"
+      ]
+    },
+    "nested4": {
+      "cmd": [
+        "sh",
+        "nested4.sh"
+      ]
+    },
+    "big": {
+      "cmd": [
+        "sh",
+        "big.sh"
+      ]
+    }
+  }
+}

@@ -29,7 +29,7 @@
 
 pack { "." }
 
-stick VERSION = "1.4.0"
+stick VERSION = "1.5.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
 stick CIG_NEEDS = ">=1.12.0"
 stick REPO = "otmof-ops/cig-orchestrator"
@@ -5922,7 +5922,7 @@ pull install_hooks(t) {
       if type_of(scripts) == "map" {
         for k in ["preinstall", "install", "postinstall"] {
           if scripts.has(k) {
-            hooks.push({where: str(pj.get("name", rel)) + " " + k, text: str(scripts[k])})
+            hooks.push({where: str(pj.get("name", rel)) + " " + k, text: str(scripts[k]), hook: "npm"})
           }
         }
       }
@@ -5940,6 +5940,22 @@ pull install_hooks(t) {
   }
   snuff hooks
 }
+
+# What the read decodes and how it reads shell (see "the read, harder to
+# fool" below).
+stick B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+stick HEXDIGITS = "0123456789abcdef"
+stick ASCII = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+stick DECODE_DEPTH = 3
+stick DECODE_CAP = 16384
+stick DECODE_BUDGET = 65536
+stick SHELL_EXTS = [".sh", ".bash", ".zsh"]
+stick DECODER_RE = '(?i)base64\s+(-d|--decode|-D)\b|\bb64decode\b|\bfrombase64string\b|\batob\s*\(|buffer\.from\s*\([^)]*[\x27"](base64|hex)[\x27"]|\bxxd\s+[^\n]*-r|\bbytes\.fromhex\b|\bcodecs\.decode\b|\bunhexlify\b|printf\s+[^\n]*\\x[0-9a-fA-F]{2}'
+stick ASSIGN_RE = '(?:^|[\s;&|(])(?:export\s+|local\s+|readonly\s+|declare\s+)?([A-Za-z_][A-Za-z0-9_]*)=((?:"[^"]*"|\x27[^\x27]*\x27|[^\s;&|)"\x27])*)'
+stick NET_RE = '(?i)(^|[\s;&|(`$])(curl|wget|nc|ncat|socat|invoke-webrequest|iwr|invoke-restmethod|irm)(\s|$)'
+stick URL_HOST_RE = '(?i)\b(?:https?|ftp)://([^\s/"\x27?#]+)'
+stick UPLOAD_RE = '(?i)\bcurl\b[^\n]*(--data-binary|--data-raw|--data|\s-d|--upload-file|\s-T|\s-F|--form)\s*[\x27"]?[^\s\x27"]*@|\bwget\b[^\n]*--post-file'
+stick DOTPACK_RE = '(?i)\b(tar|zip|7z|cp|rsync|scp|gzip)\b[^\n]*(~|\$HOME)/\.[A-Za-z0-9_-]'
 
 # The static read: the task's own text, the scripts it names, and for a
 # setup stage its install hooks, against the rules. Each hit is a finding
@@ -5963,25 +5979,255 @@ pull static_read(t, name) {
   if str(t.get("stage", "")) == "setup" {
     hooks = install_hooks(t)
     for h in hooks {
-      sources.push({where: h.where, text: h.text})
+      sources.push({where: h.where, text: h.text, hook: h.get("hook", "")})
     }
   }
   roll findings = []
+  stick budget = {left: DECODE_BUDGET}
   for s in sources {
-    roll n = 0
-    for line in s.text.lines() {
-      n += 1
-      stick bare = line.trim()
-      stick comment = s.where != "shell" and s.where != "cmd" and (bare.starts_with("#") or bare.starts_with("//"))
+    stick inline = s.where == "shell" or s.where == "cmd"
+    # Shell text: the task's own, a shell script it names, an npm install
+    # hook (npm runs those with sh).
+    stick shellish = inline or SHELL_EXTS.any(pack(e) => s.where.ends_with(e)) or s.get("hook", "") == "npm"
+    findings = findings + scan_text(s.where, s.text, shellish, not inline, 0, budget)
+  }
+  snuff {risk: risk_of(findings), findings: findings, hooks: hooks}
+}
+
+# ----- the read, harder to fool (#69) -----------------------------------------------
+#
+# Two cheap tricks got past the rules: a string split into pieces
+# (`"$HOME/.s""sh"`, a host built from parts) and base64. Shell text is read
+# twice: as written, and with the simple assignments made earlier in the
+# same text folded in and the quotes that join pieces taken out. What a
+# decoder is fed (base64, hex, `\x` escapes) is decoded and read the same
+# way, three levels deep, within a size budget. Pure text work: nothing runs.
+
+# One byte as text: printable ASCII as itself, a tab or a newline, anything
+# else `?` (the rules look for words, not bytes).
+pull byte_char(b) {
+  if b == 10 {
+    snuff "\n"
+  }
+  if b == 9 {
+    snuff "\t"
+  }
+  if b >= 32 and b < 127 {
+    snuff ASCII.slice(b - 32, b - 31)
+  }
+  snuff "?"
+}
+
+# Base64 (or its URL-safe alphabet) to text; null when it is not base64.
+pull b64_decode(s) {
+  roll out = ""
+  roll buf = 0
+  roll bits = 0
+  for c in s.chars() {
+    if c == "=" {
+      break
+    }
+    roll v = B64.find(c)
+    if c == "-" {
+      v = 62
+    }
+    if c == "_" {
+      v = 63
+    }
+    if v < 0 {
+      if not [" ", "\n", "\r", "\t"].contains(c) {
+        snuff null
+      }
+    } else {
+      buf = buf * 64 + v
+      bits += 6
+      if bits >= 8 {
+        bits -= 8
+        stick p = int(math.pow(2, bits))
+        stick b = int(math.floor(buf / p))
+        out = out + byte_char(b)
+        buf = buf - b * p
+      }
+    }
+  }
+  snuff out
+}
+
+# Hex digits to text; null when they are not.
+pull hex_decode(s) {
+  stick h = s.lower()
+  if h.len() % 2 != 0 {
+    snuff null
+  }
+  roll out = ""
+  roll i = 0
+  while i < h.len() {
+    stick a = HEXDIGITS.find(h.slice(i, i + 1))
+    stick b = HEXDIGITS.find(h.slice(i + 1, i + 2))
+    if a < 0 or b < 0 {
+      snuff null
+    }
+    out = out + byte_char(a * 16 + b)
+    i += 2
+  }
+  snuff out
+}
+
+# Text a person could read: four characters or more, at most one in five
+# not printable.
+pull readable(d) {
+  if d == null or d.len() < 4 {
+    snuff false
+  }
+  roll bad = 0
+  for c in d.chars() {
+    if c == "?" {
+      bad += 1
+    }
+  }
+  snuff bad * 5 < d.len()
+}
+
+# What a line feeds a decoder, decoded: `\x` escapes, then every long run
+# of base64 or hex on it, each within the cap and the run's budget.
+pull decoded_payloads(line, budget) {
+  roll out = []
+  if not text.matches(line, DECODER_RE) {
+    snuff out
+  }
+  for e in text.find_all(line, '(\\x[0-9a-fA-F]{2}){4,}') {
+    stick d = hex_decode(e.replace("\\x", ""))
+    if readable(d) and not out.contains(d) {
+      out.push(d)
+    }
+  }
+  for tok in text.find_all(line, '[A-Za-z0-9+/_-]{16,}={0,2}') {
+    if tok.len() <= DECODE_CAP and budget.left >= tok.len() and out.len() < 4 {
+      budget.left = budget.left - tok.len()
+      roll d = null
+      if tok.len() % 2 == 0 and text.matches(tok, '^[0-9a-fA-F]+$') {
+        d = hex_decode(tok)
+      }
+      if not readable(d) {
+        d = b64_decode(tok)
+      }
+      if readable(d) and not out.contains(d) {
+        out.push(d)
+      }
+    }
+  }
+  snuff out
+}
+
+# The quotes that join pieces taken out, and `${HOME}` written `$HOME`.
+pull dequote(s) {
+  snuff text.replace(text.replace(s, '["\x27]', ""), '\$\{HOME\}', "$$HOME")
+}
+
+# The known variables folded into a piece of shell: `$name` and `${name}`.
+pull fold(s, vars) {
+  roll out = s
+  for k in vars {
+    out = text.replace(out, '\$\{' + k + '\}|\$' + k + '\b', vars[k].replace("$", "$$"))
+  }
+  snuff out
+}
+
+# A shell line read the way the shell would join it: folded with what was
+# known before it (`text`, what is shown), and with this line's own simple
+# assignments taken in order too (`full`, so `d=…; tar "$d"` on one line is
+# seen), its joining quotes taken out.
+pull shell_norm(line, vars) {
+  stick shown = dequote(fold(line, vars))
+  roll v = vars
+  for m in text.find_all(line, ASSIGN_RE) {
+    stick c = text.captures(m, ASSIGN_RE)
+    if c != null {
+      v[c[1]] = dequote(fold(c[2], v))
+    }
+  }
+  snuff {text: shown, full: dequote(fold(line, v)), vars: v}
+}
+
+# Does a network command on this (normalised) line go to a host the read
+# cannot see? A URL whose host is still a variable, or a command whose
+# target is one.
+pull unseen_host(norm) {
+  stick c = text.captures(norm, URL_HOST_RE)
+  if c != null {
+    snuff c[1].contains("$")
+  }
+  stick at = text.find(norm, NET_RE)
+  if at == null {
+    snuff false
+  }
+  snuff norm.slice(norm.find(at)).contains("$")
+}
+
+# Read one text against the rules: as written, and for shell normalised;
+# what it feeds a decoder, decoded and read the same way.
+pull scan_text(where, body, shellish, comments, depth, budget) {
+  roll found = []
+  roll seen = []
+  roll vars = {}
+  roll packed = false
+  roll pack_said = false
+  roll n = 0
+  pull add(at, id, code, cat, w, said, says) {
+    stick key = id + "@" + at
+    if not seen.contains(key) {
+      seen.push(key)
+      found.push({code: code, cat: cat, w: w, rule: id, where: at, text: clip(said.trim(), 120), says: says})
+    }
+  }
+  for line in body.lines() {
+    n += 1
+    stick at = pick(where == "shell" or where == "cmd", where, where + ":" + str(n))
+    stick bare = line.trim()
+    stick comment = comments and (bare.starts_with("#") or bare.starts_with("//"))
+    if not comment {
       for rule in RULES {
-        if not comment and text.matches(line, rule.re) {
-          stick where = pick(s.where == "shell" or s.where == "cmd", s.where, s.where + ":" + str(n))
-          findings.push({code: rule.code, cat: rule.cat, w: rule.w, rule: rule.id, where: where, text: clip(line.trim(), 120), says: rule.says})
+        if text.matches(line, rule.re) {
+          add(at, rule.id, rule.code, rule.cat, rule.w, line, rule.says)
+        }
+      }
+      if shellish {
+        stick sn = shell_norm(line, vars)
+        vars = sn.vars
+        stick norm = sn.full
+        if norm != line {
+          for rule in RULES {
+            if text.matches(sn.text, rule.re) or text.matches(norm, rule.re) {
+              add(at, rule.id, rule.code, rule.cat, rule.w, pick(text.matches(sn.text, rule.re), sn.text, norm), rule.says + " (read with its split pieces joined)")
+            }
+          }
+        }
+        stick net = text.matches(norm, NET_RE)
+        if net and packed and not pack_said {
+          pack_said = true
+          add(at, "exfil-dotpack", "E872", "exfiltration", 0.8, norm, "packs up a hidden folder from your home, then talks to the network")
+        }
+        if text.matches(norm, DOTPACK_RE) {
+          packed = true
+        }
+        if net and unseen_host(norm) {
+          if text.matches(norm, UPLOAD_RE) {
+            add(at, "exfil-upload-unseen", "E872", "exfiltration", 0.5, norm, "uploads a local file to a host the read cannot see")
+          } else {
+            add(at, "net-unseen", "E872", "exfiltration", 0.4, norm, "talks to a host the read cannot see")
+          }
+        }
+      }
+      if depth < DECODE_DEPTH {
+        for payload in decoded_payloads(line, budget) {
+          for f in scan_text("decoded from " + at, payload, true, true, depth + 1, budget) {
+            add(f.where, f.rule, f.code, f.cat, f.w, f.text, f.says)
+          }
         }
       }
     }
   }
-  snuff {risk: risk_of(findings), findings: findings, hooks: hooks}
+  snuff found
 }
 
 # Scored per category: self-defense, or credentials with exfiltration, is

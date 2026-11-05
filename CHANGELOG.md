@@ -5,6 +5,29 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.5.0 — 2026-11-05
+
+The static read, harder to fool (#69). It is the cheap first layer that
+runs on every task and decides what the rehearsal looks at, so `none`
+should mean none.
+
+- **Split strings are joined.** Shell text (the task's own, the shell
+  scripts it names, npm install hooks) is read as written and as the shell
+  would join it: the simple assignments made earlier in the same text folded
+  in, the quotes that join pieces taken out. `"$HOME/.s""sh"`, `'.a''ws'`
+  and `${HOME}/.git-cred""entials` read as the paths they are, and a host
+  built from parts reads as its address.
+- **Hosts the read cannot see count.** A network command whose host is
+  still a variable is a finding (`E872`, low), an upload of a local file to
+  one is medium, and a hidden folder from the home packed up before a network
+  command is high.
+- **Encoded payloads are decoded and read.** What a decoder is fed (base64,
+  hex, `\x` escapes; `base64 -d`, `xxd -r`, `printf`, Python, Node,
+  PowerShell) is decoded and read the same way, three levels deep, within a
+  size cap and a budget per task; its findings name both places. Text work
+  only: nothing runs.
+- The examples and cigo's own tasks still read `none`.
+
 ## 1.4.0 — 2026-11-05
 
 The rehearsal (#55 steps 6 and 7, #56 step 1): a stage that runs code you
