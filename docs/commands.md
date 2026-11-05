@@ -251,7 +251,10 @@ cigo rehearse ./install.sh             a script you were told to run
 ```
 
 It exits by risk: `0` none or low, `1` medium, `2` high, `3` critical. Off
-Linux, or with an older cig, it says so and does nothing.
+Linux, with an older cig, or where cig cannot make a contained box (root,
+user namespaces turned off, a kernel before 5.12), it says so and does
+nothing; `cigo run` then reads its stages instead of rehearsing them, and
+says so once.
 
 ### Running on the pinned version
 

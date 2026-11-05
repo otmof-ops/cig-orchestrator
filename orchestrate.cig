@@ -79,6 +79,9 @@ stick ROOT = fs.cwd()
 # that this cig cannot was said.
 roll REHEARSE = {}
 roll REHEARSAL_NOTED = false
+# Whether cig can make a contained box here (null until asked) and why not.
+roll CONTAIN_OK = null
+roll CONTAIN_WHY = ""
 # The `versions` and `install` settings (the switch to pinned toolchain
 # versions, below) and where the answer and the version probes are kept.
 stick VERSION_SETTINGS = ["ask", "always", "never", "off"]
@@ -6032,6 +6035,9 @@ pull headline(f) {
 # The verdict as the person reads it: one line of character at a terminal,
 # then the plain evidence under it, then what to do.
 pull report_verdict(name, v) {
+  if v.findings.is_empty() {
+    snuff
+  }
   stick top = top_finding(v.findings)
   exhale "cigo: `${name}` is rated ${v.risk} by the guard; " + headline(top)
   for f in v.findings {
@@ -6158,6 +6164,31 @@ pull runs_cig(t) {
   snuff not argv.is_empty() and path.stem(str(argv.first())).lower() == "cig" and str(argv.get(1, "")) == "run"
 }
 
+# Can cig make a contained box here? Asked once a run with a hop that does
+# nothing: root, user namespaces turned off (containers, some CI runners)
+# or a kernel before 5.12 refuse it, and the rehearsal then reads instead
+# of failing the task.
+pull contain_possible() {
+  if CONTAIN_OK == null {
+    CONTAIN_OK = false
+    burn {
+      try {
+        stick r = proc.run("true", [], {box: {network: "off", contain: true, apply: "never"}, timeout_ms: 30000})
+        CONTAIN_OK = r.code == 0
+        if r.get("layer", null) != null {
+          proc.discard_layer(r.layer)
+        }
+      } ashtray e {
+        CONTAIN_WHY = str(e.message).replace("proc.run: ", "")
+        if e.get("layer", null) != null {
+          proc.discard_layer(e.layer)
+        }
+      }
+    }
+  }
+  snuff CONTAIN_OK
+}
+
 # Is this task rehearsed? Not when the guard is off, the setting says never,
 # the task is approved or cannot be boxed; under auto, when its stage runs
 # code it did not write (it has a footprint) or the static read flagged it.
@@ -6174,6 +6205,13 @@ pull should_rehearse(t, v, defaults) {
     if cig.os() == "linux" and not REHEARSAL_NOTED {
       REHEARSAL_NOTED = true
       log.warn("the rehearsal needs cig 1.12.0 or later (this is ${cig.version()}); tasks are read, not rehearsed. cig update installs it")
+    }
+    snuff false
+  }
+  if not contain_possible() {
+    if not REHEARSAL_NOTED {
+      REHEARSAL_NOTED = true
+      log.warn("the rehearsal is not possible here (cig cannot make a contained box: " + clip(CONTAIN_WHY, 160) + "); tasks are read, not rehearsed")
     }
     snuff false
   }
@@ -6235,12 +6273,17 @@ pull settle_rehearsal(name, t, result, rh) {
     }
     snuff
   }
-  report_verdict(name, {risk: risk, findings: all})
   if not result.ok {
+    if not all.is_empty() {
+      report_verdict(name, {risk: risk, findings: all})
+    }
     if not held.is_empty() {
       exhale "    what it did is kept to be read: cig box list (cig box discard <run> <hop> drops it)"
     }
     snuff
+  }
+  if not all.is_empty() {
+    report_verdict(name, {risk: risk, findings: all})
   }
   stick mode = config().security
   stick accept = guard_flag("--accept-risk")
@@ -6400,6 +6443,9 @@ pull do_rehearse() {
   }
   if not rehearsal_possible() {
     fail("the rehearsal needs cig 1.12.0 or later on Linux (this is cig ${cig.version()} on ${cig.os()}); cig update installs it")
+  }
+  if not contain_possible() {
+    fail("the rehearsal is not possible here: cig cannot make a contained box (" + clip(CONTAIN_WHY, 200) + ")")
   }
   if path.normalize(ROOT) == path.normalize(fs.home()) {
     fail("cigo rehearse runs in a project or an empty folder, not in your home: its scratch project is made where you are, inside the box")
