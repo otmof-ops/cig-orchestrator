@@ -337,7 +337,18 @@ cigo rehearse ./install.sh             a script you were told to run
 cigo rehearse --changed [--base=<rev>] every package the lockfiles add or change since the base
               [--list] [--max=N]       name them and rehearse nothing; at most N (50)
               [--sarif | --markdown]   for code scanning or a pull request comment
+              [--fresh]                rehearse even what was rehearsed before
 ```
+
+**Never the same bytes twice.** A verdict is kept under what was rehearsed:
+an npm or crates.io package at an exact version (a registry never serves
+other bytes under a published version), with the lockfile's hash when
+`--changed` knows it; a PyPI package only with that hash, since a release
+can gain files later; a script by its sha256. Asked again about the same
+bytes, cigo answers from the kept verdict without the box, and says when it
+was rehearsed. Kept verdicts are signed with the tin's key, so nothing a task
+runs can plant a clean one, and a new cigo version judges again. `--fresh`
+rehearses anyway.
 
 **`--changed`** is the pull request's question: which packages does this
 change bring in? It compares the lockfiles with the base (`--base=<rev>`, or
@@ -471,6 +482,7 @@ holds the before-bytes of what a task's `touches` named) under
 | `config` | your settings (`cigo config`) |
 | `osv/` | OSV's answers and the advisories read (online), and one database per ecosystem (`cigo audit --update-db`) |
 | `blacklist/` | the last signed copy of each blacklist, which still counts when the list itself is changed by hand |
+| `rehearsals/` | the kept verdicts, each signed, by what was rehearsed (`cigo rehearse --fresh` ignores them) |
 | `crashes/<id>.json` | crash reports, yours until you send them (`cigo crash`) |
 | `update/<tag>/` | the last release `cigo update` downloaded and verified |
 

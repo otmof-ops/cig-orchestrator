@@ -29,7 +29,7 @@
 
 pack { "." }
 
-stick VERSION = "1.8.0"
+stick VERSION = "1.9.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
 stick CIG_NEEDS = ">=1.12.0"
 stick REPO = "otmof-ops/cig-orchestrator"
@@ -3897,7 +3897,7 @@ pull do_help() {
   exhale "                              build the offline OSV database (npm, PyPI, crates.io, Go, RubyGems, Packagist, Maven, NuGet)"
   exhale "  cigo rehearse <npm:name[@version]|pypi:name[==version]|crates:name[@version]|./script.sh> [--json] [--keep]"
   exhale "                              install it in cig's contained box (Linux) and say what it did beyond its footprint"
-  exhale "  cigo rehearse --changed [--base=<rev>] [--list] [--max=N] [--json|--sarif|--markdown]"
+  exhale "  cigo rehearse --changed [--base=<rev>] [--list] [--max=N] [--fresh] [--json|--sarif|--markdown]"
   exhale "                              every package the lockfiles add or change since the default branch, rehearsed"
   exhale "  cigo blacklist [list | add <thing> [--reason=...] [--expires=90d] | remove <entry> | why <thing> | reload]"
   exhale "                              your own blacklist: packages, files, domains, ranges and URLs the guard refuses"
@@ -6336,7 +6336,7 @@ pull lock_packages_in(base, body, where) {
         for k in pk {
           stick e = pk[k]
           if k != "" and type_of(e) == "map" and e.has("version") and not e.get("link", false) {
-            out.push(pkg("npm", k.split("node_modules/").last(), e.version, where))
+            out.push(pkg("npm", k.split("node_modules/").last(), e.version, where).merge({integrity: str(e.get("integrity", ""))}))
           }
         }
       } else {
@@ -6403,7 +6403,7 @@ pull lock_packages_in(base, body, where) {
           stick src = str(cur.get("source", ""))
           stick from_registry = pick(base == "Cargo.lock" or base == "uv.lock", src.contains("registry"), not src.contains("path") and not src.contains("editable") and not src.contains("virtual"))
           if from_registry {
-            out.push(pkg(eco, cur.name, cur.version, where))
+            out.push(pkg(eco, cur.name, cur.version, where).merge({integrity: str(cur.get("checksum", ""))}))
           }
         }
         cur = {}
@@ -6413,7 +6413,7 @@ pull lock_packages_in(base, body, where) {
         if bare == "[[package]]" {
           flush()
         } else {
-          stick c = text.captures(line, '^(name|version|source)\s*=\s*(.+)$')
+          stick c = text.captures(line, '^(name|version|source|checksum)\s*=\s*(.+)$')
           if c != null {
             cur[c[1]] = c[2].trim().replace("\"", "")
           }
@@ -8259,11 +8259,105 @@ pull rehearse_job(spec) {
     script: "mkdir -p ${d} && cd ${d} && cargo init --lib --vcs none --name cigo_rehearse -q && printf '\n[dependencies]\n%s = \"%s\"\n' '${crate}' '${version}' >> Cargo.toml && cargo build -q"}
 }
 
+# ----- the verdict cache: never the same bytes twice (#56 step 4) ----------------------
+#
+# A rehearsal's verdict is kept under what was rehearsed: an npm or crates.io
+# package at an exact version (a registry never serves other bytes under a
+# published version) with its lockfile hash when one is known, a PyPI
+# package only with that hash (a release can gain files later), a script by
+# its sha256; and this cigo's version, so an update judges again. Kept
+# verdicts are signed with the tin's key like approvals, so nothing a task
+# runs can plant a clean one; `--fresh` rehearses anyway.
+
+stick VERDICT_DIR = path.join(CIGO_HOME, "rehearsals")
+stick VERDICT_LABEL = "cigo-rehearsal"
+stick EXACT_VERSION = '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?$'
+
+# The key a job's verdict is kept under, or null when what it names is not
+# fixed bytes (no version, a range, a PyPI release without its hash).
+pull verdict_key(job, integrity) {
+  roll what = null
+  if job.eco == "script" {
+    what = "script:" + hash.sha256_file(job.spec)
+  } else {
+    stick want = blacklist_parse(job.spec)
+    if want == null or want.kind != "package" or not text.matches(want.version, EXACT_VERSION) {
+      snuff null
+    }
+    stick sum = str(integrity ?? "")
+    if want.eco == "PyPI" and sum == "" {
+      snuff null
+    }
+    what = want.eco + "|" + want.name + "@" + want.version + "|" + sum
+  }
+  snuff hash.sha256(["cigo-verdict-1", what, VERSION].join("\n"))
+}
+
+pull verdict_files(key) {
+  snuff {json: path.join(VERDICT_DIR, key + ".json"), mac: path.join(VERDICT_DIR, key + ".mac")}
+}
+
+# A verdict kept from a rehearsal of the same bytes, or null. One that does
+# not verify under this machine's key is ignored, and said.
+pull kept_verdict(key) {
+  if key == null or flags.contains("--fresh") {
+    snuff null
+  }
+  stick f = verdict_files(key)
+  if not fs.is_file(f.json) or not fs.is_file(f.mac) {
+    snuff null
+  }
+  stick r = tin_mac_as(f.json, fs.read_text(f.mac).trim(), VERDICT_LABEL)
+  if r.code != 0 {
+    if r.code == 1 {
+      log.warn("a kept verdict is not signed by your key (${tilde(f.json)}): ignored, and rehearsed again")
+    }
+    snuff null
+  }
+  try {
+    snuff json.parse(fs.read_text(f.json))
+  } ashtray e {
+    snuff null
+  }
+}
+
+# Keep a verdict, signed. Only for an install that went through: a failure
+# says nothing about the package.
+pull keep_verdict(key, r) {
+  if key == null or not r.installed {
+    snuff false
+  }
+  stick f = verdict_files(key)
+  stick rec = {key: key, target: r.target, label: r.label, ecosystem: r.ecosystem, risk: r.risk, installed: r.installed, findings: r.findings, outside: r.outside, refused: r.refused, at: time.now_iso(), by: "cig-orchestrator " + VERSION}
+  if not write_outside(f.json, json.stringify(rec, 2) + "\n") {
+    snuff false
+  }
+  stick m = tin_mac_as(f.json, null, VERDICT_LABEL)
+  if m.code != 0 {
+    remove_outside(f.json)
+    snuff false
+  }
+  snuff write_outside(f.mac, m.out.trim() + "\n")
+}
+
+# A rehearsal, or the verdict kept from one of the same bytes.
+pull rehearse_or_kept(job, integrity, keep) {
+  stick key = verdict_key(job, integrity)
+  stick kept = kept_verdict(key)
+  if kept != null {
+    snuff kept.merge({kept: true, layer: null, last_line: "", seconds: 0, exit: 0, error: null, changed: {}})
+  }
+  rehearse_ready()
+  stick r = rehearse_one(job, keep)
+  keep_verdict(key, r)
+  snuff r.merge({kept: false})
+}
+
 # The exit code a verdict gives: what CI picks its line with.
 stick RISK_EXIT = {none: 0, low: 0, medium: 1, high: 2, critical: 3}
 
 pull do_rehearse() {
-  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max"])
+  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh"])
   if flags.contains("--changed") {
     do_rehearse_changed()
     snuff
@@ -8288,16 +8382,17 @@ pull do_rehearse() {
     }
     exit(3)
   }
-  rehearse_ready()
   stick job = rehearse_spec(spec)
-  if proc.which(job.tool) == null {
+  stick kept_already = kept_verdict(verdict_key(job, null)) != null
+  if not kept_already and proc.which(job.tool) == null {
+    rehearse_ready()
     fail("${job.tool} not found: the rehearsal installs with the ecosystem's own tool")
   }
   stick human = not flags.contains("--json") and not flags.contains("--sarif") and not flags.contains("--markdown")
-  if human {
+  if human and not kept_already {
     exhale "rehearsing ${job.label} (${job.eco}) in the box: nothing it does is applied"
   }
-  stick r = rehearse_one(job, flags.contains("--keep"))
+  stick r = rehearse_or_kept(job, null, flags.contains("--keep"))
   stick items = r.findings.map(pack(f) => {finding: f, subject: spec, place: null, risk: r.risk})
   if flags.contains("--sarif") {
     exhale json.stringify(sarif_log(items), 2)
@@ -8372,7 +8467,11 @@ pull rehearse_one(job, keep) {
 }
 
 pull say_rehearsal(r) {
-  exhale "rehearsed ${r.label} in ${duration(int(r.seconds * 1000))}" + pick(r.installed, "", "; the install itself failed (exit ${r.exit ?? "?"})")
+  if r.get("kept", false) {
+    exhale "rehearsed ${r.label} before, on ${str(r.get("at", "")).slice(0, 10)}, as these same bytes: the verdict is kept (--fresh rehearses again)"
+  } else {
+    exhale "rehearsed ${r.label} in ${duration(int(r.seconds * 1000))}" + pick(r.installed, "", "; the install itself failed (exit ${r.exit ?? "?"})")
+  }
   if r.findings.is_empty() {
     exhale "  nothing outside the ${r.ecosystem} footprint: verdict none"
   } else {
@@ -8538,7 +8637,7 @@ pull do_rehearse_changed() {
     }
     roll r = null
     if listed.is_empty() {
-      r = rehearse_one(job, false)
+      r = rehearse_or_kept(job, x.pkg.get("integrity", ""), false)
     } else {
       r = {target: x.spec, label: job.label, ecosystem: job.eco, risk: "critical", installed: false, rehearsed: false, findings: listed, seconds: 0}
     }
@@ -8555,7 +8654,7 @@ pull do_rehearse_changed() {
       if r.get("rehearsed", true) == false {
         exhale "  ${x.spec}: critical, on your blacklist; not rehearsed"
       } else {
-        exhale "  ${x.spec}: ${r.risk} (${duration(int(r.seconds * 1000))})" + pick(r.installed, "", "; the install itself failed")
+        exhale "  ${x.spec}: ${r.risk}" + pick(r.get("kept", false), " (kept from " + str(r.get("at", "")).slice(0, 10) + ")", " (${duration(int(r.seconds * 1000))})") + pick(r.installed, "", "; the install itself failed")
       }
       if not r.findings.is_empty() {
         report_verdict(r.label, {risk: r.risk, findings: r.findings})

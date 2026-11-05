@@ -5,6 +5,22 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.9.0 — 2026-11-05
+
+Never the same bytes twice (#56 step 4).
+
+- **A rehearsal's verdict is kept** under what was rehearsed: an npm or
+  crates.io package at an exact version, with the lockfile's hash when
+  `rehearse --changed` knows it (npm's `integrity`, Cargo's `checksum`); a
+  PyPI package only with that hash, since a release can gain files after it
+  is published; a script by its sha256. Asked again about the same bytes,
+  `cigo rehearse` and `--changed` answer from the kept verdict, without the
+  box, and say when it was rehearsed.
+- **Signed with the tin's key**, like approvals: a kept verdict edited to
+  read clean does not verify, is said, and the package is rehearsed again.
+  A new cigo version judges again; `--fresh` rehearses anyway. A failed
+  install is never kept.
+
 ## 1.8.0 — 2026-11-05
 
 Your own blacklist (#62 step 1).
