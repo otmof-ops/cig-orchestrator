@@ -5,6 +5,40 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.4.0 — 2026-11-05
+
+The rehearsal (#55 steps 6 and 7, #56 step 1): a stage that runs code you
+did not write is run once, for real, in cig 1.12.0's contained box, and
+judged by what it did. Needs cig 1.12.0.
+
+- **Footprints as data.** Every toolchain stage that runs third-party code
+  (every setup, and the builds that run their dependencies' build scripts,
+  plugins or macros) has an expected footprint in the knowledge base: what
+  it writes, reads, fetches and runs, from the tools' own documentation, 50
+  toolchains and 170 stages, each marked with how sure it is. `cigo
+  toolchains <name>` prints it; a task adds to it with `footprint`.
+- **The rehearsal in `cigo run`.** `rehearse` (a floored setting: `auto`,
+  `always` in the paranoid preset, `never` in the chill one): under `auto` a
+  stage with a footprint, or one the static read flagged, runs in the box
+  with `contain`, the registry network its footprint names (and the host a
+  project's registry variable points at), and its footprint as `expect`.
+  What it wrote within the footprint is applied as it is (no second run);
+  what it did beyond it becomes findings (`E873` persistence, `E871` a
+  credential file, `E878` a set-id file, `E880` outside the footprint, `E877`
+  removals, `E872` refused hosts) weighed with the static read's, with the
+  guard's friction; a clean rehearsal approves the task.
+- **`cigo rehearse <package>`** (`npm:`, `pypi:`, `crates:`, or a script):
+  installs it in a scratch project inside the box, applies nothing, and
+  says what it did beyond the ecosystem's footprint; `--json`, `--keep`;
+  exit `0`/`1`/`2`/`3` by risk.
+- **Where the contained box cannot be had** (root, user namespaces turned
+  off as in many containers and some CI runners, a kernel before 5.12), the
+  rehearsal says so once and the guard reads instead: a task is never failed
+  for want of the box. cigo asks with one hop that does nothing.
+- **perl's setup fetches over HTTPS** (`cpanm --from https://www.cpan.org`):
+  cpanm's default mirror is plain HTTP (CVE-2024-45321).
+- **cig 1.12.0 or later** is the floor (`CIG_NEEDS`).
+
 ## 1.3.0 — 2026-11-05
 
 The guard, first half (#55 steps 1, 2 and 4): a task is read before it

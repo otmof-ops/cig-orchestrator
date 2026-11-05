@@ -78,7 +78,12 @@ pull hop_env(dir, program, words, more) {
       cwd: dir,
       # CI is unset for the tool: a runner sets it, and the versions question
       # is never asked under CI; the one test that wants that sets it back.
-      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CIG_SEAL_KEY: "file", CI: "", DEMO_REMOTE: dir + "-remote"}.merge(more),
+      # The rehearsal (cig 1.12.0's contained box) is off unless a test asks
+      # for it: the fixtures' stub tools log outside the project, which the
+      # box keeps read-only, and their writes are no toolchain's footprint.
+      # Any report the tool's cig would file goes to a file tracker in the
+      # test folder, never a real one.
+      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CIG_SEAL_KEY: "file", CI: "", DEMO_REMOTE: dir + "-remote", CIGO_REHEARSE: "never", CIG_INTERNAL_TRACKER_DIR: path.join(work, "tracker")}.merge(more),
       timeout_ms: 120000,
     })
   }
@@ -2403,7 +2408,8 @@ test("a preset sets the keys it names, and config diff shows what differs from i
   stick dir = fresh("tests/fixtures/chain")
   exits(tool_layers(dir, ["config", "preset", "paranoid"], {}), 0)
   says(tool_layers(dir, ["config", "versions"], {}).out, "always")
-  says(tool_layers(dir, ["config", "diff"], {}).out, "every setting is as the paranoid preset has it")
+  # The suite turns the rehearsal off in the environment; not here.
+  says(tool_layers(dir, ["config", "diff"], {CIGO_REHEARSE: ""}).out, "every setting is as the paranoid preset has it")
   exits(tool_layers(dir, ["config", "install", "never"], {}), 0)
   stick d = tool_layers(dir, ["config", "diff"], {})
   says(d.out, "install")
@@ -2440,11 +2446,30 @@ test("the environment loosens a setting only at a terminal, never under CI", pac
 # ----- 1.3.0: the guard, first half (#55): the trust store, the static read, the verdict ------
 
 pull guard_tool(dir, words, more) {
+  # The static read's tests run without the rehearsal, at a terminal or not:
+  # `rehearse = never` in this test's own cigo home (the environment's
+  # loosening is ignored under CI). A test that wants the rehearsal passes
+  # CIGO_REHEARSE, which tightens it back.
+  stick marker = path.join(cigo_home(dir), ".rehearse-off")
+  if not fs.exists(marker) {
+    hop_env(dir, "cig", ["run", tool, "--", "config", "rehearse", "never"], {CIGO_HOME: cigo_home(dir)})
+    burn {
+      fs.write_text(marker, "")
+    }
+  }
   snuff hop_env(dir, "cig", ["run", tool, "--"] + words, {CIGO_HOME: cigo_home(dir)}.merge(more))
 }
 
 # cig 1.11.0 signs the trust store (`cig tin mac`); an older cig cannot, and
 # the guard says so and checks every run.
+pull proc_uid() {
+  roll u = ""
+  burn {
+    u = proc.run("id", ["-u"]).out.trim()
+  }
+  snuff u
+}
+
 pull has_tin_mac() {
   snuff cig(root, ["tin", "mac", "--help"]).code == 0
 }
@@ -2621,8 +2646,128 @@ test("the guard: trust and footprint are checked in the manifest, and --no-guard
   assert(there(dir2, "tin.txt"), "--no-guard did not run the task")
 })
 
+
+# ----- the rehearsal (#55, #56) -------------------------------------------------
+
+# The rehearsal needs cig 1.12.0's contained box: Linux, user namespaces,
+# mount_setattr. Where the box cannot be had the run says so (E777) and the
+# test steps aside.
+pull rehearsal_here() {
+  # `cig` here is the suite's helper, not the module: the version is asked.
+  stick v = text.captures(cig(root, ["--version"]).out, '(\d+)\.(\d+)')
+  snuff fs.exists("/proc/self/ns/user") and v != null and (int(v[1]) > 1 or (int(v[1]) == 1 and int(v[2]) >= 12))
+}
+
+pull no_box_here(r) {
+  if (r.out + r.err).contains("E777") or (r.out + r.err).contains("the rehearsal is not possible here") {
+    exhale "        (the contained box cannot be had here; the rehearsal tests step aside)"
+    snuff true
+  }
+  snuff false
+}
+
+test("the rehearsal applies a stage that stays within its footprint, and approves it", pack() {
+  if not rehearsal_here() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick r = guard_tool(dir, ["run", "within"], {CIGO_REHEARSE: "auto"})
+  if no_box_here(r) {
+    snuff
+  }
+  exits(r, 0)
+  says(r.out, "rehearsed in the box")
+  says(r.out, "rehearsed: nothing outside its footprint")
+  assert(there(dir, "made.txt"), "the rehearsal's layer was not applied")
+  # Approved as it is: the next run pays one lookup, no rehearsal.
+  stick again = guard_tool(dir, ["run", "within"], {CIGO_REHEARSE: "auto"})
+  exits(again, 0)
+  if has_tin_mac() {
+    never_says(again.out, "rehearsed in the box")
+  }
+})
+
+test("the rehearsal holds what a stage did beyond its footprint; --accept-risk=<task> applies it", pack() {
+  if not rehearsal_here() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick r = guard_tool(dir, ["run", "beyond"], {CIGO_REHEARSE: "auto"})
+  if no_box_here(r) {
+    snuff
+  }
+  exits(r, 1)
+  says(r.out, "E873")
+  says(r.out, ".git/hooks/pre-commit")
+  says(r.out + r.err, "is held: its rehearsal is rated high")
+  assert(not there(dir, ".git/hooks/pre-commit"), "the held rehearsal reached the project")
+  assert(not there(dir, "made.txt"), "the held rehearsal's run was not rolled back")
+  stick ok = guard_tool(dir, ["run", "beyond", "--accept-risk=beyond"], {CIGO_REHEARSE: "auto"})
+  exits(ok, 0)
+  says(ok.out, "what it did is applied")
+  assert(there(dir, ".git/hooks/pre-commit"), "--accept-risk did not apply the rehearsal")
+  assert(there(dir, "made.txt"), "--accept-risk did not apply the rehearsal")
+})
+
+test("cigo rehearse rates a script by what it did, and applies none of it", pack() {
+  if not rehearsal_here() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick bad = guard_tool(dir, ["rehearse", "./replica.sh"], {})
+  if no_box_here(bad) {
+    snuff
+  }
+  exits(bad, 2)
+  says(bad.out, "E873")
+  says(bad.out, "rated high")
+  assert(not there(dir, ".git/hooks/pre-commit"), "cigo rehearse applied what it rehearsed")
+  stick good = guard_tool(dir, ["rehearse", "./clean.sh"], {})
+  exits(good, 0)
+  says(good.out, "verdict none")
+  assert(not there(dir, ".cigo-rehearse"), "cigo rehearse applied what it rehearsed")
+  stick j = guard_tool(dir, ["rehearse", "./replica.sh", "--json"], {})
+  exits(j, 2)
+  stick v = json.parse(j.out)
+  assert(v.risk == "high", "the JSON verdict is ${v.risk}")
+  stick usage = guard_tool(dir, ["rehearse", "left-pad"], {})
+  exits(usage, 2)
+  says(usage.out + usage.err, "npm:left-pad")
+})
+
+test("cigo toolchains shows a toolchain's footprint", pack() {
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick r = tool_in(dir, ["toolchains", "node-npm"])
+  exits(r, 0)
+  says(r.out, "footprints")
+  says(r.out, "registry.npmjs.org")
+  stick m = tool_in(dir, ["toolchains", "make"])
+  says(m.out, "task runner")
+})
+
 # ----- the end --------------------------------------------------------------
 
+# A contained hop's scratch folder lives outside the project (in /var/tmp),
+# and a layer a test left held keeps it: the suite takes its runs' folders
+# with it.
+if fs.exists("/proc/self/ns/user") and fs.is_dir(path.join(home, "runs")) {
+  stick uid = proc_uid()
+  # fs.list gives full paths; the names are matched.
+  for run in fs.list(path.join(home, "runs")) {
+    stick id = path.base(run)
+    for base in ["/var/tmp", "/tmp"] {
+      if fs.is_dir(base) {
+        for entry in fs.list(base) {
+          if path.base(entry).starts_with("cig-box-${uid}-${id}-") {
+            burn {
+              proc.run("sh", ["-c", "chmod -R u+rwx \"$1\" && rm -rf \"$1\"", "sh", entry])
+            }
+          }
+        }
+      }
+    }
+  }
+}
 exhale ""
 exhale "${passed} passed, ${failed.len()} failed"
 if not failed.is_empty() {

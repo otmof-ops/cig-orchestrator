@@ -188,7 +188,8 @@ cigo trust <task>                      approve a task as it is now (never critic
 cigo trust list | show <task> | revoke <task> | revoke --all
 cigo run <task> --accept-risk[=<task>] run a held task once (high needs its name) and approve it
 cigo run <task> --run-untrusted=<task> run a refused task anyway, at a terminal
-cigo run <task> --no-guard             skip the read for one run
+cigo run <task> --no-guard             skip the read (and the rehearsal) for one run
+cigo rehearse <package>                check a package before it touches anything (below)
 ```
 
 What a verdict does depends on `security`: `standard` (the default) refuses
@@ -200,6 +201,60 @@ into one key and signed with `cig tin mac` under a subkey of the tin's key:
 one lookup per run, checked again when a byte changes, and a record that
 does not verify is a forged approval (`E889`), ignored and said. Nothing a
 task runs can sign one: in cig's box the key folder is empty.
+
+### The rehearsal: the dry run is the real run
+
+On Linux with cig 1.12.0, a stage that runs code the project did not write
+(an install and its hooks, a build that runs its dependencies' build
+scripts), or that the read above flagged, runs once, for real, in cig's
+contained box: everything it writes is a layer cig reads, the rest of the
+machine is read-only to it, it opens no Unix socket, and its only way out is
+the registries its toolchain's footprint names. Then cigo judges what it did
+against that footprint:
+
+- what it wrote within the footprint is applied as it is, journaled like any
+  task, so there is no second run;
+- what it did beyond it is the verdict's evidence, with the same friction:
+  a write to a shell's startup file, a git hook or an autostart entry is
+  `E873` (high), a changed credential file `E871`, a set-id file `E878`, a
+  link into your home or a folder it hid `E880`, many removals `E877`, a host
+  the box refused `E872` (high for a raw address);
+- a rehearsal that stayed within its footprint approves the task as it is,
+  so the next run pays one lookup.
+
+```
+rehearse = auto     (default) stages that run third-party code, and what the read flags
+rehearse = always   every task not approved (the paranoid preset)
+rehearse = never    read only (the chill preset)
+```
+
+Each toolchain's footprint (what its setup and build stages write, read,
+fetch and run, from the tools' own documentation) is in the knowledge base;
+`cigo toolchains <name>` prints it, and a task adds to it with `footprint`
+in the manifest. A project pointing its tools at another registry
+(`npm_config_registry`, `PIP_INDEX_URL`, `GOPROXY`, …) has that host joined
+to the footprint at run time. Task runners (`make`, `just`, `scripts`, …)
+run the project's own code and have no footprint of their own; a container
+build happens in the container daemon, which the box cannot see.
+
+**`cigo rehearse <package>`** checks a package before it touches anything:
+it installs it (and, for npm, requires it once) in a scratch project inside
+the box, applies none of it, and says what it did beyond the ecosystem's
+footprint. No project needed.
+
+```
+cigo rehearse npm:name[@version]       npm install, then require it once
+cigo rehearse pypi:name[==version]     pip install in a scratch venv
+cigo rehearse crates:name[@version]    cargo build of a scratch crate
+cigo rehearse ./install.sh             a script you were told to run
+              [--json] [--keep]        the full evidence; keep the layer to read (cig box list)
+```
+
+It exits by risk: `0` none or low, `1` medium, `2` high, `3` critical. Off
+Linux, with an older cig, or where cig cannot make a contained box (root,
+user namespaces turned off, a kernel before 5.12), it says so and does
+nothing; `cigo run` then reads its stages instead of rehearsing them, and
+says so once.
 
 ### Running on the pinned version
 
