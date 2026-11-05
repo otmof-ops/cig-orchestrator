@@ -27,9 +27,14 @@ $bin = Join-Path $Prefix 'bin'
 
 if (-not (Get-Command cig -ErrorAction SilentlyContinue)) {
     [Console]::Error.WriteLine('install: cig is not on PATH. Install CigScript first:')
-    [Console]::Error.WriteLine('  irm https://raw.githubusercontent.com/otmof-ops/CigScript/v1.7.0/install.ps1 | iex')
+    [Console]::Error.WriteLine('  irm https://raw.githubusercontent.com/otmof-ops/CigScript/v1.12.1/install.ps1 | iex')
     exit 1
 }
+
+# The same floor as the launchers and the tool's `# cig` pin.
+$needsMajor = 1
+$needsMinor = 12
+$needsPatch = 0
 
 $verOut = ''
 try { $verOut = (& cig --version 2>$null | Select-Object -First 1) } catch { }
@@ -42,11 +47,11 @@ if ($version -match '^(\d+)\.(\d+)\.(\d+)') {
     $minor = [int]$Matches[2]
     $patch = [int]$Matches[3]
     $tooOld = $false
-    if ($major -lt 1) { $tooOld = $true }
-    elseif ($major -eq 1 -and $minor -lt 3) { $tooOld = $true }
-    elseif ($major -eq 1 -and $minor -eq 3 -and $patch -lt 1) { $tooOld = $true }
+    if ($major -lt $needsMajor) { $tooOld = $true }
+    elseif ($major -eq $needsMajor -and $minor -lt $needsMinor) { $tooOld = $true }
+    elseif ($major -eq $needsMajor -and $minor -eq $needsMinor -and $patch -lt $needsPatch) { $tooOld = $true }
     if ($tooOld) {
-        [Console]::Error.WriteLine("install: cig $version is too old; cig-orchestrator needs 1.7.0 or newer (cig update)")
+        [Console]::Error.WriteLine("install: cig $version is too old; cig-orchestrator needs $needsMajor.$needsMinor.$needsPatch or newer (cig update)")
         exit 1
     }
 } else {
