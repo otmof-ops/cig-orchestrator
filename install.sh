@@ -37,7 +37,7 @@ if ! command -v cig >/dev/null 2>&1; then
 fi
 # The same floor as the launcher and the tool's `# cig` pin.
 needs_major=1
-needs_minor=13
+needs_minor=14
 needs_patch=0
 version=$(cig --version 2>/dev/null | awk '{print $2}')
 case "$version" in

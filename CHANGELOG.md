@@ -5,6 +5,48 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.12.0 — 2026-11-07
+
+The holes found testing 1.11.0 (#80), closed.
+
+- **An agent cannot switch off its own guard.** `cigo agent run` runs the
+  agent's command in cig's contained box: what it changes in the project
+  comes back with undo, and what it writes in your home is judged by where
+  it landed. The guard's own files (Claude Code's settings, cigscript's
+  config and blacklists, cig's state and the tin, cigo's folder and shims,
+  cig's and cigo's install folders) are refused and never applied (`E897`),
+  as is a command the static read sees going for them however it is
+  spelled; a startup file, a git hook, an autostart entry or a credential
+  file waits for a person (`E894`), and lands when the same command runs
+  again after the approval; anything else in your home is applied by name
+  and said after the output (cig 1.14.0's `apply_layer` home globs). Called
+  from your home folder itself, it is boxed the same.
+- **The agent's box has the task's network:** the registries the
+  toolchains' footprints name and the project's own git remotes; a host
+  outside them is refused, and a person approves the command with the
+  hosts named.
+- **One rating for a raw address:** a fetch-and-run from a raw address
+  (IPv4, IPv6, decimal and hex forms) is critical everywhere it is read.
+- **A quiet stealer is not called clean.** A script is read with the files
+  it runs from its own folder, and the read joins what a JavaScript file
+  builds at run time (char codes, joined pieces, arrays of literals); a
+  rehearsal that finds nothing says it could not see reads or connections
+  (`E898`), rates low and keeps nothing; a failed install could not judge,
+  exits 1 and keeps nothing.
+- **The blacklist survives being deleted.** The last list that verified is
+  kept in the tin (`cig tin keep`), for the folder it was kept from; with
+  the list and its signature gone,
+  every entry still counts, said each time (`E588`), until `cigo blacklist
+  reload` puts it back. A missing or emptied list never takes entries out.
+- **Claude Code's file tools go through the hook too:** Write, Edit,
+  MultiEdit and NotebookEdit are judged by the path they write and the text
+  they put there; an older entry is brought up to date in place, and a hook
+  taken out of the settings file is noticed on every guarded call (`E897`).
+- Read-only commands (`cigo blacklist why`, a kept verdict) print no burn
+  line (cig 1.14.0's `reads`), and a rehearsal shows the last line it
+  printed.
+- Needs cig 1.14.0.
+
 ## 1.11.1 — 2026-11-06
 
 - **Called from your home folder itself, cigo no longer makes it the
