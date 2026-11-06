@@ -17,6 +17,22 @@ pack { "./.test-work" }
 
 stick root = fs.cwd()
 stick tool = path.join(root, "orchestrate.cig")
+# A compiled cigo (cigcompile build orchestrate.cig, cigcompile#8):
+# CIGO_TEST_BINARY names it, and the suite runs it wherever it would run
+# `cig run orchestrate.cig --`, so the same tests hold the native program.
+stick tool_binary = env.get("CIGO_TEST_BINARY", "")
+pull tool_prog(p) {
+  if tool_binary == "" {
+    snuff p
+  }
+  snuff tool_binary
+}
+pull tool_args(words) {
+  if tool_binary == "" {
+    snuff tool_args(words)
+  }
+  snuff words
+}
 stick launcher = path.join(root, "bin", "cigo")
 stick work = path.join(root, ".test-work")
 stick home = path.join(work, "cig-home")
@@ -162,7 +178,7 @@ pull stubbed(dir) {
 }
 
 pull tool_stubbed(dir, words) {
-  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, stubbed(dir))
+  snuff hop_env(dir, tool_prog("cig"), tool_args(words), stubbed(dir))
 }
 
 pull stub_log(dir) {
@@ -219,7 +235,7 @@ pull cig(dir, words) {
 
 # The tool, the way a dev runs it without the launcher.
 pull tool_in(dir, words) {
-  snuff cig(dir, ["run", tool, "--"] + words)
+  snuff hop(dir, tool_prog("cig"), tool_args(words))
 }
 
 pull last_run(dir) {
@@ -910,7 +926,7 @@ test("env files, the environment and stdin reach a task, templates filled", pack
     m.tasks["greet"] = {cmd: ["bash", "-c", "echo \"$GREETING / {{project}} / {{env.TOWN}} / $EMPTY.\""], env_file: ".env"}
     m.tasks["shout"] = {cmd: ["tr", "a-z", "A-Z"], stdin: "commit {{version.commit}}"}
   })
-  stick g = hop_env(dir, "cig", ["run", tool, "--", "run", "greet"], {TOWN: "Ballarat"})
+  stick g = hop_env(dir, tool_prog("cig"), tool_args(["run", "greet"]), {TOWN: "Ballarat"})
   exits(g, 0)
   says(g.out, "hi there / chain / Ballarat / .")
   stick sh = tool_in(dir, ["run", "shout"])
@@ -1146,7 +1162,7 @@ test("a cig pin the installed cig does not satisfy is flagged on every command, 
   exits(run, 2)
   says(run.err, "1 version disagreement and --strict given")
   # Quiet when asked, and quiet when the pin fits.
-  stick quiet = hop_env(dir, "cig", ["run", tool, "--", "list"], {CIGO_VERSIONS: "0"})
+  stick quiet = hop_env(dir, tool_prog("cig"), tool_args(["list"]), {CIGO_VERSIONS: "0"})
   exits(quiet, 0)
   never_says(quiet.err, "pins cig")
   burn {
@@ -1262,11 +1278,11 @@ pull cigo_home(dir) {
 }
 
 pull tool_crashing(dir, words, where) {
-  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, {CIGO_HOME: cigo_home(dir), CIGO_INTERNAL_PANIC: where})
+  snuff hop_env(dir, tool_prog("cig"), tool_args(words), {CIGO_HOME: cigo_home(dir), CIGO_INTERNAL_PANIC: where})
 }
 
 pull tool_home(dir, words) {
-  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, {CIGO_HOME: cigo_home(dir)})
+  snuff hop_env(dir, tool_prog("cig"), tool_args(words), {CIGO_HOME: cigo_home(dir)})
 }
 
 test("a bug inside cigo is a crash report, saved outside the project and kept through the rollback", pack() {
@@ -1376,10 +1392,10 @@ test("update --check reads the releases, and update installs a verified tarball 
   }
   assert(installed.code == 0, installed.err)
   stick more = {CIGO_HOME: cigo_home(dir), CIGO_UPDATE_MANIFEST: path.join(rel, "releases.json"), CIGO_TOOL: path.join(prefix, "share/cig-orchestrator/orchestrate.cig"), CIGO_LAUNCHER: path.join(prefix, "bin/cigo")}
-  stick check = hop_env(dir, "cig", ["run", tool, "--", "update", "--check"], more)
+  stick check = hop_env(dir, tool_prog("cig"), tool_args(["update", "--check"]), more)
   exits(check, 0)
   says(check.out, "cig-orchestrator 9.0.0 is available (released 2026-10-27)")
-  stick up = hop_env(dir, "cig", ["run", tool, "--", "update"], more)
+  stick up = hop_env(dir, tool_prog("cig"), tool_args(["update"]), more)
   exits(up, 0)
   says(up.out, "updated: cig-orchestrator ")
   says(up.out, "-> 9.0.0 (verified)")
@@ -1392,13 +1408,13 @@ test("update --check reads the releases, and update installs a verified tarball 
   burn {
     fs.write_text(path.join(rel, "YANKED"), "9.0.0 broken on purpose\n")
   }
-  stick gone = hop_env(dir, "cig", ["run", tool, "--", "update", "--check"], more.merge({CIGO_YANKED_FILE: path.join(rel, "YANKED")}))
+  stick gone = hop_env(dir, tool_prog("cig"), tool_args(["update", "--check"]), more.merge({CIGO_YANKED_FILE: path.join(rel, "YANKED")}))
   exits(gone, 2)
   says(gone.err, "no release of ")
   burn {
     fs.write_text(path.join(rel, "cig-orchestrator-v9.0.0.tar.gz.sha256"), "deadbeef  cig-orchestrator-v9.0.0.tar.gz\n")
   }
-  stick bad = hop_env(dir, "cig", ["run", tool, "--", "update", "--to=9.0.0"], more)
+  stick bad = hop_env(dir, tool_prog("cig"), tool_args(["update", "--to=9.0.0"]), more)
   exits(bad, 2)
   says(bad.err, "checksum mismatch for v9.0.0")
   says(bad.err, "nothing installed")
@@ -1758,7 +1774,7 @@ test("doctor counts a python it cannot find as a missing tool", pack() {
   exits(tool_in(dir, ["adopt", "--write"]), 0)
   # A PATH with no python on it: the stubs alone.
   # The hop's own PATH chooses its program (cig 1.4.0), so cig is named by its path.
-  stick bare = hop_env(dir, proc.which("cig"), ["run", tool, "--", "doctor"], {PATH: stub_dir})
+  stick bare = hop_env(dir, tool_prog(proc.which("cig")), tool_args(["doctor"]), {PATH: stub_dir})
   exits(bare, 1)
   says(bare.out, "missing  python: none of python, python3, py is on PATH")
   says(bare.out, "https://www.python.org/downloads/")
@@ -1853,7 +1869,7 @@ test("always switches without asking and says so; never warns only; off looks at
   exits(bad, 2)
   says(bad.err, "--versions is one of ask, always, never, off")
   # In CI nobody can answer, so nothing is asked.
-  stick ci = hop_env(dir, "cig", ["run", tool, "--", "run", "web:build"], stubbed(dir).merge({CI: "true"}))
+  stick ci = hop_env(dir, tool_prog("cig"), tool_args(["run", "web:build"]), stubbed(dir).merge({CI: "true"}))
   exits(ci, 0)
   never_says(ci.err, "Switch to the pinned versions")
   says(ci.err, "web/.nvmrc pins 20")
@@ -1881,7 +1897,7 @@ test("the manifest's versions key and cigo config versions set the rule", pack()
   stick set = tool_home(dir, ["config", "versions", "always"])
   exits(set, 0)
   says(set.err, "versions = always")
-  stick through = hop_env(dir, "cig", ["run", tool, "--", "run", "web:build"], stubbed(dir).merge({CIGO_HOME: cigo_home(dir)}))
+  stick through = hop_env(dir, tool_prog("cig"), tool_args(["run", "web:build"]), stubbed(dir).merge({CIGO_HOME: cigo_home(dir)}))
   exits(through, 0)
   says(through.err, "switching: node 20 (web/.nvmrc) via mise")
 })
@@ -1902,24 +1918,24 @@ test("a missing pinned version asks before downloading; --install=always install
   }
   stick e = stubbed(dir)
   e.PATH = mgr + path_sep + e.PATH
-  stick ask = hop_env(dir, "cig", ["run", tool, "--", "run", "web:build", "--versions=always"], e)
+  stick ask = hop_env(dir, tool_prog("cig"), tool_args(["run", "web:build", "--versions=always"]), e)
   exits(ask, 0)
   says(ask.err, "mise can install node 20 (mise install node@20); it downloads, so cigo does not do it on its own")
   never_says(stub_log(dir), "mise install")
   never_says(stub_log(dir), "mise exec")
-  stick always = hop_env(dir, "cig", ["run", tool, "--", "run", "web:build", "--versions=always", "--install=always"], e)
+  stick always = hop_env(dir, tool_prog("cig"), tool_args(["run", "web:build", "--versions=always", "--install=always"]), e)
   exits(always, 0)
   says(always.err, "installing node 20 through mise: mise install node@20")
   in_order(stub_log(dir), ["mise install node@20", "mise exec node@20 -- pnpm run build"])
-  stick never = hop_env(dir, "cig", ["run", tool, "--", "run", "web:build", "--versions=always", "--install=never"], e)
+  stick never = hop_env(dir, tool_prog("cig"), tool_args(["run", "web:build", "--versions=always", "--install=never"]), e)
   exits(never, 0)
   says(never.err, "mise does not have node 20 and `install` is never")
   # `cigo versions install` prints the commands; --yes runs them.
-  stick v = hop_env(dir, "cig", ["run", tool, "--", "versions", "install"], e)
+  stick v = hop_env(dir, tool_prog("cig"), tool_args(["versions", "install"]), e)
   exits(v, 0)
   says(v.out, "node 20 (web/.nvmrc): mise install node@20")
   says(v.out, "these download; `cigo versions install --yes` runs them")
-  stick vy = hop_env(dir, "cig", ["run", tool, "--", "versions", "install", "--yes"], e)
+  stick vy = hop_env(dir, tool_prog("cig"), tool_args(["versions", "install", "--yes"]), e)
   exits(vy, 0)
   says(vy.out, "installing node 20: mise install node@20")
 })
@@ -1940,7 +1956,7 @@ test("no manager explains what to install and carries on", pack() {
     }
   }
   stick e = {PATH: bare + path_sep + "/usr/bin:/bin", STUB_LOG: dir + "-stub.log"}
-  stick r = hop_env(dir, proc.which("cig"), ["run", tool, "--", "run", "web:build"], e)
+  stick r = hop_env(dir, tool_prog(proc.which("cig")), tool_args(["run", "web:build"]), e)
   exits(r, 0)
   says(r.err, "node 20 is pinned by web/.nvmrc, 99.1.0 is installed, and no version manager was found. To let cigo switch for you: install mise or fnm")
   says(stub_log(dir), "pnpm run build")
@@ -2152,7 +2168,7 @@ test("run warns about an unquoted value in a shell line, and refuses it with --s
   stick strict = tool_in(dir, ["run", "announce", "--strict"])
   exits(strict, 2)
   says(strict.err, "1 value reach a shell line unquoted and --strict given; nothing ran")
-  stick ci = hop_env(dir, "cig", ["run", tool, "--", "run", "announce"], {CI: "true"})
+  stick ci = hop_env(dir, tool_prog("cig"), tool_args(["run", "announce"]), {CI: "true"})
   exits(ci, 2)
   says(ci.err, "CI is set, so nothing ran")
   # Quoted with |sh, nothing is said and the value is one word.
@@ -2253,7 +2269,7 @@ test("box: false in defaults, --no-box and CIGO_BOX=0 keep a task on the tin; bo
   stick r = tool_in(dir, ["run", "plain", "--no-box"])
   exits(r, 0)
   never_says(r.err, "box: `")
-  stick e = hop_env(dir, "cig", ["run", tool, "--", "run", "plain"], {CIGO_BOX: "0"})
+  stick e = hop_env(dir, tool_prog("cig"), tool_args(["run", "plain"]), {CIGO_BOX: "0"})
   exits(e, 0)
   never_says(e.err, "box: `")
   if on_linux {
@@ -2314,7 +2330,7 @@ pull filed_under(tracker, repo_dir) {
 test("a bug inside cigo is handed to cig's ashtray and filed under cigo's repository", pack() {
   stick dir = fresh("tests/fixtures/chain")
   stick tracker = dir + "-tracker"
-  stick r = hop_env(dir, "cig", ["run", tool, "--", "run", "version"], {CIGO_HOME: cigo_home(dir), CIGO_INTERNAL_PANIC: "mid-run", CIG_REPORTS: "always", CIG_INTERNAL_TRACKER_DIR: tracker})
+  stick r = hop_env(dir, tool_prog("cig"), tool_args(["run", "version"]), {CIGO_HOME: cigo_home(dir), CIGO_INTERNAL_PANIC: "mid-run", CIG_REPORTS: "always", CIG_INTERNAL_TRACKER_DIR: tracker})
   exits(r, 1)
   says(r.err, "A crash report was saved locally:")
   says(r.err, "Handing it to cig's ashtray")
@@ -2336,7 +2352,7 @@ test("crash_reports never keeps a cigo crash on this machine, out of cig's ashtr
   stick dir = fresh("tests/fixtures/chain")
   tool_home(dir, ["config", "crash_reports", "never"])
   stick tracker = dir + "-tracker-never"
-  stick r = hop_env(dir, "cig", ["run", tool, "--", "run", "version"], {CIGO_HOME: cigo_home(dir), CIGO_INTERNAL_PANIC: "mid-run", CIG_REPORTS: "always", CIG_INTERNAL_TRACKER_DIR: tracker})
+  stick r = hop_env(dir, tool_prog("cig"), tool_args(["run", "version"]), {CIGO_HOME: cigo_home(dir), CIGO_INTERNAL_PANIC: "mid-run", CIG_REPORTS: "always", CIG_INTERNAL_TRACKER_DIR: tracker})
   exits(r, 1)
   says(r.err, "crash_reports is \"never\"")
   never_says(r.err, "Handing it to cig")
@@ -2359,7 +2375,7 @@ test("cigo report <run> --send bundles the run with the manifest's shape and fil
   assert(written.kind == "report" and written.manifest.project != "" and written.cig_report.kind == "cigscript-report", json.stringify(written).slice(0, 300))
   never_says(json.stringify(written.manifest), "echo")
   # With --send: filed through cig, now.
-  stick s = hop_env(dir, "cig", ["run", tool, "--", "report", id, "--send"], {CIGO_HOME: cigo_home(dir), CIG_INTERNAL_TRACKER_DIR: tracker})
+  stick s = hop_env(dir, tool_prog("cig"), tool_args(["report", id, "--send"]), {CIGO_HOME: cigo_home(dir), CIG_INTERNAL_TRACKER_DIR: tracker})
   exits(s, 0)
   says(s.err, "filed at ")
   stick filed = fs.glob(path.join(tracker, "otmof-ops__cig-orchestrator", "*.json"))
@@ -2381,7 +2397,7 @@ test("cigo report --send carries no name of the person's: not a folder, a file, 
   exits(failing, 1)
   says(failing.err, "zqx-deploy")
   stick id = str(last_run(dir).id)
-  stick s = hop_env(dir, "cig", ["run", tool, "--", "report", id, "--send"], {CIGO_HOME: cigo_home(dir), CIG_INTERNAL_TRACKER_DIR: tracker})
+  stick s = hop_env(dir, tool_prog("cig"), tool_args(["report", id, "--send"]), {CIGO_HOME: cigo_home(dir), CIG_INTERNAL_TRACKER_DIR: tracker})
   exits(s, 0)
   says(s.err, "filed at ")
   stick filed = fs.glob(path.join(tracker, "otmof-ops__cig-orchestrator", "*.json"))
@@ -2403,7 +2419,7 @@ test("cigo report --send carries no name of the person's: not a folder, a file, 
 # ----- 1.2.0: the config model (#66): layers, the floor, locks, presets ------
 
 pull tool_layers(dir, words, more) {
-  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, {CIGO_HOME: cigo_home(dir), CIGO_SYSTEM_CONFIG: path.join(dir + "-sys", "cigo.conf")}.merge(more))
+  snuff hop_env(dir, tool_prog("cig"), tool_args(words), {CIGO_HOME: cigo_home(dir), CIGO_SYSTEM_CONFIG: path.join(dir + "-sys", "cigo.conf")}.merge(more))
 }
 
 test("a project file cannot lower protection, and may tighten it", pack() {
@@ -2490,13 +2506,13 @@ pull guard_tool(dir, words, more) {
   # either passes CIGO_REHEARSE or CIGO_OSV, which tightens it back.
   stick marker = path.join(cigo_home(dir), ".rehearse-off")
   if not fs.exists(marker) {
-    hop_env(dir, "cig", ["run", tool, "--", "config", "rehearse", "never"], {CIGO_HOME: cigo_home(dir)})
-    hop_env(dir, "cig", ["run", tool, "--", "config", "osv", "off"], {CIGO_HOME: cigo_home(dir)})
+    hop_env(dir, tool_prog("cig"), tool_args(["config", "rehearse", "never"]), {CIGO_HOME: cigo_home(dir)})
+    hop_env(dir, tool_prog("cig"), tool_args(["config", "osv", "off"]), {CIGO_HOME: cigo_home(dir)})
     burn {
       fs.write_text(marker, "")
     }
   }
-  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, {CIGO_HOME: cigo_home(dir)}.merge(more))
+  snuff hop_env(dir, tool_prog("cig"), tool_args(words), {CIGO_HOME: cigo_home(dir)}.merge(more))
 }
 
 # cig 1.11.0 signs the trust store (`cig tin mac`); an older cig cannot, and
@@ -3308,7 +3324,7 @@ pull guard_env(dir, more) {
 }
 
 pull guard_cmd(dir, words, more) {
-  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, guard_env(dir, more))
+  snuff hop_env(dir, tool_prog("cig"), tool_args(words), guard_env(dir, more))
 }
 
 # A project with a lockfile, a home with two startup files, a stub npm and a

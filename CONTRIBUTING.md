@@ -37,6 +37,9 @@ bin/cigo run ci           # cig check on every .cig file, shellcheck, then the s
 use the installed `cigo`.)
 The suite takes a few seconds; `cig run tests/run.cig -- <words>` runs just
 the tests whose names contain them.
+`CIGO_TEST_BINARY=<program>` runs the same suite against cigo compiled to a
+native program (cigcompile, or `python3 ci/compile-native.py <cig> orchestrate.cig
+<out>`, which needs cig 1.15.0 or later); CI does both.
 
 ## The workflow
 
