@@ -79,7 +79,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "${1:-help}" in
-  adopt|help|version|toolchains|update|crash|config|blacklist|guard|undo|run-url|--help|-h|--version) ;;
+  adopt|help|version|toolchains|update|crash|config|blacklist|guard|undo|run-url|agent|approve|--help|-h|--version) ;;
   *)
     dir=$PWD
     # Up to the root, or until dirname stops changing (// on MSYS stays //).
