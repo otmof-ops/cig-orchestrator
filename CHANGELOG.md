@@ -5,6 +5,19 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.11.1 — 2026-11-06
+
+- **Called from your home folder itself, cigo no longer makes it the
+  run's pack.** cig watches every file in a run's pack around each step,
+  so `cigo update`, `cigo config` or `cigo guard` run from `~` scanned the
+  whole home before and after every step (seconds each, and a Wine
+  prefix's link to `/` turned the system's own writes into hundreds of
+  false `E752` warnings, fixed in cig 1.13.2). From the home folder itself
+  (or `/`) the launchers now run cigo from an empty folder of its own
+  (`~/.cig-orchestrator/here`). A guarded call, an agent's command and
+  `cigo run-url` still run where they were made, without the box and
+  without an undo there, and say so; what they write there is named.
+
 ## 1.11.0 — 2026-11-06
 
 What your AI agents run (#57 step 4).

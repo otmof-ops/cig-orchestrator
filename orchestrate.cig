@@ -29,7 +29,7 @@
 
 pack { "." }
 
-stick VERSION = "1.11.0"
+stick VERSION = "1.11.1"
 # The cigs this version runs on; the header pin above says the same to cig itself.
 stick CIG_NEEDS = ">=1.13.0"
 stick REPO = "otmof-ops/cig-orchestrator"
@@ -87,6 +87,13 @@ roll PROJECT_SETTINGS = {}
 # Project settings a layer below refused (the floor): [{key, wanted, kept}].
 roll FLOORED = []
 stick ROOT = fs.cwd()
+# Where cigo was called from. From the home folder itself (or /) the
+# launcher runs cigo from an empty folder of its own, so cig does not take
+# the whole home as the run's pack and watch every file in it around each
+# step, and says where the call came from; a guarded call, an agent's
+# command and run-url still run there, without the box and without an undo.
+stick CALLER_DIR = pick(env.get("CIGO_CALLER_DIR", "") != "", env.get("CIGO_CALLER_DIR", ""), ROOT)
+stick CALLER_OUTSIDE = path.normalize(CALLER_DIR) != path.normalize(ROOT)
 # The tasks the guard's pass chose to rehearse (#55), and whether the note
 # that this cig cannot was said.
 roll REHEARSE = {}
@@ -10870,7 +10877,7 @@ pull do_run_url() {
   stick listed = url_blacklist(url)
   if not listed.is_empty() {
     guard_say_verdict(url, {risk: "critical", findings: listed})
-    guard_note({kind: "run-url", command: url, cwd: tilde(fs.cwd()), risk: "critical", outcome: "refused"})
+    guard_note({kind: "run-url", command: url, cwd: tilde(CALLER_DIR), risk: "critical", outcome: "refused"})
     log.error("not fetched: ${url} is on your blacklist (cigo blacklist why ${url})")
     exit(3)
   }
@@ -10915,13 +10922,13 @@ pull do_run_url() {
   # The verdict's friction: a task's.
   if risk == "critical" {
     if not (attended() and flags.contains("--run-untrusted")) {
-      guard_note({kind: "run-url", command: url, cwd: tilde(fs.cwd()), risk: risk, outcome: "refused", thing: sha})
+      guard_note({kind: "run-url", command: url, cwd: tilde(CALLER_DIR), risk: risk, outcome: "refused", thing: sha})
       log.error("not run: ${url} is rated critical. At a terminal, cigo run-url ${url} --run-untrusted runs it anyway")
       exit(3)
     }
   } else if risk == "medium" or risk == "high" {
     if attended() and not flags.contains("--accept-risk") {
-      guard_note({kind: "run-url", command: url, cwd: tilde(fs.cwd()), risk: risk, outcome: "held", thing: sha})
+      guard_note({kind: "run-url", command: url, cwd: tilde(CALLER_DIR), risk: risk, outcome: "held", thing: sha})
       log.error("held: ${url} is rated ${risk}; what it did is above. cigo run-url ${url} --accept-risk runs it")
       exit(RISK_EXIT.get(risk, 1))
     }
@@ -10934,9 +10941,11 @@ pull do_run_url() {
     keep_verdict(verdict_key(job, null), {target: file, label: url, ecosystem: "script", risk: "none", installed: true, findings: [], outside: [], refused: [], trusted_by_you: true})
     outcome = "trusted, ran"
   }
-  log.info("cigo: running ${url} for real" + pick(cig.os() == "linux", ", in the box over this folder", ""))
+  log.info("cigo: running ${url} for real" + pick(cig.os() == "linux" and not CALLER_OUTSIDE, ", in the box over this folder", pick(CALLER_OUTSIDE, " in " + tilde(CALLER_DIR) + " itself (no undo there)", "")))
   roll opts = {timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}}
-  if cig.os() == "linux" {
+  if CALLER_OUTSIDE {
+    opts.cwd = CALLER_DIR
+  } else if cig.os() == "linux" {
     opts.box = true
   }
   roll r = null
@@ -10949,7 +10958,7 @@ pull do_run_url() {
     }
   }
   stick code = int(r.get("code", 1))
-  guard_note({kind: "run-url", command: url, cwd: tilde(fs.cwd()), risk: risk, outcome: outcome, run: cig.run_id(), exit: code, thing: sha})
+  guard_note({kind: "run-url", command: url, cwd: tilde(CALLER_DIR), risk: risk, outcome: outcome, run: cig.run_id(), exit: code, thing: sha})
   if code != 0 {
     exit(pick(code < 0, 1, code))
   }
@@ -11059,7 +11068,7 @@ pull do_agent_run() {
   }
   stick agent = agent_name()
   stick session = str(guard_flag("--session") ?? env.get("CIGO_AGENT_SESSION", ""))
-  stick cwd = fs.cwd()
+  stick cwd = CALLER_DIR
   stick shown = clip(redact(line), 200)
   roll findings = []
   if guard_on() {
@@ -11100,9 +11109,15 @@ pull do_agent_run() {
   # In the box on Linux (what it changes in the project comes back with
   # undo); the project's manifests and lockfiles kept in the tin first
   # everywhere, for where the box cannot be had.
-  roll opts = {timeout_ms: 7200000, encoding: "lossy", env: {CIGO_AGENT: agent, CIGO_AGENT_SESSION: session}, touches: (LOCKFILES + GUARD_MANIFESTS).map(pack(f) => "?" + f)}
-  if cig.os() == "linux" {
-    opts.box = {quiet: true}
+  roll opts = {timeout_ms: 7200000, encoding: "lossy", env: {CIGO_AGENT: agent, CIGO_AGENT_SESSION: session}}
+  if CALLER_OUTSIDE {
+    # In your home folder itself: run there, with no box and no undo.
+    opts.cwd = CALLER_DIR
+  } else {
+    opts.touches = (LOCKFILES + GUARD_MANIFESTS).map(pack(f) => "?" + f)
+    if cig.os() == "linux" {
+      opts.box = {quiet: true}
+    }
   }
   stick shell_prog = pick(which("bash") != null, "bash", "sh")
   roll r = null
@@ -11450,7 +11465,7 @@ pull guard_words_after(tool, words) {
 
 # Is a word a path here rather than a name (`-e .`, `-r requirements.txt`)?
 pull local_word(w) {
-  snuff w.starts_with(".") or w.starts_with("/") or w.starts_with("~") or fs.exists(w)
+  snuff w.starts_with(".") or w.starts_with("/") or w.starts_with("~") or fs.exists(path.join(CALLER_DIR, w))
 }
 
 # The packages a call names (`npm install a b@2`), each as cigo rehearse
@@ -11547,18 +11562,24 @@ pull do_guard_exec() {
   stick spec = GUARD_COMMANDS[tool]
   stick words = extra
   stick cmdline = ([tool] + words.map(pack(w) => redact_word(w))).join(" ")
-  stick cwd = fs.cwd()
+  stick cwd = CALLER_DIR
   stick br = guard_break()
   stick checking = br == null and guard_on()
+  if CALLER_OUTSIDE {
+    log.info("cigo: called from ${tilde(cwd)} itself, so there is no undo for what it changes there (cigo would have to watch every file in it); from a project folder there is one")
+  }
   if br != null {
     log.warn(br.said)
   }
   # The task this call is: its toolchain's setup stage, in this folder.
   stick name = "guard:" + tool
-  roll t = {toolchain: spec.tc, stage: spec.get("stage", "setup"), cmd: [real] + words, cwd: "."}
+  roll t = {toolchain: spec.tc, stage: spec.get("stage", "setup"), cmd: [real] + words, cwd: pick(CALLER_OUTSIDE, CALLER_DIR, ".")}
   stick sub = words.filter(pack(w) => not w.starts_with("-")).get(0, "")
   stick once = as_list(spec.get("once", [])).contains("*") or as_list(spec.get("once", [])).contains(sub)
-  roll global = words.any(pack(w) => as_list(spec.get("global", [])).contains(w))
+  # Called from outside the pack (your home folder itself), what it writes
+  # there is not handed back by the box either: the same as an install into
+  # your home.
+  roll global = CALLER_OUTSIDE or words.any(pack(w) => as_list(spec.get("global", [])).contains(w))
   if (tool == "pip" or tool == "pip3") and env.get("VIRTUAL_ENV", "") == "" and not words.any(pack(w) => ["--target", "-t", "--prefix", "--root"].contains(w)) {
     # Outside a virtual environment pip installs into your home (or is
     # refused by an externally managed Python): either way, not this folder.
@@ -11611,8 +11632,15 @@ pull do_guard_exec() {
       }
     }
     roll expect = []
+    stick at_home = CALLER_OUTSIDE and path.normalize(CALLER_DIR) == path.normalize(fs.home())
     for w in fp0.writes {
-      expect.push(pick(w.starts_with("~/"), w, touch_under(".", w)))
+      if w.starts_with("~/") {
+        expect.push(w)
+      } else if at_home {
+        expect.push("~/" + w)
+      } else {
+        expect.push(touch_under(".", w))
+      }
     }
     if global {
       expect = expect + as_list(spec.get("home", []))
@@ -11627,7 +11655,7 @@ pull do_guard_exec() {
     roll r = null
     burn {
       try {
-        r = proc.run(real, words, {box: {network: pick(allow.is_empty(), "off", "registry"), allow_hosts: allow, contain: true, apply: "never", quiet: true, expect: expect}, timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}})
+        r = proc.run(real, words, {box: {network: pick(allow.is_empty(), "off", "registry"), allow_hosts: allow, contain: true, apply: "never", quiet: true, expect: expect}, cwd: CALLER_DIR, timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}})
       } ashtray e {
         r = e
       }
@@ -11686,9 +11714,14 @@ pull do_guard_exec() {
     # The manifests and lockfiles it may change are kept in the tin first,
     # so undo puts them back wherever it ran: in the box on Linux, or on
     # the tin where the box cannot be had (root, no user namespaces).
-    roll opts = {timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}, touches: (LOCKFILES + GUARD_MANIFESTS).map(pack(f) => "?" + f)}
-    if cig.os() == "linux" and br == null {
-      opts.box = true
+    roll opts = {timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}}
+    if CALLER_OUTSIDE {
+      opts.cwd = CALLER_DIR
+    } else {
+      opts.touches = (LOCKFILES + GUARD_MANIFESTS).map(pack(f) => "?" + f)
+      if cig.os() == "linux" and br == null {
+        opts.box = true
+      }
     }
     roll r = null
     burn {

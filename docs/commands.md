@@ -22,6 +22,11 @@ cigo help
 cigo finds the project the way git does: from any subdirectory, it walks up
 to the nearest directory with a `cig-tasks.json` and runs there. `adopt`,
 `toolchains`, `help` and `version` work anywhere, and so do `guard`, `undo`, `run-url`, `agent` and `approve`, which run where you are.
+From your home folder itself (or `/`), those run from an empty folder of
+cigo's own (`~/.cig-orchestrator/here`): cig watches every file in a run's
+folder around each step, and your whole home is too much to watch. A guarded
+call, an agent's command and `run-url` still run in your home, without the
+box and without an undo there; what they write is named (`E752`).
 
 ## The commands
 
@@ -684,6 +689,7 @@ holds the before-bytes of what a task's `touches` named) under
 | `shims/` | the level 2 shims (`cigo guard scope dev --yes`; `cigo guard uninstall` removes them) |
 | `guard/` | the guard's level and what it installed (`state.json`), its log (`log.jsonl`), a pause or off switch, the Enter-key hooks (`hook.bash`, `hook.zsh`), and the first copy of each startup file it gave a block (`before/`) |
 | `quarantine/` | what `cigo run-url` downloaded, by its sha256 |
+| `here/` | the empty folder cigo runs from when it is called from your home folder itself |
 | `agent/` | agent commands waiting for a person (`pending/`) and the one-time approvals, each signed (`approved/`) |
 
 ## Environment
@@ -705,6 +711,7 @@ holds the before-bytes of what a task's `touches` named) under
 | `CIGO_RUN_UNTRUSTED=1` | a guarded call refused as critical runs this once, at a terminal |
 | `CIGO_GUARDED` | set inside a guarded call: a package manager run again from it is the real one |
 | `CIGO_GUARD_HOOK=0` | the Enter-key hook lets every line through in that shell |
+| `CIGO_CALLER_DIR` | set by the launchers when they move to `here/`: the folder cigo was called from |
 | `CIGO_AGENT`, `CIGO_AGENT_SESSION` | the agent and session `cigo agent run` tags its run with (`--agent`, `--session` win); set for the command it runs, and `cigo approve` refuses under it |
 | `CIGO_NO_QUESTION=1` | `install.sh` does not print the guard's question (`cigo update` sets it) |
 | `CIGO_LAUNCHER` | the `cigo` the shims call (the launcher sets it; the suite points it at a stub) |
