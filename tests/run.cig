@@ -29,7 +29,7 @@ pull tool_prog(p) {
 }
 pull tool_args(words) {
   if tool_binary == "" {
-    snuff tool_args(words)
+    snuff ["run", tool, "--"] + words
   }
   snuff words
 }
