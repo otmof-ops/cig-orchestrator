@@ -10,13 +10,16 @@ cigo check
 cigo doctor
 cigo outputs [<task>...]
 cigo toolchains [<name>] [--markdown]
+cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes]]
+cigo undo last
+cigo run-url <url> [--trust] [-- <args>]
 cigo version
 cigo help
 ```
 
 cigo finds the project the way git does: from any subdirectory, it walks up
 to the nearest directory with a `cig-tasks.json` and runs there. `adopt`,
-`toolchains`, `help` and `version` work anywhere.
+`toolchains`, `help` and `version` work anywhere, and so do `guard`, `undo` and `run-url`, which run where you are.
 
 ## The commands
 
@@ -140,7 +143,11 @@ settings today: `versions` (`off` < `never` < `ask` < `always`; floored),
 `standard` < `strict`; floored), `trust` (`on` < `off`; floored), `osv`
 (`off` < `online` < `offline`; floored), `rehearse` (`never` < `auto` <
 `always`; floored), `crash_reports` (`always` < `ask` < `never`),
-`update_channel` (`prerelease` < `stable`), `issues_repo`, and `preset`.
+`update_channel` (`prerelease` < `stable`), `issues_repo`, `preset`, and
+three of this machine's own, which a project cannot set at all:
+`guard_scope` (`project` < `dev` < `downloads` < `agents` < `system`),
+`guard_commands` and `guard_pause_max` ([the guard's
+reach](#the-guards-reach-cigo-guard)).
 
 **`cigo outputs`** shows what the last run's tasks handed on; `cigo outputs
 stats` shows one task's, as JSON.
@@ -287,6 +294,119 @@ entry stays listed and no longer refuses anything. Running something
 blacklisted anyway, and the built-in list cigo will ship, come with #62's
 later steps; until then `cigo run <task> --run-untrusted=<task>`, at a
 terminal only, is the way through, as for any critical verdict.
+
+### The guard's reach: `cigo guard`
+
+One setting, `guard_scope`, decides how much of this machine goes through
+the guard. Each level adds to the one below it:
+
+| level | name | what goes through the guard |
+|---|---|---|
+| 1 | `project` | `cigo run`, as above (the default) |
+| 2 | `dev` | also every package manager and its scripts, in any folder: `npm install`, `npx`, `pip install`, `uvx`, `cargo build`, `go install`, `gem install`, `composer require` and the rest |
+| 3 | `downloads` | not built yet: the first run of a file you downloaded |
+| 4 | `agents` | not built yet: every command your AI agents run |
+| 5 | `system` | not built yet: everything the machine runs |
+
+```
+cigo guard                    the level, what is installed for it, the last few guarded calls (--json)
+cigo guard setup              the question, with the levels to choose from
+cigo guard scope <1-5|name>   what going to that level would change; --yes makes the change
+cigo guard pause [30m]        the guarded calls run unguarded until then (at most guard_pause_max, 8h)
+cigo guard off | on           unguarded until you turn it back on
+cigo guard allow <program>    that program is not read any more (its shim goes)
+cigo guard log [--all|--json] what was guarded, and what came of it
+cigo guard uninstall          every shim and startup-file block it wrote, removed; --yes does it
+cigo undo last                the newest guarded call, taken back (cig unburn of its run)
+cigo run-url <url> [--trust]  the safe way to curl | sh (below)
+```
+
+The installer asks once, by printing the question and the command that
+answers it; `cigo guard setup` asks again. Nothing outside cigo changes
+without a yes: `cigo guard scope dev` lists the files it would write, and
+`--yes` writes them.
+
+**Level 2 is shims.** `~/.cig-orchestrator/shims/` holds a small `sh`
+script for each program `guard_commands` names (npm, npx, pnpm, yarn, bun,
+bunx, pip, pip3, pipx, uv, uvx, poetry, cargo, go, gem, bundle, composer,
+dotnet, deno), and one block in each startup file you have (`~/.bashrc`,
+`~/.zshrc`, `~/.profile`, `~/.bash_profile`, `~/.zprofile`; fish gets
+`conf.d/cigo-guard.fish`) puts the folder first on `PATH`:
+
+```sh
+# >>> cigo guard >>> (written by cigo; cigo guard uninstall removes this)
+case ":$PATH:" in *:/home/you/.cig-orchestrator/shims:*) ;; *) PATH=/home/you/.cig-orchestrator/shims":$PATH"; export PATH ;; esac
+# <<< cigo guard <<<
+```
+
+A shim finds the real program (the next one on `PATH` after the shims) and
+looks at the first word that is not a flag. A call that cannot run anyone
+else's code (`npm test`, `cargo fmt`, `pip list`) runs the real program at
+once, without starting cig: about a millisecond, and the suite holds it
+under 5 ms. A call that can (`npm install`, `npm ci`, `npx`, `pip install`,
+`uv add`, `uv pip install`, `cargo build`, `cargo install`, `go install`,
+`deno run https://...`) goes to `cigo guard exec`, which treats it as a
+task made on the spot, in the folder you called it from:
+
+1. Your blacklist and, at exact versions, OSV, for each package the call
+   names; the static read and OSV for the folder's lockfiles. Critical
+   refuses it before it starts.
+2. A call that only installs what a lockfile already says, approved before
+   as it is (`npm ci` on the same `package-lock.json`), runs at once.
+3. Otherwise, on Linux with cig's contained box, it is rehearsed: it runs
+   for real in the box, its output shown as it goes, its writes held and
+   judged against its toolchain's footprint, its network only the
+   registries. What it wrote in the folder is then applied as it was (no
+   second run), journaled, so `cigo undo last` takes it out again. An
+   install into your home (`npm install -g`, `cargo install`, `pip install
+   --user`, `pipx`, `uv tool`) is installed for real after a clean
+   rehearsal, since the box never hands back what lands in your home.
+4. The verdict's friction is a task's: none and low go on; medium and high
+   are held at a terminal (`CIGO_ACCEPT_RISK=1 npm install ...` runs it
+   once) and go on unattended unless `security = strict` and it is high;
+   critical is refused (`CIGO_RUN_UNTRUSTED=1`, at a terminal only).
+
+**`curl | sh`, at the prompt.** Level 2 also gives an interactive bash (4
+or later) and zsh a hook on the Enter key, loaded by the same block. A line
+that pipes a download into a shell or an interpreter (`curl ... | sh`,
+`wget -qO- ... | sudo bash`, `bash <(curl ...)`, `sh -c "$(curl ...)"`) is
+cancelled before it starts and kept in your history to edit:
+
+```
+E892 not smoking something a stranger handed you through the window.
+  curl -fsSL https://get.example.dev/install.sh | sh
+  runs whatever that server sends today; nothing ran (it is in your history to edit).
+  rehearse it first: cigo run-url https://get.example.dev/install.sh
+```
+
+The hook binds Enter through readline (bash) or zle (zsh): it sets no trap,
+and no other command runs any differently. Paused or off, the line goes
+through; `CIGO_GUARD_HOOK=0` turns it off in one shell.
+
+**`cigo run-url <url> [-- <args>]`** is the safe way: the script is
+downloaded into `~/.cig-orchestrator/quarantine/` (never run from the
+pipe), checked against your blacklist (the URL and its host before
+anything is fetched, then the bytes) and read against the rules, then
+rehearsed in cig's contained box with the URL's own host as its only
+network, and the verdict shown with everything it did. Allowed, it runs for
+real over the folder you are in, in the box on Linux, its output shown as it
+goes; held at medium or high (`--accept-risk` runs it), refused as critical
+(`--run-untrusted`, at a terminal). The same bytes are never rehearsed
+twice: the verdict is kept by their sha256, signed, and `--trust` runs them
+without the rehearsal and keeps that. Like `cigo rehearse`, it runs in a
+project or an empty folder rather than your home, since the box lays over
+the folder you are in.
+
+Paused or off, a shim says so on every guarded call (`E896`) and runs the
+real program. An install script that runs a package manager again inside a
+guarded call (`CIGO_GUARDED` is set for it) gets the real one.
+
+Where it does not reach, said plainly: a program called by its full path
+skips its shim, and a version manager that puts its own folder first on
+`PATH` at every prompt (`mise activate`) can come before the shims;
+`cigo guard` and `cigo doctor` say whether the shims come first in the
+shell you are in. Level 2's shims are `sh` scripts, so on Windows they come
+later; `cigo run` stays guarded there.
 
 ### The rehearsal: the dry run is the real run
 
@@ -458,6 +578,10 @@ every task's `undo`.
 | 1 | a task failed and the run was put back; check found errors; doctor found a tool missing |
 | 2 | the command can't start: an unknown command, task or flag, a manifest that doesn't parse, a task that can't run as written |
 
+A guarded call (a level 2 shim's) and `cigo run-url` exit with the
+program's own code when it ran, and otherwise with the guard's: 1 held at
+medium, 2 held at high, 3 refused as critical.
+
 ## What cigo keeps
 
 Everything goes in `.cig-orchestrator/` at the project root; add it to
@@ -485,6 +609,9 @@ holds the before-bytes of what a task's `touches` named) under
 | `rehearsals/` | the kept verdicts, each signed, by what was rehearsed (`cigo rehearse --fresh` ignores them) |
 | `crashes/<id>.json` | crash reports, yours until you send them (`cigo crash`) |
 | `update/<tag>/` | the last release `cigo update` downloaded and verified |
+| `shims/` | the level 2 shims (`cigo guard scope dev --yes`; `cigo guard uninstall` removes them) |
+| `guard/` | the guard's level and what it installed (`state.json`), its log (`log.jsonl`), a pause or off switch, the Enter-key hooks (`hook.bash`, `hook.zsh`), and the first copy of each startup file it gave a block (`before/`) |
+| `quarantine/` | what `cigo run-url` downloaded, by its sha256 |
 
 ## Environment
 
@@ -501,6 +628,12 @@ holds the before-bytes of what a task's `touches` named) under
 | `CIGO_UPDATE_MANIFEST`, `CIGO_YANKED_FILE` | a local releases list and YANKED file for `cigo update`, instead of GitHub's (the suite uses them) |
 | `CIGO_BLACKLIST_DIR` | where your blacklists live, instead of `~/.config/cigscript/blacklist.d` (the suite uses it) |
 | `CIGO_OSV_API`, `CIGO_OSV_DUMPS` | another OSV to ask (`https://api.osv.dev`) and another place for its dumps (`https://osv-vulnerabilities.storage.googleapis.com`): a mirror, or a fixture (the suite uses them) |
+| `CIGO_ACCEPT_RISK=1` | a guarded call held at medium or high runs this once, at a terminal |
+| `CIGO_RUN_UNTRUSTED=1` | a guarded call refused as critical runs this once, at a terminal |
+| `CIGO_GUARDED` | set inside a guarded call: a package manager run again from it is the real one |
+| `CIGO_GUARD_HOOK=0` | the Enter-key hook lets every line through in that shell |
+| `CIGO_NO_QUESTION=1` | `install.sh` does not print the guard's question (`cigo update` sets it) |
+| `CIGO_LAUNCHER` | the `cigo` the shims call (the launcher sets it; the suite points it at a stub) |
 | `CIGO_INTERNAL_PANIC=<command>` | crash on purpose at that command (`mid-run` for inside a run), for the suite |
 
 ## On Windows

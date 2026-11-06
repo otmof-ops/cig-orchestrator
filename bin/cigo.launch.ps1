@@ -8,7 +8,7 @@ $tool = Join-Path (Split-Path -Parent $PSScriptRoot) 'orchestrate.cig'
 # The cig this cigo is written for: the same floor as the `# cig` pin in the
 # tool, checked here for cigs too old to read the pin themselves.
 $needsMajor = 1
-$needsMinor = 12
+$needsMinor = 13
 $needsPatch = 0
 
 if (-not (Get-Command cig -ErrorAction SilentlyContinue)) {
@@ -76,7 +76,7 @@ if ($i -lt $argsList.Count) { $rest = @($argsList[$i..($argsList.Count - 1)]) }
 $cmd = 'help'
 if ($rest.Count -gt 0) { $cmd = [string]$rest[0] }
 
-$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'crash', 'config', 'blacklist', '--help', '-h', '--version')
+$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'crash', 'config', 'blacklist', 'guard', 'undo', 'run-url', '--help', '-h', '--version')
 if ($leaveDir -notcontains $cmd) {
     $startDir = (Get-Location).Path
     $dir = $startDir

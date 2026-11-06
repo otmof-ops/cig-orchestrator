@@ -5,6 +5,54 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.10.0 — 2026-11-06
+
+How much of the machine the guard covers (#57 steps 1, 2 and 3).
+
+- **`guard_scope`**, one setting for how much of this machine goes through
+  the guard: level 1 (`project`, just cigo runs, the default) or level 2
+  (`dev`: also every package manager and its scripts, in any folder).
+  Levels 3 to 5 (downloads, agents, the whole machine) are named and not
+  built yet. It is this machine's setting: a project's `settings` cannot
+  set it, and `cigo check` says so.
+- **`cigo guard`** shows the level, what is installed for it and the last
+  guarded calls; `setup` asks the question, `scope <1-5>` shows what it
+  would change and `--yes` changes it, `pause [30m]`, `off` and `on`,
+  `allow <program>`, `log`, and `uninstall`, which takes out every shim and
+  startup-file block it wrote, leaving the files as they were. `cigo undo
+  last` undoes the newest guarded call. `cigo doctor` gains a guard block.
+  The installer prints the question once; `cigo update` does not.
+- **Level 2 is shims**, one small `sh` script per package manager first on
+  `PATH` (npm, npx, pnpm, yarn, bun, bunx, pip, pip3, pipx, uv, uvx,
+  poetry, cargo, go, gem, bundle, composer, dotnet, deno). A call that
+  cannot run anyone else's code (`npm test`) runs the real program at once,
+  without starting cig, in about a millisecond. A call that can (`npm
+  install`, `npx`, `pip install`, `cargo build`, `go install`...) is a task
+  made on the spot in the folder it was called from: your blacklist and
+  OSV for what it names, the static read, then on Linux the rehearsal in
+  cig's contained box, its output shown as it runs. What it wrote in the
+  folder is applied as it was, and `cigo undo last` takes it out again; an
+  install into your home goes in for real after a clean rehearsal. Held at
+  medium or high (`CIGO_ACCEPT_RISK=1` runs it once), refused as critical,
+  with nothing of it applied. Paused or off, the shims say so (`E896`) on
+  every guarded call. Windows gets its shims later.
+- **`curl | sh` at the prompt** (level 2): an interactive bash (4 or later)
+  or zsh gets a hook on the Enter key that cancels a line piping a download
+  into a shell or an interpreter, keeps it in the history to edit, and says
+  the rehearsed way (`E892`). It binds Enter through readline or zle, so it
+  sets no trap and no other command runs any differently.
+- **`cigo run-url <url>`**, the rehearsed way: downloaded into cigo's
+  quarantine, your blacklist checked before anything is fetched and on the
+  bytes after, read against the rules, rehearsed in the contained box with
+  the URL's own host as its only network, then run for real over the folder
+  you are in. The same bytes are never rehearsed twice; `--trust` runs them
+  without the rehearsal.
+- **The rehearsal says what its layer means itself.** cigo's rehearsals,
+  `cigo rehearse` and the contained-box probe ask cig for a quiet box
+  (cig 1.13.0), so cig no longer tells you to `cig box apply` a layer cigo
+  discards right after, and the probe's line is gone.
+- Needs cig 1.13.0 (a hop's output shown as it runs, and the quiet box).
+
 ## 1.9.0 — 2026-11-05
 
 Never the same bytes twice (#56 step 4).

