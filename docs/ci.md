@@ -27,7 +27,7 @@ jobs:
       - name: Install cig
         run: |
           mkdir -p "$HOME/.local/bin" && cd "$RUNNER_TEMP"
-          base=https://github.com/otmof-ops/CigScript/releases/download/v1.14.0
+          base=https://github.com/otmof-ops/cig-script/releases/download/v1.14.0
           curl -fsSLO "$base/cig-v1.14.0-linux-x86_64"
           curl -fsSLO "$base/cig-v1.14.0-linux-x86_64.sha256"
           sha256sum -c cig-v1.14.0-linux-x86_64.sha256
@@ -71,7 +71,7 @@ ci:
   image: your-build-image
   before_script:
     - mkdir -p "$HOME/.local/bin" && export PATH="$HOME/.local/bin:$PATH"
-    - base=https://github.com/otmof-ops/CigScript/releases/download/v1.14.0
+    - base=https://github.com/otmof-ops/cig-script/releases/download/v1.14.0
     - curl -fsSLO "$base/cig-v1.14.0-linux-x86_64" && curl -fsSLO "$base/cig-v1.14.0-linux-x86_64.sha256"
     - sha256sum -c cig-v1.14.0-linux-x86_64.sha256 && install -m 755 cig-v1.14.0-linux-x86_64 "$HOME/.local/bin/cig"
     - tag=v1.9.0; base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
@@ -104,7 +104,7 @@ writes both directories to `GITHUB_PATH` for the steps that follow:
         env:
           CIG_NO_MODIFY_PATH: '1'
         run: |
-          irm https://raw.githubusercontent.com/otmof-ops/CigScript/main/install.ps1 | iex
+          irm https://raw.githubusercontent.com/otmof-ops/cig-script/main/install.ps1 | iex
           $env:Path = "$env:LOCALAPPDATA\Programs\cig;$env:Path"
           $tag = 'v1.9.0'
           $base = "https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"

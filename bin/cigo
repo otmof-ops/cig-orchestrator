@@ -25,7 +25,7 @@ needs_minor=14
 needs_patch=0
 
 if ! command -v cig >/dev/null 2>&1; then
-  echo "cigo: cig is not on PATH; install CigScript first: https://github.com/otmof-ops/CigScript" >&2
+  echo "cigo: cig is not on PATH; install CigScript first: https://github.com/otmof-ops/cig-script" >&2
   exit 127
 fi
 

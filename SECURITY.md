@@ -36,4 +36,4 @@ permissions. **It is not a sandbox.**
   wrote outside the project, and cig's plan says so.
 
 What the CigScript runtime itself promises is in [its security
-policy](https://github.com/otmof-ops/CigScript/blob/main/SECURITY.md).
+policy](https://github.com/otmof-ops/cig-script/blob/main/SECURITY.md).

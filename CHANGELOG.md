@@ -5,6 +5,13 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## Unreleased
+
+- **CigScript's repository is otmof-ops/cig-script** now, named like the rest
+  of the cig family. The launchers' and installers' "install CigScript first"
+  messages, the knowledge base's install link, the SARIF rules' help links,
+  CI and the docs name it; the old name still redirects.
+
 ## 1.12.0 — 2026-11-07
 
 The holes found testing 1.11.0 (#80), closed.

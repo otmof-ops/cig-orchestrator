@@ -18,7 +18,7 @@ because the tooling does most of the checking.
   first and say what it saves you.
 - **A problem in the language itself** (a kernel that lied, a diagnostic
   that's wrong) belongs in [CigScript's
-  issues](https://github.com/otmof-ops/CigScript/issues).
+  issues](https://github.com/otmof-ops/cig-script/issues).
 - **Security problems** never go in a public issue: see
   [SECURITY.md](SECURITY.md).
 
@@ -93,7 +93,7 @@ section for its language family. The format is the one a project uses under
 ## Writing what cigo says
 
 cigo speaks the way CigScript does
-([the lexicon](https://github.com/otmof-ops/CigScript/blob/main/docs/LEXICON.md)):
+([the lexicon](https://github.com/otmof-ops/cig-script/blob/main/docs/LEXICON.md)):
 
 - A message says what happened, then what to type next.
 - Plain words first, the manual's name after, so nobody has to be embarrassed

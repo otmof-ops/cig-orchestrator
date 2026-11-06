@@ -1,7 +1,7 @@
 blank_issues_enabled: true
 contact_links:
   - name: A problem in CigScript itself
-    url: https://github.com/otmof-ops/CigScript/issues
+    url: https://github.com/otmof-ops/cig-script/issues
     about: The language, the runtime, the kernel or a diagnostic belongs in CigScript's own issues.
   - name: A security problem
     url: https://github.com/otmof-ops/cig-orchestrator/blob/main/SECURITY.md

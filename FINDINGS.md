@@ -102,7 +102,7 @@ Worked as advertised, and relied on:
 
 ## Round two: building 0.1.0 (CigScript 1.1.1)
 
-Fixed upstream in [CigScript #16](https://github.com/otmof-ops/CigScript/pull/16):
+Fixed upstream in [CigScript #16](https://github.com/otmof-ops/cig-script/pull/16):
 
 - **A `;` after a block is a syntax error.** `burn { ... }; exhale x` and
   `if c { }; x` fail with `E201`, though `;` separates statements everywhere

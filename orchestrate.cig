@@ -876,7 +876,7 @@ stick TOOLCHAINS = {
   cigscript: {
     language: "CigScript", short: "cig", family: "cigscript", priority: 15,
     detect: ["glob:*.cig"], workspace: ["glob:*.cig"], tools: ["cig"], versions: {cig: ["cig", "--version"]},
-    install: "https://github.com/otmof-ops/CigScript",
+    install: "https://github.com/otmof-ops/cig-script",
     note: "cig check reads one file at a time, so these stages run it once per .cig file under the component, test data (fixtures, corpus, testdata) left out",
     stages: {
       check: [{each: {files: ["**/*.cig"], skip: [".cig-orchestrator", ".test-work", "node_modules", "fixtures", "corpus", "testdata"]}, cmd: ["cig", "check", "{file}"]}],
@@ -7972,7 +7972,7 @@ pull sarif_log(items) {
   roll rules = []
   for code in sev.keys().sort() {
     stick title = CODE_TITLES.get(code, code)
-    rules.push({id: code, name: title, shortDescription: {text: title}, helpUri: "https://github.com/otmof-ops/CigScript/blob/main/docs/ERRORS.md#" + code.lower() + "-" + title.replace(" ", "-"), help: {text: "cig explain " + code}, properties: {"security-severity": str(sev[code]), tags: ["security"]}})
+    rules.push({id: code, name: title, shortDescription: {text: title}, helpUri: "https://github.com/otmof-ops/cig-script/blob/main/docs/ERRORS.md#" + code.lower() + "-" + title.replace(" ", "-"), help: {text: "cig explain " + code}, properties: {"security-severity": str(sev[code]), tags: ["security"]}})
   }
   roll results = []
   for it in items {

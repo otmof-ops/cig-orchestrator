@@ -12,7 +12,7 @@ $needsMinor = 14
 $needsPatch = 0
 
 if (-not (Get-Command cig -ErrorAction SilentlyContinue)) {
-    [Console]::Error.WriteLine('cigo: cig is not on PATH; install CigScript first: https://github.com/otmof-ops/CigScript')
+    [Console]::Error.WriteLine('cigo: cig is not on PATH; install CigScript first: https://github.com/otmof-ops/cig-script')
     exit 127
 }
 

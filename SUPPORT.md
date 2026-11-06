@@ -9,7 +9,7 @@ the issue.
 | have cigo know a language or tool it doesn't | [a toolchain request](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=toolchain-request.yml) |
 | get something your other language or tool does better | [a quality-of-life request](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=qol-request.yml) |
 | report something that went wrong | [a bug report](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=bug-report.yml) |
-| report a problem in the language itself | [CigScript's issues](https://github.com/otmof-ops/CigScript/issues) |
+| report a problem in the language itself | [CigScript's issues](https://github.com/otmof-ops/cig-script/issues) |
 | report a security problem | [SECURITY.md](SECURITY.md), never a public issue |
 
 ## What helps
