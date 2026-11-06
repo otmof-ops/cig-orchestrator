@@ -2767,7 +2767,8 @@ pull rehearsal_here() {
 }
 
 pull no_box_here(r) {
-  if (r.out + r.err).contains("E777") or (r.out + r.err).contains("the rehearsal is not possible here") {
+  stick seen = r.out + r.err
+  if seen.contains("E777") or seen.contains("the rehearsal is not possible here") or seen.contains("the contained box is not possible here") {
     exhale "        (the contained box cannot be had here; the rehearsal tests step aside)"
     snuff true
   }
