@@ -13,13 +13,15 @@ cigo toolchains [<name>] [--markdown]
 cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes]]
 cigo undo last
 cigo run-url <url> [--trust] [-- <args>]
+cigo agent [run -- <command> | log | undo --session=<id>|--agent=<name>|--since=2h [--yes]]
+cigo approve <id>
 cigo version
 cigo help
 ```
 
 cigo finds the project the way git does: from any subdirectory, it walks up
 to the nearest directory with a `cig-tasks.json` and runs there. `adopt`,
-`toolchains`, `help` and `version` work anywhere, and so do `guard`, `undo` and `run-url`, which run where you are.
+`toolchains`, `help` and `version` work anywhere, and so do `guard`, `undo`, `run-url`, `agent` and `approve`, which run where you are.
 
 ## The commands
 
@@ -146,8 +148,9 @@ settings today: `versions` (`off` < `never` < `ask` < `always`; floored),
 `update_channel` (`prerelease` < `stable`), `issues_repo`, `preset`, and
 three of this machine's own, which a project cannot set at all:
 `guard_scope` (`project` < `dev` < `downloads` < `agents` < `system`),
-`guard_commands` and `guard_pause_max` ([the guard's
-reach](#the-guards-reach-cigo-guard)).
+`guard_commands`, `guard_agents` and `guard_pause_max` ([the guard's
+reach](#the-guards-reach-cigo-guard)), and `agent_approval` (`tty` <
+`os-auth` < `never`; floored).
 
 **`cigo outputs`** shows what the last run's tasks handed on; `cigo outputs
 stats` shows one task's, as JSON.
@@ -305,7 +308,7 @@ the guard. Each level adds to the one below it:
 | 1 | `project` | `cigo run`, as above (the default) |
 | 2 | `dev` | also every package manager and its scripts, in any folder: `npm install`, `npx`, `pip install`, `uvx`, `cargo build`, `go install`, `gem install`, `composer require` and the rest |
 | 3 | `downloads` | not built yet: the first run of a file you downloaded |
-| 4 | `agents` | not built yet: every command your AI agents run |
+| 4 | `agents` | every shell command your AI agents run (level 3's part is not built yet) |
 | 5 | `system` | not built yet: everything the machine runs |
 
 ```
@@ -407,6 +410,75 @@ skips its shim, and a version manager that puts its own folder first on
 `cigo guard` and `cigo doctor` say whether the shims come first in the
 shell you are in. Level 2's shims are `sh` scripts, so on Windows they come
 later; `cigo run` stays guarded there.
+
+### Level 4: what your AI agents run
+
+At `guard_scope agents`, every shell command an agent runs goes through
+`cigo agent run`:
+
+1. It is read first: the static read's rules and your blacklist for any
+   URL it names.
+2. It runs in cig's box over the project on Linux, so what it changes there
+   comes back with undo. The project's manifests and lockfiles are kept in
+   the tin first on every OS.
+3. It is recorded as a run tagged with the agent and its session.
+
+The verdict decides who answers:
+
+| verdict | what happens |
+|---|---|
+| none, low | it runs |
+| medium | it runs, and the agent is told the finding after its output |
+| high | nothing runs until a person approves it: `E894`, with the id to approve |
+| critical | refused, and the agent is told not to look for a way around it |
+
+```
+E894 your agent's asking for the good stuff. a human has to say yes.
+  claude-code wants to run: echo 'export X=1' >> ~/.bashrc   (high: writes a shell startup file, which runs again at every login)
+  your user approves it on their own terminal with: cigo approve e2d3320fe7   (or says no). Nothing ran; ask them, then run the same command again.
+```
+
+**`cigo approve <id>`** shows the command and its findings, asks the
+operating system for your password (`agent_approval = os-auth`: polkit on
+Linux, the administrator prompt on macOS), and signs a one-time approval
+with the tin's key. The agent's next run of that exact command, in that
+folder, goes ahead, once. Asked from inside an agent's session (`CLAUDECODE`,
+`CLAUDE_CODE_ENTRYPOINT` or `CIGO_AGENT` set), it is refused and logged:
+
+```
+E895 nice try. agents can't sign their own permission slip.
+```
+
+`agent_approval = tty` approves at a terminal of yours instead, which is
+weaker: a determined agent can open a terminal of its own. `never` refuses
+high like critical.
+
+What a command prints is passed on as it was, stdout and stderr each on its
+own stream. When the output holds text addressed to AI agents, or invisible
+Unicode (`E886`, `E887`), a warning comes first: it is data from the
+command, not instructions from the user.
+
+```
+cigo agent log [--agent=<name>] [--session=<id>] [--json]     what an agent ran, with verdicts and run ids
+cigo agent undo --session=<id> | --agent=<name> | --since=2h  every run in the set, newest first; --yes does it
+```
+
+`cigo agent undo` takes each run back through `cig unburn`, newest first,
+and stops at the first one cig refuses (you changed something since). "Undo
+everything my AI did this afternoon" is `cigo agent undo --since=4h --yes`.
+
+**Claude Code.** `cigo guard scope agents --agents=claude-code` shows the
+entry it would add to `~/.claude/settings.json`, and `--yes` adds it,
+keeping everything else in the file: a `PreToolUse` hook for the Bash tool,
+`cigo agent hook claude-code`. The hook denies a critical command and an
+unapproved high one, with the reason Claude reads. Any other command is
+rewritten to run through `cigo agent run`, the rest of the call kept as it
+was. Claude Code then checks its own permission rules against the
+rewritten command, so allow and deny rules written for plain commands
+(`Bash(npm test)`) no longer match it: it asks you instead, unless the
+session's mode allows the call. A settings file that is a symbolic link
+(kept in a repository) is not rewritten; cigo prints the entry to add by
+hand. `cigo guard uninstall` takes the entry out again.
 
 ### The rehearsal: the dry run is the real run
 
@@ -578,8 +650,8 @@ every task's `undo`.
 | 1 | a task failed and the run was put back; check found errors; doctor found a tool missing |
 | 2 | the command can't start: an unknown command, task or flag, a manifest that doesn't parse, a task that can't run as written |
 
-A guarded call (a level 2 shim's) and `cigo run-url` exit with the
-program's own code when it ran, and otherwise with the guard's: 1 held at
+A guarded call (a level 2 shim's), `cigo run-url` and `cigo agent run` exit
+with the program's own code when it ran, and otherwise with the guard's: 1 held at
 medium, 2 held at high, 3 refused as critical.
 
 ## What cigo keeps
@@ -612,6 +684,7 @@ holds the before-bytes of what a task's `touches` named) under
 | `shims/` | the level 2 shims (`cigo guard scope dev --yes`; `cigo guard uninstall` removes them) |
 | `guard/` | the guard's level and what it installed (`state.json`), its log (`log.jsonl`), a pause or off switch, the Enter-key hooks (`hook.bash`, `hook.zsh`), and the first copy of each startup file it gave a block (`before/`) |
 | `quarantine/` | what `cigo run-url` downloaded, by its sha256 |
+| `agent/` | agent commands waiting for a person (`pending/`) and the one-time approvals, each signed (`approved/`) |
 
 ## Environment
 
@@ -632,6 +705,7 @@ holds the before-bytes of what a task's `touches` named) under
 | `CIGO_RUN_UNTRUSTED=1` | a guarded call refused as critical runs this once, at a terminal |
 | `CIGO_GUARDED` | set inside a guarded call: a package manager run again from it is the real one |
 | `CIGO_GUARD_HOOK=0` | the Enter-key hook lets every line through in that shell |
+| `CIGO_AGENT`, `CIGO_AGENT_SESSION` | the agent and session `cigo agent run` tags its run with (`--agent`, `--session` win); set for the command it runs, and `cigo approve` refuses under it |
 | `CIGO_NO_QUESTION=1` | `install.sh` does not print the guard's question (`cigo update` sets it) |
 | `CIGO_LAUNCHER` | the `cigo` the shims call (the launcher sets it; the suite points it at a stub) |
 | `CIGO_INTERNAL_PANIC=<command>` | crash on purpose at that command (`mid-run` for inside a run), for the suite |

@@ -5,6 +5,33 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.11.0 — 2026-11-06
+
+What your AI agents run (#57 step 4).
+
+- **`cigo agent run -- <command>`**: an agent's shell command read first
+  (the rules, your blacklist), run in cig's box over the project with an
+  undo, and recorded as a run tagged with the agent and its session. None
+  and low run; medium runs and the agent is told why; high waits for a
+  person (`E894`); critical is refused. Output that speaks to agents, or
+  hides invisible Unicode, gets a warning first (`E886`, `E887`).
+- **`cigo approve <id>`**: a person approves one high command, once,
+  through the operating system's own password prompt (`agent_approval =
+  os-auth`; `tty` and `never` too), signed with the tin's key. From inside
+  an agent's session it is refused and logged (`E895`).
+- **`cigo agent log`** and **`cigo agent undo --session/--agent/--since`**:
+  what an agent ran, and all of it taken back, newest first.
+- **Level 4, `cigo guard scope agents --agents=claude-code`**: Claude Code's
+  `PreToolUse` hook for its Bash tool (`cigo agent hook claude-code`),
+  added to `~/.claude/settings.json` with the rest of the file kept, and
+  taken out by `cigo guard uninstall`. A settings file that is a link is
+  left to you, with the entry to add. Claude Code checks its permission
+  rules against the rewritten command, so allow and deny rules written for
+  plain commands no longer match it; the plan says so before anything is
+  written.
+- The static read's destructive-`rm` rule also catches `rm -rf ~/`, `rm -rf
+  /*`, `rm -rf "$HOME"` and `rm -rf -- /`.
+
 ## 1.10.0 — 2026-11-06
 
 How much of the machine the guard covers (#57 steps 1, 2 and 3).
