@@ -1,7 +1,7 @@
 #!/usr/bin/env cig
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
-# cig >=1.12.0
+# cig >=1.13.0
 # cig-orchestrator: every language in the project, one chain, no glue script.
 #
 # Most projects are several languages in a row: a Python step that makes
@@ -29,9 +29,9 @@
 
 pack { "." }
 
-stick VERSION = "1.9.0"
+stick VERSION = "1.10.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
-stick CIG_NEEDS = ">=1.12.0"
+stick CIG_NEEDS = ">=1.13.0"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
@@ -60,6 +60,12 @@ stick SETTINGS = {
     doc: "the trust store: a task approved as it is (its command, the scripts it names, its lockfiles) is not checked again; off checks every run"},
   osv: {values: ["off", "online", "offline"], default: "online", floor: true, presets: {},
     doc: "known-bad packages: the lockfiles' packages checked against OSV (malicious packages refused, known vulnerabilities reported); online sends name@version alone, offline reads the database cigo audit --update-db builds, off does not look"},
+  guard_scope: {values: ["project", "dev", "downloads", "agents", "system"], default: "project", floor: false, machine: true, presets: {},
+    doc: "how much of this machine the guard covers (cigo guard setup asks, cigo guard scope changes it): project (just cigo runs), dev (also every package manager and its scripts, anywhere, through shims first on PATH); downloads, agents and system are not built yet. A project cannot set it"},
+  guard_commands: {values: null, default: "npm,npx,pnpm,yarn,bun,bunx,pip,pip3,pipx,uv,uvx,poetry,cargo,go,gem,bundle,composer,dotnet,deno", floor: false, machine: true, presets: {},
+    doc: "the programs that get a shim at guard_scope dev, comma-separated; which of their calls the guard reads is cigo's data (cigo guard allow <program> takes one out)"},
+  guard_pause_max: {values: null, default: "8h", floor: false, machine: true, presets: {},
+    doc: "the longest cigo guard pause (30m, 2h, 8h)"},
   rehearse: {values: ["never", "auto", "always"], default: "auto", floor: true, presets: {paranoid: "always", chill: "never"},
     doc: "the rehearsal (Linux, cig 1.12.0): auto runs a stage that runs code you did not write (an install, a build that runs its dependencies' scripts) or that the guard flagged in cig's contained box first, and judges what it did against its toolchain's footprint; always does it for every task not approved; never only reads"},
 }
@@ -3901,6 +3907,12 @@ pull do_help() {
   exhale "                              every package the lockfiles add or change since the default branch, rehearsed"
   exhale "  cigo blacklist [list | add <thing> [--reason=...] [--expires=90d] | remove <entry> | why <thing> | reload]"
   exhale "                              your own blacklist: packages, files, domains, ranges and URLs the guard refuses"
+  exhale "  cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes]]"
+  exhale "                              how much of this machine the guard covers: level 2 puts every package"
+  exhale "                              manager behind it (npm install, pip install, cargo build, npx...) anywhere"
+  exhale "  cigo undo last              undo the newest guarded call (cig unburn)"
+  exhale "  cigo run-url <url> [--trust] [-- <args>]"
+  exhale "                              the safe way to curl | sh: downloaded, read, rehearsed in the box, then run"
   exhale "  cigo trust [<task>|list|show <task>|revoke <task>|revoke --all]"
   exhale "                              approve a task as it is now (signed with the tin's key), or see and drop approvals"
   exhale "  cigo check [--strict]       the manifest, checked before anything runs"
@@ -3918,7 +3930,7 @@ pull do_help() {
   exhale "                              cigo's own crash reports; sent through cig's ashtray when cig's `reports` setting says so"
   exhale "  cigo report <run> [--send]  a run's bundle (cig's report, the manifest's shape) for an issue; --send files it through cig"
   exhale "  cigo config [<key> [<value>|--unset]]"
-  exhale "                              crash_reports, issues_repo, update_channel, versions, install in ~/.cig-orchestrator/config"
+  exhale "                              every setting through its layers (cigo config explain <key>)"
   exhale ""
   exhale "Every command that opens a project says where versions disagree: the installed cig against"
   exhale "the project's pins (.cig-version, the manifest's `cig`, a script's `# cig` header) and each"
@@ -4171,7 +4183,9 @@ pull do_check(g) {
   }
   config_full()
   for f in FLOORED {
-    if f.layer == "project" {
+    if f.layer == "project" and f.get("machine", false) {
+      problem("warning", MANIFEST, "`settings.${f.key}` is this machine's setting, not a project's (it changes what is installed outside the project); ignored: cigo guard scope sets it")
+    } else if f.layer == "project" {
       problem("warning", MANIFEST, "`settings.${f.key}` asks for `${f.wanted}`, looser than your `${f.kept}` (from ${f.from}); ignored: a project can only tighten")
     }
   }
@@ -5543,6 +5557,7 @@ pull do_doctor(g) {
     }
     exhale "    pin      ${p.from} pins cig ${p.pin}" + pick(ok == null, ": not a version pin, not compared", pick(ok, ": satisfied by ${have}", ": does not match ${have}"))
   }
+  doctor_guard()
   exhale ""
   exhale "${missing} missing tool(s), ${mismatched} version mismatch(es)"
   if missing > 0 or (mismatched > 0 and flags.contains("--strict")) {
@@ -6506,6 +6521,13 @@ pull lock_packages_in(base, body, where) {
 pull task_packages(t) {
   roll out = []
   roll seen = {}
+  for p in as_list(t.get("packages", [])) {
+    stick k = osv_key(p)
+    if not seen.has(k) {
+      seen[k] = true
+      out.push(p)
+    }
+  }
   for f in task_lockfiles(t) {
     stick key = f + "#" + file_digest(f)
     if not OSV_PARSED.has(key) {
@@ -7971,7 +7993,7 @@ pull rehearsal_box(fp, cwd, task_env) {
       expect.push(touch_under(cwd, w))
     }
   }
-  snuff {network: "registry", allow_hosts: allow, contain: true, expect: expect}
+  snuff {network: "registry", allow_hosts: allow, contain: true, quiet: true, expect: expect}
 }
 
 # Does the task run a cig script (the `scripts` toolchain adopting a .cig
@@ -7992,7 +8014,7 @@ pull contain_possible() {
       try {
         # `true` writes nothing, so nothing is held back and cig has no
         # layer to tell you about.
-        stick r = proc.run("true", [], {box: {network: "off", contain: true}, timeout_ms: 30000})
+        stick r = proc.run("true", [], {box: {network: "off", contain: true, quiet: true}, timeout_ms: 30000})
         CONTAIN_OK = r.code == 0
         if r.get("layer", null) != null {
           proc.discard_layer(r.layer)
@@ -8328,7 +8350,7 @@ pull keep_verdict(key, r) {
     snuff false
   }
   stick f = verdict_files(key)
-  stick rec = {key: key, target: r.target, label: r.label, ecosystem: r.ecosystem, risk: r.risk, installed: r.installed, findings: r.findings, outside: r.outside, refused: r.refused, at: time.now_iso(), by: "cig-orchestrator " + VERSION}
+  stick rec = {key: key, target: r.target, label: r.label, ecosystem: r.ecosystem, risk: r.risk, installed: r.installed, findings: r.findings, outside: r.outside, refused: r.refused, trusted_by_you: r.get("trusted_by_you", false), at: time.now_iso(), by: "cig-orchestrator " + VERSION}
   if not write_outside(f.json, json.stringify(rec, 2) + "\n") {
     snuff false
   }
@@ -8422,7 +8444,7 @@ pull rehearse_ready() {
     fail("the rehearsal is not possible here: cig cannot make a contained box (" + clip(CONTAIN_WHY, 200) + ")")
   }
   if path.normalize(ROOT) == path.normalize(fs.home()) {
-    fail("cigo rehearse runs in a project or an empty folder, not in your home: its scratch project is made where you are, inside the box")
+    fail("the rehearsal runs in a project or an empty folder, not in your home: the box lays over the folder you are in, and your home has a layer of its own (cd into a folder first)")
   }
 }
 
@@ -8441,7 +8463,7 @@ pull rehearse_one(job, keep) {
       allow.push(h)
     }
   }
-  stick box = {network: pick(allow.is_empty(), "off", "registry"), allow_hosts: allow, contain: true, apply: "never", expect: expect}
+  stick box = {network: pick(allow.is_empty(), "off", "registry"), allow_hosts: allow, contain: true, apply: "never", quiet: true, expect: expect}
   stick started = time.now_ms()
   roll r = null
   burn {
@@ -8467,7 +8489,9 @@ pull rehearse_one(job, keep) {
 }
 
 pull say_rehearsal(r) {
-  if r.get("kept", false) {
+  if r.get("kept", false) and r.get("trusted_by_you", false) {
+    exhale "you trusted these same bytes of ${r.label} on ${str(r.get("at", "")).slice(0, 10)} (--trust): not rehearsed (--fresh rehearses them)"
+  } else if r.get("kept", false) {
     exhale "rehearsed ${r.label} before, on ${str(r.get("at", "")).slice(0, 10)}, as these same bytes: the verdict is kept (--fresh rehearses again)"
   } else {
     exhale "rehearsed ${r.label} in ${duration(int(r.seconds * 1000))}" + pick(r.installed, "", "; the install itself failed (exit ${r.exit ?? "?"})")
@@ -8938,6 +8962,10 @@ pull config_full() {
           continue
         }
         stick want = str(values[k])
+        if layer == "project" and SETTINGS[k].get("machine", false) {
+          FLOORED.push({key: k, wanted: want, kept: eff[k], layer: layer, from: src[k], machine: true})
+          continue
+        }
         if layer == "project" and SETTINGS[k].floor and rank_of(k, want) >= 0 and rank_of(k, want) < rank_of(k, eff[k]) {
           FLOORED.push({key: k, wanted: want, kept: eff[k], layer: layer, from: src[k]})
           continue
@@ -9503,7 +9531,11 @@ pull do_config() {
     if not s.presets.is_empty() {
       exhale "  presets   " + s.presets.keys().map(pack(p) => "${p}=${s.presets[p]}").join("  ")
     }
-    exhale pick(s.floor, "  floor     a project may only tighten this; a looser project value is ignored and cigo check says so", "  floor     not a security setting: any layer may set it")
+    if s.get("machine", false) {
+      exhale "  scope     this machine's: your config or the administrator's sets it, never a project's"
+    } else {
+      exhale pick(s.floor, "  floor     a project may only tighten this; a looser project value is ignored and cigo check says so", "  floor     not a security setting: any layer may set it")
+    }
     snuff
   }
   if key == "diff" {
@@ -9847,7 +9879,7 @@ pull do_update() {
     } else {
       # CIGO_PREFIX as well as PREFIX: under Termux install.sh reads only
       # the first (PREFIX is the system's own there).
-      inst = proc.run("sh", ["./install.sh"], {cwd: unpacked_dir, env: {CIGO_PREFIX: prefix, PREFIX: prefix, CIGO_NAME: stem}, timeout_ms: 120000})
+      inst = proc.run("sh", ["./install.sh"], {cwd: unpacked_dir, env: {CIGO_PREFIX: prefix, PREFIX: prefix, CIGO_NAME: stem, CIGO_NO_QUESTION: "1"}, timeout_ms: 120000})
     }
   }
   if inst.code != 0 {
@@ -9857,6 +9889,1359 @@ pull do_update() {
     exhale "  " + line
   }
   exhale "updated: cig-orchestrator ${VERSION} -> ${rel.version} (${trust}); the release notes are at ${rel.url}"
+}
+
+# ----- the guard's reach: guard_scope (#57) ---------------------------------------------
+#
+# One setting decides how much of this machine goes through the guard: just
+# cigo runs (`project`, level 1), or also every package manager and its
+# scripts, anywhere (`dev`, level 2). At level 2 a small shim for each
+# program sits first on PATH: the calls that fetch or run someone else's code
+# (npm install, pip install, cargo build, npx...) go through the same
+# verdict, rehearsal and undo as a cigo task, and every other call (npm test,
+# cargo fmt) runs the real program at once without starting cig. Levels 3 to
+# 5 (downloads, agents, the whole machine) are not built yet. Nothing
+# outside cigo changes without a yes: `cigo guard scope dev` shows the files
+# it would write and `--yes` writes them; `cigo guard uninstall` takes every
+# one of them out again.
+
+stick GUARD_LEVELS = ["project", "dev", "downloads", "agents", "system"]
+# The levels this cigo can put in place.
+stick GUARD_BUILT = ["project", "dev"]
+stick GUARD_DIR = path.join(CIGO_HOME, "guard")
+stick SHIMS_DIR = path.join(CIGO_HOME, "shims")
+stick GUARD_STATE_FILE = path.join(GUARD_DIR, "state.json")
+stick GUARD_LOG = path.join(GUARD_DIR, "log.jsonl")
+stick GUARD_OFF = path.join(GUARD_DIR, "off")
+stick GUARD_PAUSED = path.join(GUARD_DIR, "paused-until")
+stick GUARD_ALLOW = path.join(GUARD_DIR, "allow.json")
+stick GUARD_ALLOW_LABEL = "cigo-guard-allow"
+stick PROFILE_BEGIN = "# >>> cigo guard >>>"
+stick PROFILE_END = "# <<< cigo guard <<<"
+# The manifests a guarded call may change beside its lockfile: kept in the
+# tin first where there is no box, so undo puts them back.
+stick GUARD_MANIFESTS = ["package.json", "pyproject.toml", "setup.cfg", "Cargo.toml", "go.mod", "Gemfile", "composer.json", "deno.json", "deno.jsonc", "global.json"]
+
+# Which calls of each program fetch or run someone else's code: data, like
+# the toolchains. `sub` is the first word that is not a flag; `all` guards
+# every call (npx runs a package whatever it is asked); `bare` guards the
+# program called with nothing (yarn and bundle install that way); `two`
+# guards a second word after the first (uv pip install); `url` guards only
+# a call with a remote argument. `once` are the calls that run a package
+# rather than install one. `global` are the words that install outside the
+# folder the call is made in: the contained box never hands back what lands
+# in your home, so a clean rehearsal of one is followed by the real install,
+# and `home` names where such an install writes. `tc` is the toolchain whose
+# footprint judges the rehearsal (at `stage`, setup unless it says, with
+# setup's registries).
+stick GUARD_COMMANDS = {
+  npm: {tc: "node-npm", eco: "npm", sub: ["install", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal", "isntall", "add", "ci", "clean-install", "ic", "install-clean", "isntall-clean", "install-test", "it", "install-ci-test", "cit", "update", "up", "upgrade", "udpate", "exec", "x"], once: ["exec", "x"], global: ["-g", "--global", "--location=global"],
+    home: ["~/.npm-global/**", "~/.local/lib/node_modules/**", "~/.local/bin/**", "~/.nvm/versions/node/*/lib/node_modules/**", "~/.nvm/versions/node/*/bin/**", "~/.local/share/fnm/node-versions/*/installation/lib/node_modules/**", "~/.local/share/fnm/node-versions/*/installation/bin/**", "~/.local/share/mise/installs/node/*/lib/node_modules/**", "~/.local/share/mise/installs/node/*/bin/**", "~/.volta/**"]},
+  npx: {tc: "node-npm", eco: "npm", all: true, once: ["*"]},
+  pnpm: {tc: "node-pnpm", eco: "npm", sub: ["add", "install", "i", "update", "up", "upgrade", "dlx", "exec"], once: ["dlx", "exec"], global: ["-g", "--global"], home: ["~/.local/share/pnpm/**"]},
+  yarn: {tc: "node-yarn", eco: "npm", sub: ["add", "install", "up", "upgrade", "dlx"], bare: true, once: ["dlx"], global: ["global"], home: ["~/.config/yarn/global/**", "~/.yarn/**", "~/.local/bin/**"]},
+  bun: {tc: "node-bun", eco: "npm", sub: ["add", "a", "install", "i", "update", "x"], once: ["x"], global: ["-g", "--global"], home: ["~/.bun/**"]},
+  bunx: {tc: "node-bun", eco: "npm", all: true, once: ["*"]},
+  pip: {tc: "python-pip", eco: "pypi", sub: ["install"], global: ["--user"], home: ["~/.local/lib/python*/site-packages/**", "~/.local/bin/**", "~/.cache/pip/**"]},
+  pip3: {tc: "python-pip", eco: "pypi", sub: ["install"], global: ["--user"], home: ["~/.local/lib/python*/site-packages/**", "~/.local/bin/**", "~/.cache/pip/**"]},
+  pipx: {tc: "python-pip", eco: "pypi", sub: ["install", "run", "inject", "upgrade", "reinstall"], once: ["run"], global: ["install", "inject", "upgrade", "reinstall"], home: ["~/.local/share/pipx/**", "~/.local/pipx/**", "~/.local/state/pipx/**", "~/.local/bin/**", "~/.cache/pip/**"]},
+  uv: {tc: "python-uv", eco: "pypi", sub: ["add", "sync"], two: {pip: ["install", "sync"], tool: ["run", "install", "upgrade"]}, once: ["run"], global: ["tool"], home: ["~/.local/share/uv/**", "~/.local/bin/**", "~/.cache/uv/**"]},
+  uvx: {tc: "python-uv", eco: "pypi", all: true, once: ["*"]},
+  poetry: {tc: "python-poetry", eco: "pypi", sub: ["add", "install", "update"]},
+  cargo: {tc: "rust-cargo", eco: "crates", stage: "build", sub: ["build", "b", "install", "run", "r"], once: ["run", "r"], global: ["install"], home: ["~/.cargo/bin/**", "~/.cargo/.crates.toml", "~/.cargo/.crates2.json", "~/.cargo/registry/**", "~/.cargo/git/**"]},
+  go: {tc: "go", eco: "go", sub: ["install", "get", "run"], once: ["run"], global: ["install"], home: ["~/go/bin/**", "~/go/pkg/**", "~/.cache/go-build/**"]},
+  gem: {tc: "ruby-bundler", eco: "gem", sub: ["install", "update"], global: ["install", "update"], home: ["~/.local/share/gem/**", "~/.gem/**"]},
+  bundle: {tc: "ruby-bundler", eco: "gem", sub: ["install", "update"], bare: true},
+  composer: {tc: "php-composer", eco: "composer", sub: ["install", "require", "update"], global: ["global"], home: ["~/.config/composer/**", "~/.composer/**", "~/.cache/composer/**"]},
+  dotnet: {tc: "dotnet", eco: "nuget", sub: ["add", "restore"], two: {tool: ["install", "update", "run"]}, once: ["run"], global: ["tool"], home: ["~/.dotnet/tools/**", "~/.nuget/packages/**"]},
+  deno: {tc: "deno", eco: "npm", sub: ["install", "run"], url: true, once: ["run"], global: ["install"], home: ["~/.deno/**", "~/.cache/deno/**"]},
+}
+
+# A level by number (1-5) or name, or null.
+pull guard_level_name(word) {
+  stick w = str(word).lower()
+  if text.matches(w, '^[1-5]$') {
+    snuff GUARD_LEVELS[int(w) - 1]
+  }
+  if GUARD_LEVELS.contains(w) {
+    snuff w
+  }
+  snuff null
+}
+
+pull guard_level_number(name) {
+  snuff index_of(GUARD_LEVELS, name) + 1
+}
+
+pull guard_state() {
+  if not fs.is_file(GUARD_STATE_FILE) {
+    snuff {}
+  }
+  try {
+    stick st = json.parse(fs.read_text(GUARD_STATE_FILE))
+    if type_of(st) == "map" {
+      snuff st
+    }
+  } ashtray e {
+  }
+  snuff {}
+}
+
+pull save_guard_state(st) {
+  if not write_outside(GUARD_STATE_FILE, json.stringify(st, 2) + "\n") {
+    fail("could not write ${GUARD_STATE_FILE}")
+  }
+}
+
+# Add a line to a file outside the pack (umask 077), creating it.
+pull append_outside(file, line) {
+  roll r = null
+  burn {
+    try {
+      if which("sh") != null {
+        r = proc.run("sh", ["-c", 'umask 077 && mkdir -p "$(dirname "$1")" && cat >> "$1"', "sh", file], {stdin: line, timeout_ms: 10000})
+      } else if powershell() != null {
+        r = proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "$f = $env:CIGO_FILE; New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f) | Out-Null; [IO.File]::AppendAllText($f, [Console]::In.ReadToEnd())"], {stdin: line, env: {CIGO_FILE: file}, timeout_ms: 20000})
+      } else {
+        r = {code: -1}
+      }
+    } ashtray e {
+      r = {code: -1}
+    }
+  }
+  snuff r.code == 0 or r.get("simulated", false)
+}
+
+# A file outside the pack that a person runs: a shim.
+pull write_program_outside(file, content) {
+  roll r = null
+  burn {
+    try {
+      r = proc.run("sh", ["-c", 'umask 077 && mkdir -p "$(dirname "$1")" && cat > "$1" && chmod 700 "$1"', "sh", file], {stdin: content, timeout_ms: 10000})
+    } ashtray e {
+      r = {code: -1, err: e.message}
+    }
+  }
+  snuff r.code == 0 or r.get("simulated", false)
+}
+
+# One event in the guard's log: what was guarded, and what came of it.
+pull guard_note(event) {
+  append_outside(GUARD_LOG, json.stringify({at: time.now_iso(), by: VERSION}.merge(event)) + "\n")
+}
+
+# The newest `n` events, newest last.
+pull guard_events(n) {
+  if not fs.is_file(GUARD_LOG) {
+    snuff []
+  }
+  roll out = []
+  for line in fs.read_text(GUARD_LOG).lines() {
+    if line.trim() == "" {
+      continue
+    }
+    try {
+      stick ev = json.parse(line)
+      if type_of(ev) == "map" {
+        out.push(ev)
+      }
+    } ashtray e {
+    }
+  }
+  if n > 0 and out.len() > n {
+    snuff out.slice(out.len() - n)
+  }
+  snuff out
+}
+
+# The local time of an epoch in seconds, as the shim's message says it.
+pull local_clock(secs) {
+  roll r = null
+  burn {
+    try {
+      r = proc.run("sh", ["-c", 'date -d "@$1" +%H:%M 2>/dev/null || date -r "$1" +%H:%M', "sh", str(secs)], {timeout_ms: 5000})
+    } ashtray e {
+      r = {code: -1, out: ""}
+    }
+  }
+  stick t = str(r.get("out", "")).trim()
+  snuff pick(r.code == 0 and t != "", t, time.format_ms(secs * 1000, "%H:%M UTC"))
+}
+
+stick SPAN_UNITS = {s: 1000, m: 60000, h: 3600000, d: 86400000}
+
+# 30m, 2h, 90s, 1h30m: milliseconds, or null.
+pull span_ms(given) {
+  stick g = str(given).trim().lower()
+  if not text.matches(g, '^([0-9]+[smhd])+$') {
+    snuff null
+  }
+  roll total = 0
+  for part in text.find_all(g, '[0-9]+[smhd]') {
+    stick n = int(part.slice(0, part.len() - 1))
+    stick unit = part.slice(part.len() - 1)
+    total += n * SPAN_UNITS[unit]
+  }
+  snuff total
+}
+
+# Off or paused, and what every guarded call says meanwhile.
+pull guard_break() {
+  if fs.is_file(GUARD_OFF) {
+    snuff {off: true, until: null, said: fs.read_text(GUARD_OFF).lines().first() ?? ""}
+  }
+  if fs.is_file(GUARD_PAUSED) {
+    stick lines = fs.read_text(GUARD_PAUSED).lines()
+    roll until = 0
+    if text.matches(lines.get(0, ""), '^[0-9]+$') {
+      until = int(lines.get(0, "0"))
+    }
+    if until * 1000 > time.now_ms() {
+      snuff {off: false, until: until, said: lines.get(1, "")}
+    }
+  }
+  snuff null
+}
+
+# The programs that get a shim: `guard_commands`, those cigo knows.
+pull guard_tools() {
+  roll out = []
+  for w in str(config().guard_commands).split(",") {
+    stick t = w.trim()
+    if t != "" and GUARD_COMMANDS.has(t) and not out.contains(t) {
+      out.push(t)
+    }
+  }
+  snuff out
+}
+
+# The launcher a shim calls: this one when it says where it is, else the
+# cigo on PATH.
+pull cigo_launcher() {
+  stick given = env.get("CIGO_LAUNCHER", "")
+  if given != "" and path.is_abs(given) and fs.is_file(given) {
+    snuff given
+  }
+  snuff which("cigo") ?? "cigo"
+}
+
+# The shim's reading of its arguments: the first word that is not a flag,
+# and the second too where the program has two-word subcommands.
+pull first_words(two) {
+  if two {
+    snuff ['sub=; second=; seen=0', 'for a in "$@"; do', '  case "$a" in -*) continue ;; esac', '  if [ "$seen" = 0 ]; then sub=$a; seen=1; else second=$a; break; fi', 'done'].join("\n")
+  }
+  snuff ['sub=', 'for a in "$@"; do', '  case "$a" in -*) continue ;; esac', '  sub=$a; break', 'done'].join("\n")
+}
+
+# A shim, in plain sh: find the real program after the shims folder, run
+# it at once unless the call is one the guard reads, and say so while the
+# guard is paused or off.
+pull shim_text(tool) {
+  stick spec = GUARD_COMMANDS[tool]
+  roll cases = []
+  if spec.get("all", false) {
+    cases.push('guarded=1')
+  } else {
+    roll first = []
+    for w in as_list(spec.get("sub", [])) {
+      first.push(w)
+    }
+    roll arms = []
+    if not first.is_empty() {
+      if spec.get("url", false) {
+        arms.push('  ' + first.join("|") + ') case "$*" in *http://*|*https://*|*npm:*|*jsr:*) guarded=1 ;; esac ;;')
+      } else {
+        arms.push('  ' + first.join("|") + ') guarded=1 ;;')
+      }
+    }
+    stick two = spec.get("two", {})
+    for w in two {
+      arms.push('  ' + w + ') case "$second" in ' + as_list(two[w]).join("|") + ') guarded=1 ;; esac ;;')
+    }
+    if spec.get("bare", false) {
+      arms.push("  '') guarded=1 ;;")
+    }
+    cases.push((['case "$sub" in'] + arms + ["esac"]).join("\n"))
+  }
+  stick q = pack(s) => "'" + str(s).replace("'", "'\\''") + "'"
+  snuff [
+    '#!/bin/sh',
+    '# cigo guard: the shim for ' + tool + ' (guard_scope dev), written by cig-orchestrator.',
+    "# Calls that fetch or run someone else's code go through the guard; every",
+    '# other call runs the real ' + tool + ' at once. `cigo guard uninstall` removes it.',
+    'shims=' + q(SHIMS_DIR),
+    'guard=' + q(GUARD_DIR),
+    'cigo=' + q(cigo_launcher()),
+    'real=',
+    'saved_ifs=$IFS',
+    'IFS=:',
+    'set -f',
+    'for d in $PATH; do',
+    '  case "$d" in "$shims"|"$shims/") continue ;; /*) ;; *) continue ;; esac',
+    '  if [ -f "$d/' + tool + '" ] && [ -x "$d/' + tool + '" ]; then real="$d/' + tool + '"; break; fi',
+    'done',
+    'set +f',
+    'IFS=$saved_ifs',
+    'if [ -z "$real" ]; then',
+    '  echo "' + tool + ': command not found (cigo guard: no ' + tool + ' on PATH after $shims)" >&2',
+    '  exit 127',
+    'fi',
+    '# Inside a guarded call already (an install script running ' + tool + ' again): the real one.',
+    'if [ -n "${CIGO_GUARDED:-}" ]; then exec "$real" "$@"; fi',
+    first_words(not spec.get("two", {}).is_empty()),
+    'guarded=',
+    cases.join("\n"),
+    'if [ -z "$guarded" ]; then exec "$real" "$@"; fi',
+    'if [ -f "$guard/off" ]; then',
+    '  IFS= read -r said < "$guard/off"; echo "$said" >&2',
+    '  exec "$real" "$@"',
+    'fi',
+    'if [ -f "$guard/paused-until" ]; then',
+    '  { IFS= read -r until; IFS= read -r said; } < "$guard/paused-until"',
+    '  if [ "$(date +%s)" -lt "${until:-0}" ] 2>/dev/null; then echo "$said" >&2; exec "$real" "$@"; fi',
+    'fi',
+    'if [ ! -x "$cigo" ]; then cigo=$(command -v cigo 2>/dev/null) || cigo=; fi',
+    'if [ -z "$cigo" ]; then',
+    '  echo "cigo guard: cigo is not installed any more, so ' + tool + ' runs unguarded (rm -r $shims, or reinstall cigo)" >&2',
+    '  exec "$real" "$@"',
+    'fi',
+    'exec "$cigo" guard exec "--real=$real" ' + tool + ' -- "$@"',
+    '',
+  ].join("\n")
+}
+
+# The startup files that get the PATH block: the ones this machine has (a
+# shell's own, and the login profile), and fish's conf.d when fish is here.
+pull profile_targets() {
+  stick h = fs.home()
+  roll out = []
+  for name in [".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile"] {
+    stick f = path.join(h, name)
+    if fs.is_file(f) {
+      out.push({file: f, shell: "sh"})
+    }
+  }
+  stick fish = path.join(h, ".config", "fish")
+  if fs.is_dir(fish) or which("fish") != null {
+    out.push({file: path.join(fish, "conf.d", "cigo-guard.fish"), shell: "fish", own: true})
+  }
+  if out.is_empty() {
+    out.push({file: path.join(h, ".profile"), shell: "sh"})
+  }
+  snuff out
+}
+
+pull profile_block(shell) {
+  if shell == "fish" {
+    snuff [PROFILE_BEGIN + " (written by cigo; cigo guard uninstall removes this file)", "if not contains -- " + sh_quote(SHIMS_DIR) + " $PATH", "    set -gx PATH " + sh_quote(SHIMS_DIR) + " $PATH", "end", PROFILE_END, ""].join("\n")
+  }
+  stick hb = sh_quote(hook_file("bash"))
+  stick hz = sh_quote(hook_file("zsh"))
+  snuff [PROFILE_BEGIN + " (written by cigo; cigo guard uninstall removes this)", "case \":$PATH:\" in *" + sh_quote(":" + SHIMS_DIR + ":") + "*) ;; *) PATH=" + sh_quote(SHIMS_DIR) + "\":$PATH\"; export PATH ;; esac", 'case "$-" in *i*) if [ -n "${BASH_VERSION:-}" ] && [ -f ' + hb + ' ]; then . ' + hb + '; elif [ -n "${ZSH_VERSION:-}" ] && [ -f ' + hz + ' ]; then . ' + hz + '; fi ;; esac', PROFILE_END, ""].join("\n")
+}
+
+# A startup file's text without cigo's block.
+pull without_block(body) {
+  roll out = []
+  roll inside = false
+  for line in body.lines() {
+    if line.starts_with(PROFILE_BEGIN) {
+      inside = true
+      continue
+    }
+    if inside {
+      if line.starts_with(PROFILE_END) {
+        inside = false
+      }
+      continue
+    }
+    out.push(line)
+  }
+  roll t = out.join("\n")
+  if t != "" and body.ends_with("\n") {
+    t = t + "\n"
+  }
+  snuff t
+}
+
+# The block cigo wrote in a startup file, as it is there now ("" when none).
+pull block_in(file) {
+  if not fs.is_file(file) {
+    snuff ""
+  }
+  roll out = []
+  roll inside = false
+  for line in fs.read_text(file).lines() {
+    if line.starts_with(PROFILE_BEGIN) {
+      inside = true
+    }
+    if inside {
+      out.push(line)
+      if line.starts_with(PROFILE_END) {
+        snuff out.join("\n") + "\n"
+      }
+    }
+  }
+  snuff out.join("\n")
+}
+
+pull has_block(file) {
+  snuff fs.is_file(file) and fs.read_text(file).lines().any(pack(l) => l.starts_with(PROFILE_BEGIN))
+}
+
+# What going to a level would change: shims to write or remove, startup
+# files to give the block or take it from. Each {act, kind, path, what}.
+pull scope_plan(level) {
+  roll plan = []
+  stick st = guard_state()
+  stick want_shims = guard_level_number(level) >= 2
+  stick tools = guard_tools()
+  roll had = as_list(st.get("shims", []))
+  if want_shims {
+    for t in tools {
+      stick f = path.join(SHIMS_DIR, t)
+      stick text_now = pick(fs.is_file(f), pack() => fs.read_text(f), pack() => "")()
+      if text_now != shim_text(t) {
+        plan.push({act: pick(fs.is_file(f), "update", "add"), kind: "shim", path: f, what: "the shim for " + t})
+      }
+    }
+  }
+  for t in had {
+    if not want_shims or not tools.contains(t) {
+      stick f = path.join(SHIMS_DIR, t)
+      if fs.is_file(f) {
+        plan.push({act: "remove", kind: "shim", path: f, what: "the shim for " + t})
+      }
+    }
+  }
+  for shell in ["bash", "zsh"] {
+    stick f = hook_file(shell)
+    if want_shims {
+      stick now_text = pick(fs.is_file(f), pack() => fs.read_text(f), pack() => "")()
+      if now_text != hook_text(shell) {
+        plan.push({act: pick(fs.is_file(f), "update", "add"), kind: "hook", path: f, shell: shell, what: "the Enter-key hook for " + shell + ": a download piped into a shell is cancelled"})
+      }
+    } else if fs.is_file(f) {
+      plan.push({act: "remove", kind: "hook", path: f, shell: shell, what: "the Enter-key hook for " + shell})
+    }
+  }
+  if want_shims {
+    for p in profile_targets() {
+      if not has_block(p.file) {
+        plan.push({act: "add", kind: "profile", path: p.file, shell: p.shell, own: p.get("own", false), what: "puts " + tilde(SHIMS_DIR) + " first on PATH" + pick(p.shell == "sh", ", and loads the hook in bash and zsh", "")})
+      } else if block_in(p.file) != profile_block(p.shell) {
+        plan.push({act: "update", kind: "profile", path: p.file, shell: p.shell, own: p.get("own", false), what: "the cigo block, brought up to date"})
+      }
+    }
+  } else {
+    for f in as_list(st.get("profiles", [])) {
+      if has_block(f) {
+        plan.push({act: "remove", kind: "profile", path: f, what: "the PATH block"})
+      }
+    }
+  }
+  snuff plan
+}
+
+pull say_plan(plan) {
+  for act in ["add", "update", "remove"] {
+    stick shims = plan.filter(pack(p) => p.kind == "shim" and p.act == act)
+    if not shims.is_empty() {
+      exhale "  ${act.pad_right(6)}  ${tilde(SHIMS_DIR)}/   " + pick(shims.len() == 1, "the shim for ", "${shims.len()} shims: ") + shims.map(pack(p) => path.base(p.path)).join(" ")
+    }
+  }
+  for p in plan.filter(pack(p) => p.kind != "shim") {
+    exhale "  ${p.act.pad_right(6)}  ${tilde(p.path)}   ${p.what}"
+  }
+}
+
+# Make the changes a plan lists. A startup file keeps everything but cigo's
+# block, and its first copy before cigo touched it is kept beside the state.
+pull apply_plan(plan, level) {
+  roll st = guard_state()
+  roll shims = as_list(st.get("shims", [])).filter(pack(x) => true)
+  roll profiles = as_list(st.get("profiles", [])).filter(pack(x) => true)
+  for p in plan {
+    if p.kind == "shim" {
+      stick tool = path.base(p.path)
+      if p.act == "remove" {
+        remove_outside(p.path)
+        shims = shims.filter(pack(x) => x != tool)
+      } else {
+        if not write_program_outside(p.path, shim_text(tool)) {
+          fail("could not write ${p.path}")
+        }
+        if not shims.contains(tool) {
+          shims.push(tool)
+        }
+      }
+    } else if p.kind == "hook" {
+      if p.act == "remove" {
+        remove_outside(p.path)
+      } else if not write_outside(p.path, hook_text(p.shell)) {
+        fail("could not write ${p.path}")
+      }
+    } else if p.kind == "profile" {
+      if p.act == "remove" {
+        if p.path.ends_with("cigo-guard.fish") {
+          remove_outside(p.path)
+        } else if fs.is_file(p.path) {
+          if not write_outside(p.path, without_block(fs.read_text(p.path))) {
+            fail("could not write ${p.path}")
+          }
+        }
+        profiles = profiles.filter(pack(x) => x != p.path)
+      } else {
+        roll body = ""
+        if fs.is_file(p.path) and not p.get("own", false) {
+          body = fs.read_text(p.path)
+          stick keep = path.join(GUARD_DIR, "before", path.base(p.path))
+          if not fs.is_file(keep) {
+            write_outside(keep, body)
+          }
+          body = without_block(body)
+          if body != "" and not body.ends_with("\n") {
+            body = body + "\n"
+          }
+        }
+        if not write_outside(p.path, body + profile_block(p.shell)) {
+          fail("could not write ${p.path}")
+        }
+        if not profiles.contains(p.path) {
+          profiles.push(p.path)
+        }
+      }
+    }
+  }
+  st.level = level
+  st.shims = shims
+  st.profiles = profiles
+  st.changed = time.now_iso()
+  st.by = VERSION
+  save_guard_state(st)
+}
+
+stick GUARD_QUESTION = [
+  "cigo: how much should cigo guard on this machine?",
+  "",
+  "  [1] just cigo runs                    what it does today",
+  "  [2] + package managers and scripts    npm, pip, cargo, go, gem, npx, uvx ... go through the guard anywhere   (recommended)",
+  "  [3] + anything you download           not built yet",
+  "  [4] + your AI agents                  not built yet",
+  "  [5] everything the PC runs            not built yet",
+  "",
+  "  each level includes the ones above it. answer with: cigo guard scope <1-5>",
+  "  (it shows what it would change first; --yes makes the change)",
+]
+
+pull do_guard() {
+  stick sub = targets.get(0, "")
+  if sub == "" {
+    expect_flags(["--json"])
+    do_guard_status()
+  } else if sub == "setup" {
+    expect_flags([])
+    for line in GUARD_QUESTION {
+      exhale line
+    }
+    stick st = guard_state()
+    st.asked = time.now_iso()
+    save_guard_state(st)
+  } else if sub == "scope" {
+    expect_flags(["--yes"])
+    do_guard_scope(targets.get(1, ""))
+  } else if sub == "pause" {
+    expect_flags([])
+    do_guard_pause(targets.get(1, "30m"))
+  } else if sub == "off" {
+    expect_flags([])
+    stick said = "E896 the guard is off (cigo guard on turns it back on); this runs unguarded"
+    if not write_outside(GUARD_OFF, said + "\n") {
+      fail("could not write ${GUARD_OFF}")
+    }
+    remove_outside(GUARD_PAUSED)
+    guard_note({kind: "off"})
+    exhale "the guard is off until cigo guard on; every call it would read says so meanwhile"
+  } else if sub == "on" {
+    expect_flags([])
+    remove_outside(GUARD_OFF)
+    remove_outside(GUARD_PAUSED)
+    guard_note({kind: "on"})
+    exhale "the guard is on (level ${guard_level_number(config().guard_scope)}, ${config().guard_scope})"
+  } else if sub == "allow" {
+    expect_flags([])
+    do_guard_allow(targets.get(1, ""))
+  } else if sub == "log" {
+    expect_flags(["--json", "--all"])
+    do_guard_log()
+  } else if sub == "uninstall" {
+    expect_flags(["--yes"])
+    do_guard_uninstall()
+  } else if sub == "exec" {
+    expect_flags(["--real"])
+    do_guard_exec()
+  } else {
+    fail("cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes]]")
+  }
+}
+
+pull do_guard_status() {
+  stick c = config_full()
+  stick level = c.effective.guard_scope
+  stick st = guard_state()
+  stick br = guard_break()
+  stick tools = as_list(st.get("shims", [])).filter(pack(t) => fs.is_file(path.join(SHIMS_DIR, t)))
+  stick profiles = as_list(st.get("profiles", [])).filter(pack(f) => has_block(f))
+  if flags.contains("--json") {
+    roll off = false
+    roll until = null
+    if br != null {
+      off = br.off
+      until = br.until
+    }
+    exhale json.stringify({level: guard_level_number(level), scope: level, source: c.source.get("guard_scope", "default"), shims: tools, profiles: profiles, shims_first: shims_first(), off: off, paused_until: until, asked: st.get("asked", null), recent: guard_events(5)}, 2)
+    snuff
+  }
+  exhale "guard: level ${guard_level_number(level)}, ${level} (" + c.source.get("guard_scope", "default") + ")"
+  if br != null {
+    exhale "  " + pick(br.off, "off: cigo guard on turns it back on", "paused until ${local_clock(br.until)}: cigo guard on ends the pause")
+  }
+  if guard_level_number(level) >= 2 {
+    exhale "  shims    ${tools.len()} in ${tilde(SHIMS_DIR)}" + pick(tools.is_empty(), " (none: cigo guard scope dev --yes writes them)", ": " + tools.join(" "))
+    exhale "  PATH     " + pick(profiles.is_empty(), "no startup file puts them first (cigo guard scope dev --yes)", profiles.map(tilde).join(", "))
+    exhale "  here     " + pick(shims_first(), "the shims come first on this PATH", "the shims are not first on this PATH yet: open a new shell, or put the cigo block after anything else that changes PATH")
+  } else if st.get("asked", null) == null {
+    exhale "  cigo guard setup asks how much more to guard (package managers, downloads, agents)"
+  }
+  stick recent = guard_events(5)
+  if not recent.is_empty() {
+    exhale "  last guarded:"
+    for ev in recent {
+      exhale "    " + event_line(ev)
+    }
+  }
+}
+
+# Is the shims folder ahead of every other copy of the programs it shims?
+pull shims_first() {
+  for d in env.get("PATH", "").split(pick(cig.os() == "windows", ";", ":")) {
+    if path.normalize(d) == path.normalize(SHIMS_DIR) {
+      snuff true
+    }
+    for t in GUARD_COMMANDS.keys() {
+      if fs.is_file(path.join(d, t)) {
+        snuff false
+      }
+    }
+  }
+  snuff false
+}
+
+pull event_line(ev) {
+  stick when = str(ev.get("at", "")).slice(0, 16).replace("T", " ")
+  stick kind = str(ev.get("kind", ""))
+  if kind == "guarded" or kind == "run-url" {
+    snuff "${when}  " + pick(kind == "run-url", "run-url ", "") + "${ev.get("command", "")}  in ${ev.get("cwd", "")}: ${ev.get("outcome", "")}" + pick(ev.get("risk", "none") != "none", " (rated ${ev.get("risk", "")})", "") + pick(ev.get("run", null) != null, "  run ${ev.get("run", "")}", "")
+  }
+  snuff "${when}  ${kind}" + pick(ev.has("level"), " ${ev.get("level", "")}", "") + pick(ev.has("thing"), " ${ev.get("thing", "")}", "") + pick(ev.has("until"), " until ${ev.get("until", "")}", "")
+}
+
+pull do_guard_scope(word) {
+  stick level = guard_level_name(word)
+  if level == null {
+    fail("cigo guard scope <1-5|project|dev|downloads|agents|system>")
+  }
+  if not GUARD_BUILT.contains(level) {
+    fail("level ${guard_level_number(level)} (${level}) is not built yet; levels 1 (project) and 2 (dev) are. cigo guard scope dev puts every package manager behind the guard")
+  }
+  if level != "project" and cig.os() == "windows" {
+    fail("level 2's shims are shell scripts; on Windows they come in a later release, and cigo runs stay guarded at level 1")
+  }
+  stick plan = scope_plan(level)
+  stick now = config().guard_scope
+  if plan.is_empty() and now == level {
+    exhale "guard: already at level ${guard_level_number(level)} (${level}); nothing to change"
+    snuff
+  }
+  exhale "guard: level ${guard_level_number(now)} (${now}) -> ${guard_level_number(level)} (${level})"
+  if plan.is_empty() {
+    exhale "  nothing outside cigo changes"
+  } else {
+    say_plan(plan)
+  }
+  if not flags.contains("--yes") {
+    exhale ""
+    exhale "nothing changed yet: cigo guard scope ${level} --yes makes " + pick(plan.len() == 1, "this change", "these changes") + pick(plan.any(pack(p) => p.kind == "profile"), " (a startup file is edited only between the two cigo guard lines, and cigo guard uninstall takes them out)", "")
+    snuff
+  }
+  apply_plan(plan, level)
+  write_setting("guard_scope", level)
+  guard_note({kind: "scope", level: level})
+  exhale ""
+  exhale "guard: level ${guard_level_number(level)} (${level})" + pick(level == "dev", "; open a new shell (or source your startup file) so the shims come first on PATH", "")
+}
+
+pull do_guard_pause(given) {
+  stick ms = span_ms(given)
+  if ms == null or ms <= 0 {
+    fail("cigo guard pause [30m | 2h | 90s]")
+  }
+  stick most = span_ms(config().guard_pause_max) ?? 28800000
+  if ms > most {
+    fail("cigo guard pause ${given}: longer than guard_pause_max (${config().guard_pause_max}); cigo guard off turns it off until you turn it on")
+  }
+  stick until = int((time.now_ms() + ms) / 1000)
+  stick clock = local_clock(until)
+  stick said = "E896 guard's on a smoke break until ${clock}; this runs unguarded (cigo guard on ends the pause)"
+  if not write_outside(GUARD_PAUSED, "${until}\n${said}\n") {
+    fail("could not write ${GUARD_PAUSED}")
+  }
+  guard_note({kind: "pause", until: clock})
+  exhale "the guard is paused until ${clock}; it resumes by itself, and every call it would read says so meanwhile"
+}
+
+# `cigo guard allow <program>`: that program's calls are not read any more
+# (its shim goes); trusted from now on, until `cigo guard scope dev --yes`
+# after taking it out of the list again.
+pull do_guard_allow(thing) {
+  if thing == "" {
+    fail("cigo guard allow <program>: one of ${guard_tools().join(", ")}")
+  }
+  if not GUARD_COMMANDS.has(thing) {
+    fail("cigo guard allow ${thing}: not a program the guard shims (${GUARD_COMMANDS.keys().join(", ")}); a task is approved with cigo trust <task>")
+  }
+  stick left = guard_tools().filter(pack(t) => t != thing)
+  write_setting("guard_commands", left.join(","))
+  stick f = path.join(SHIMS_DIR, thing)
+  if fs.is_file(f) {
+    remove_outside(f)
+    roll st = guard_state()
+    st.shims = as_list(st.get("shims", [])).filter(pack(x) => x != thing)
+    save_guard_state(st)
+  }
+  guard_note({kind: "allow", thing: thing})
+  exhale "${thing} runs as it is from now on (its shim is gone, guard_commands no longer names it)"
+}
+
+pull do_guard_log() {
+  stick evs = guard_events(pick(flags.contains("--all"), 0, 30))
+  if flags.contains("--json") {
+    exhale json.stringify(evs, 2)
+    snuff
+  }
+  if evs.is_empty() {
+    exhale "nothing guarded yet"
+    snuff
+  }
+  for ev in evs {
+    exhale event_line(ev)
+  }
+}
+
+pull do_guard_uninstall() {
+  roll plan = scope_plan("project")
+  # Every shim the folder holds, whoever's list it is on.
+  if fs.is_dir(SHIMS_DIR) {
+    for f in fs.list(SHIMS_DIR) {
+      if not plan.any(pack(p) => p.path == f) {
+        plan.push({act: "remove", kind: "shim", path: f, what: "a shim"})
+      }
+    }
+  }
+  for p in profile_targets() {
+    if has_block(p.file) and not plan.any(pack(x) => x.path == p.file) {
+      plan.push({act: "remove", kind: "profile", path: p.file, what: "the PATH block"})
+    }
+  }
+  if plan.is_empty() and config().guard_scope == "project" {
+    exhale "guard: nothing of it is installed outside cigo"
+    snuff
+  }
+  exhale "guard: uninstall"
+  say_plan(plan)
+  if not flags.contains("--yes") {
+    exhale ""
+    exhale "nothing changed yet: cigo guard uninstall --yes removes " + pick(plan.len() == 1, "it", "them") + " (cigo runs stay guarded at level 1)"
+    snuff
+  }
+  apply_plan(plan, "project")
+  write_setting("guard_scope", "project")
+  remove_outside(GUARD_OFF)
+  remove_outside(GUARD_PAUSED)
+  guard_note({kind: "uninstall"})
+  exhale ""
+  exhale "removed: the guard is back to level 1 (just cigo runs)"
+}
+
+# ----- the shell hook: a stranger's script, never piped straight in (#57 step 3) -------
+#
+# At guard_scope dev an interactive bash (4 or later) or zsh also gets a
+# hook on the Enter key: a line that pipes a download into a shell or an
+# interpreter (curl ... | sh, wget -qO- ... | sudo bash, bash <(curl ...),
+# sh -c "$(curl ...)") is cancelled before it starts, put in the history to
+# edit, and the rehearsed way is said (E892). It binds Enter through
+# readline or zle, so it sets no trap and changes nothing about how any
+# other command runs. Paused or off, the line goes through.
+
+stick HOOK_FETCH_RE = '(^|[;&|({[:space:]])(curl|wget|fetch)[[:space:]][^|]*[|][[:space:]]*(sudo([[:space:]]+-[A-Za-z]+)*[[:space:]]+)?(env[[:space:]]+([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*)?((ba|z|da|k|c|tc|fi)?sh|python[0-9.]*|node|perl|ruby|php)([[:space:]]|$|[;&)])'
+stick HOOK_SUBST_RE = '((ba|z|da|k)?sh|source|[.]|eval)[[:space:]]+(-c[[:space:]]+)?["' + "'" + ']?[<$][(][[:space:]]*(curl|wget|fetch)[[:space:]]'
+stick HOOK_URL_RE = '(https?://[^][:space:]"' + "'" + '|)]+)'
+stick HOOK_SAYS = "E892 not smoking something a stranger handed you through the window."
+
+pull hook_file(shell) {
+  snuff path.join(GUARD_DIR, "hook." + shell)
+}
+
+pull hook_text(shell) {
+  stick name = path.stem(cigo_launcher())
+  if shell == "zsh" {
+    snuff [
+      "# cigo guard: the Enter-key hook for zsh (guard_scope dev), written by cig-orchestrator.",
+      "# A line that pipes a download into a shell is cancelled; cigo guard uninstall removes it.",
+      '[[ -n ${__cigo_guard_loaded:-} ]] && return 0',
+      "[[ -o interactive ]] || return 0",
+      "typeset -g __cigo_guard_loaded=1",
+      "typeset -g __cigo_guard_dir=" + sh_quote(GUARD_DIR),
+      "typeset -g __cigo_guard_name=" + sh_quote(name),
+      "typeset -g __cigo_guard_re=" + sh_quote(HOOK_FETCH_RE),
+      "typeset -g __cigo_guard_re2=" + sh_quote(HOOK_SUBST_RE),
+      "typeset -g __cigo_guard_url=" + sh_quote(HOOK_URL_RE),
+      "__cigo_guard_accept() {",
+      "  local line=$BUFFER until=",
+      '  if [[ ${CIGO_GUARD_HOOK:-1} != 0 && ! -f $__cigo_guard_dir/off ]] && { [[ $line =~ $__cigo_guard_re ]] || [[ $line =~ $__cigo_guard_re2 ]]; }; then',
+      "    if [[ -f $__cigo_guard_dir/paused-until ]]; then",
+      '      until=${$(<$__cigo_guard_dir/paused-until)%%$' + "'\\n'" + '*}',
+      '      if (( $(date +%s) < ${until:-0} )); then zle __cigo_guard_orig_accept_line; return; fi',
+      "    fi",
+      "    print -s -r -- \"$line\"",
+      "    zle -I",
+      "    print -u2 -r -- " + sh_quote(HOOK_SAYS),
+      "    print -u2 -r -- \"  $line\"",
+      "    print -u2 -r -- '  runs whatever that server sends today; nothing ran (it is in your history to edit).'",
+      "    if [[ $line =~ $__cigo_guard_url ]]; then print -u2 -r -- \"  rehearse it first: $__cigo_guard_name run-url $match[1]\"; fi",
+      "    BUFFER=",
+      "  fi",
+      "  zle __cigo_guard_orig_accept_line",
+      "}",
+      'if [[ ${widgets[accept-line]:-} == user:* ]]; then',
+      "  zle -A accept-line __cigo_guard_orig_accept_line",
+      "else",
+      "  zle -A .accept-line __cigo_guard_orig_accept_line",
+      "fi",
+      "zle -N accept-line __cigo_guard_accept",
+      "",
+    ].join("\n")
+  }
+  snuff [
+    "# cigo guard: the Enter-key hook for bash (guard_scope dev), written by cig-orchestrator.",
+    "# A line that pipes a download into a shell is cancelled; cigo guard uninstall removes it.",
+    '[ -n "${__cigo_guard_loaded:-}" ] && return 0',
+    '[ "${BASH_VERSINFO[0]:-0}" -ge 4 ] || return 0',
+    "case $- in *i*) ;; *) return 0 ;; esac",
+    "__cigo_guard_loaded=1",
+    "__cigo_guard_dir=" + sh_quote(GUARD_DIR),
+    "__cigo_guard_name=" + sh_quote(name),
+    "__cigo_guard_re=" + sh_quote(HOOK_FETCH_RE),
+    "__cigo_guard_re2=" + sh_quote(HOOK_SUBST_RE),
+    "__cigo_guard_url=" + sh_quote(HOOK_URL_RE),
+    "__cigo_guard_rl() {",
+    "  local line=$READLINE_LINE until=",
+    '  [ "${CIGO_GUARD_HOOK:-1}" = 0 ] && return 0',
+    "  [ -f \"$__cigo_guard_dir/off\" ] && return 0",
+    "  if [[ $line =~ $__cigo_guard_re ]] || [[ $line =~ $__cigo_guard_re2 ]]; then",
+    "    if [ -f \"$__cigo_guard_dir/paused-until\" ]; then",
+    "      { IFS= read -r until; } < \"$__cigo_guard_dir/paused-until\"",
+    '      [ "$(date +%s)" -lt "${until:-0}" ] 2>/dev/null && return 0',
+    "    fi",
+    "    builtin history -s -- \"$line\"",
+    "    printf '\\n%s\\n  %s\\n  %s\\n' " + sh_quote(HOOK_SAYS) + " \"$line\" 'runs whatever that server sends today; nothing ran (it is in your history to edit).' >&2",
+    "    if [[ $line =~ $__cigo_guard_url ]]; then",
+    "      printf '  rehearse it first: %s run-url %s\\n' " + '"$__cigo_guard_name" "${BASH_REMATCH[1]}" >&2',
+    "    fi",
+    "    READLINE_LINE=",
+    "    READLINE_POINT=0",
+    "  fi",
+    "}",
+    "for __cigo_guard_map in emacs vi-insert vi-command; do",
+    "  bind -m \"$__cigo_guard_map\" -x '\"\\C-x\\C-]\": __cigo_guard_rl' 2>/dev/null",
+    "  bind -m \"$__cigo_guard_map\" '\"\\C-x\\C-^\": accept-line' 2>/dev/null",
+    "  bind -m \"$__cigo_guard_map\" '\"\\C-m\": \"\\C-x\\C-]\\C-x\\C-^\"' 2>/dev/null",
+    "  bind -m \"$__cigo_guard_map\" '\"\\C-j\": \"\\C-x\\C-]\\C-x\\C-^\"' 2>/dev/null",
+    "done",
+    "unset __cigo_guard_map",
+    "",
+  ].join("\n")
+}
+
+# ----- cigo run-url: a stranger's install script, rehearsed first (#57 step 3) ---------
+#
+# `cigo run-url <url> [-- <arguments>]`, the safe way to `curl | sh`: the
+# script is downloaded into cigo's quarantine (never run from the pipe),
+# checked against your blacklist (its URL, its host, its bytes) and read
+# against the rules, rehearsed in cig's contained box with the URL's own
+# host as its only network, and the verdict shown. Allowed, it then runs
+# for real, over this folder in the box, its output shown as it goes. The
+# same bytes are never rehearsed twice (the verdict is kept by their
+# sha256, signed); `--trust` runs them without the rehearsal.
+
+stick QUARANTINE = path.join(CIGO_HOME, "quarantine")
+
+pull url_blacklist(url) {
+  roll found = []
+  for e in blacklist(false) {
+    if entry_matches_url(e, url) {
+      found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: url, text: url, says: blacklist_says(e) + ": " + e.entry})
+    }
+  }
+  snuff found
+}
+
+pull do_run_url() {
+  expect_flags(["--trust", "--fresh", "--accept-risk", "--run-untrusted", "--json"])
+  stick url = targets.get(0, "")
+  if not text.matches(url, '^https?://[^\s]+$') or targets.len() > 1 {
+    fail("cigo run-url <https://...> [--trust] [-- <arguments for the script>]")
+  }
+  stick host = url_host(url)
+  # Your blacklist, before anything is fetched.
+  stick listed = url_blacklist(url)
+  if not listed.is_empty() {
+    guard_say_verdict(url, {risk: "critical", findings: listed})
+    guard_note({kind: "run-url", command: url, cwd: tilde(fs.cwd()), risk: "critical", outcome: "refused"})
+    log.error("not fetched: ${url} is on your blacklist (cigo blacklist why ${url})")
+    exit(3)
+  }
+  # Into the quarantine, named by what it is.
+  stick tmp = path.join(QUARANTINE, "download-" + str(time.now_ms()))
+  roll got = null
+  burn {
+    try {
+      got = proc.run("curl", ["-fsSL", "--proto", "=https,http", "--max-filesize", "52428800", "--create-dirs", "-o", tmp, url], {timeout_ms: 300000})
+    } ashtray e {
+      got = {code: -1, err: e.message}
+    }
+  }
+  if got.code != 0 {
+    remove_outside(tmp)
+    fail("could not download ${url}: " + clip(str(got.get("err", "")).trim(), 200))
+  }
+  stick sha = hash.sha256_file(tmp)
+  stick file = path.join(QUARANTINE, sha + ".sh")
+  burn {
+    proc.run("mv", ["-f", tmp, file], {timeout_ms: 10000})
+  }
+  log.info("cigo: ${url} is in the quarantine as ${tilde(file)} (sha256 ${sha.slice(0, 12)}…)")
+  # The bytes on your blacklist, and the text against the rules.
+  roll findings = blacklist_for_spec(file)
+  stick body = pick(fs.is_file(file), pack() => fs.read_text(file), pack() => "")()
+  findings = findings + scan_text(url, body, true, true, 0, {left: DECODE_BUDGET})
+  roll risk = risk_of(findings)
+  if not findings.is_empty() {
+    guard_say_verdict(url, {risk: risk, findings: findings})
+  }
+  stick job = {eco: "script", label: url, tool: "sh", spec: file, script: (["sh", sh_quote(file)] + extra.map(sh_quote)).join(" "), fp: {writes: [], network: [host], registry_env: []}}
+  roll outcome = "ran"
+  if risk != "critical" and not flags.contains("--trust") {
+    rehearse_ready()
+    stick r = rehearse_or_kept(job, null, false)
+    say_rehearsal(r)
+    findings = findings + r.findings
+    risk = risk_of(findings)
+    outcome = "rehearsed, then ran"
+  }
+  # The verdict's friction: a task's.
+  if risk == "critical" {
+    if not (attended() and flags.contains("--run-untrusted")) {
+      guard_note({kind: "run-url", command: url, cwd: tilde(fs.cwd()), risk: risk, outcome: "refused", thing: sha})
+      log.error("not run: ${url} is rated critical. At a terminal, cigo run-url ${url} --run-untrusted runs it anyway")
+      exit(3)
+    }
+  } else if risk == "medium" or risk == "high" {
+    if attended() and not flags.contains("--accept-risk") {
+      guard_note({kind: "run-url", command: url, cwd: tilde(fs.cwd()), risk: risk, outcome: "held", thing: sha})
+      log.error("held: ${url} is rated ${risk}; what it did is above. cigo run-url ${url} --accept-risk runs it")
+      exit(RISK_EXIT.get(risk, 1))
+    }
+    if not attended() and config().security == "strict" and risk == "high" {
+      log.error("not run: ${url} is rated high and security = strict, unattended")
+      exit(2)
+    }
+  }
+  if flags.contains("--trust") {
+    keep_verdict(verdict_key(job, null), {target: file, label: url, ecosystem: "script", risk: "none", installed: true, findings: [], outside: [], refused: [], trusted_by_you: true})
+    outcome = "trusted, ran"
+  }
+  log.info("cigo: running ${url} for real" + pick(cig.os() == "linux", ", in the box over this folder", ""))
+  roll opts = {timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}}
+  if cig.os() == "linux" {
+    opts.box = true
+  }
+  roll r = null
+  burn {
+    try {
+      r = proc.run("sh", [file] + extra, opts)
+    } ashtray e {
+      log.error(e.message)
+      r = {code: 1}
+    }
+  }
+  stick code = int(r.get("code", 1))
+  guard_note({kind: "run-url", command: url, cwd: tilde(fs.cwd()), risk: risk, outcome: outcome, run: cig.run_id(), exit: code, thing: sha})
+  if code != 0 {
+    exit(pick(code < 0, 1, code))
+  }
+}
+
+# ----- a guarded call: what a shim hands over ----------------------------------------
+#
+# `cigo guard exec --real=<program> <tool> -- <arguments>`: the call a shim
+# could not let through. It is a cigo task made on the spot (the tool's
+# toolchain, its setup stage, the folder it was called in as the pack) and
+# goes the same way: your blacklist and OSV for what it names, the static
+# read, then, where cig can make a contained box, the rehearsal, whose
+# writes in the folder are applied as they are once its verdict allows (no
+# second run); an install into your home is run for real after a clean
+# rehearsal, since the box never hands back what lands there. Its output
+# shows as it runs (cig 1.13.0's stream). The run is a cig run like any
+# other: `cigo undo last` (or `cig unburn <run>`) undoes what it changed in
+# the folder.
+
+# The words of a call after its subcommand (two words for `uv pip
+# install`), flags left out: what it names.
+pull guard_words_after(tool, words) {
+  stick two = GUARD_COMMANDS[tool].get("two", {})
+  stick plain = words.filter(pack(w) => not w.starts_with("-"))
+  if plain.is_empty() {
+    snuff []
+  }
+  stick skip = pick(two.has(plain.first()), 2, 1)
+  if plain.len() <= skip {
+    snuff []
+  }
+  snuff plain.slice(skip)
+}
+
+# Is a word a path here rather than a name (`-e .`, `-r requirements.txt`)?
+pull local_word(w) {
+  snuff w.starts_with(".") or w.starts_with("/") or w.starts_with("~") or fs.exists(w)
+}
+
+# The packages a call names (`npm install a b@2`), each as cigo rehearse
+# writes one (`npm:a`, `pypi:b==2`), for the blacklist and OSV.
+pull guard_packages(tool, words) {
+  stick spec = GUARD_COMMANDS[tool]
+  stick eco = spec.get("eco", "")
+  if not ["npm", "pypi", "crates"].contains(eco) {
+    snuff []
+  }
+  roll named = guard_words_after(tool, words)
+  if spec.get("all", false) {
+    named = words.filter(pack(w) => not w.starts_with("-")).slice(0, 1)
+  }
+  roll out = []
+  for n in named {
+    if local_word(n) or n.contains("://") or not text.matches(n, '^[A-Za-z0-9@/._~^=<>*+!-]+$') {
+      continue
+    }
+    out.push(eco + ":" + n)
+  }
+  snuff out
+}
+
+# The guard's lines for a guarded call go to stderr: what the call prints on
+# stdout may be read by a pipe (npx tool | jq).
+pull guard_say_verdict(name, v) {
+  if v.findings.is_empty() {
+    snuff
+  }
+  stick top = top_finding(v.findings)
+  log.warn("cigo: `${name}` is rated ${v.risk} by the guard; " + headline(top))
+  for f in v.findings.slice(0, 12) {
+    log.warn("  ${f.code}  ${f.cat}  ${f.where}: ${f.text}")
+    log.warn("        ${f.says}")
+  }
+  if v.findings.len() > 12 {
+    log.warn("  and ${v.findings.len() - 12} more")
+  }
+}
+
+# Go, or not: the same friction as a task. Nothing of the call is applied
+# before its verdict (the rehearsal's layer is held for it), so a refusal
+# drops the layer and exits with the risk: 1 medium, 2 high, 3 critical.
+pull guard_settle(cmdline, cwd, risk, layer) {
+  if risk == "none" or risk == "low" or config().security == "report" {
+    snuff
+  }
+  roll why = ""
+  if risk == "critical" {
+    if attended() and env.get("CIGO_RUN_UNTRUSTED", "") == "1" {
+      log.warn("running `${cmdline}` although it is rated critical (CIGO_RUN_UNTRUSTED=1)")
+      snuff
+    }
+    why = "`${cmdline}` is refused: rated critical by the guard, and nothing of it was applied. At a terminal, CIGO_RUN_UNTRUSTED=1 ${cmdline} runs it anyway"
+  } else if attended() {
+    if env.get("CIGO_ACCEPT_RISK", "") == "1" {
+      snuff
+    }
+    why = "`${cmdline}` is held: rated ${risk} by the guard, and nothing of it was applied. CIGO_ACCEPT_RISK=1 ${cmdline} runs it"
+  } else if config().security == "strict" and risk == "high" {
+    why = "`${cmdline}` is rated high by the guard and security = strict, unattended; nothing of it was applied"
+  } else {
+    log.warn("`${cmdline}` is rated ${risk} by the guard; it runs (security = ${config().security}, unattended)")
+    snuff
+  }
+  discard_quietly(layer)
+  guard_note({kind: "guarded", command: cmdline, cwd: tilde(cwd), risk: risk, outcome: pick(why.contains(" is held"), "held", "refused")})
+  log.error(why)
+  exit(RISK_EXIT.get(risk, 1))
+}
+
+pull discard_quietly(layer) {
+  if layer == null {
+    snuff
+  }
+  burn {
+    try {
+      proc.discard_layer(layer)
+    } ashtray e {
+    }
+  }
+}
+
+pull do_guard_exec() {
+  stick real = str(guard_flag("--real") ?? "")
+  stick tool = targets.get(1, "")
+  if tool == "" or not GUARD_COMMANDS.has(tool) {
+    fail("cigo guard exec --real=<program> <tool> -- <arguments> (called by the guard's shims)")
+  }
+  if real == "" or not path.is_abs(real) or not fs.is_file(real) {
+    fail("cigo guard exec: --real names no program (${real})")
+  }
+  stick spec = GUARD_COMMANDS[tool]
+  stick words = extra
+  stick cmdline = ([tool] + words.map(pack(w) => redact_word(w))).join(" ")
+  stick cwd = fs.cwd()
+  stick br = guard_break()
+  stick checking = br == null and guard_on()
+  if br != null {
+    log.warn(br.said)
+  }
+  # The task this call is: its toolchain's setup stage, in this folder.
+  stick name = "guard:" + tool
+  roll t = {toolchain: spec.tc, stage: spec.get("stage", "setup"), cmd: [real] + words, cwd: "."}
+  stick sub = words.filter(pack(w) => not w.starts_with("-")).get(0, "")
+  stick once = as_list(spec.get("once", [])).contains("*") or as_list(spec.get("once", [])).contains(sub)
+  roll global = words.any(pack(w) => as_list(spec.get("global", [])).contains(w))
+  if (tool == "pip" or tool == "pip3") and env.get("VIRTUAL_ENV", "") == "" and not words.any(pack(w) => ["--target", "-t", "--prefix", "--root"].contains(w)) {
+    # Outside a virtual environment pip installs into your home (or is
+    # refused by an externally managed Python): either way, not this folder.
+    global = true
+  }
+  # What the call names, for your blacklist and, at exact versions, OSV.
+  stick named = guard_packages(tool, words)
+  roll pkgs = []
+  for s in named {
+    stick want = blacklist_parse(s)
+    if want != null and want.kind == "package" and text.matches(want.version, EXACT_VERSION) {
+      pkgs.push(pkg(want.eco, want.name, want.version, "the command line"))
+    }
+  }
+  t.packages = pkgs
+  roll findings = []
+  roll v0 = {risk: "none", findings: [], hooks: []}
+  if checking {
+    for s in named {
+      findings = findings + blacklist_for_spec(s)
+    }
+    v0 = read_task(t, name)
+    findings = findings + v0.findings
+  }
+  roll risk = risk_of(findings)
+  if not findings.is_empty() {
+    guard_say_verdict(cmdline, {risk: risk, findings: findings})
+  }
+  if checking and risk == "critical" {
+    guard_settle(cmdline, cwd, risk, null)
+  }
+  # Approved as it is (a lockfile's install, nothing named on the line):
+  # straight through. A call that names packages, runs one, or installs into
+  # your home is judged every time; its verdicts are not kept as approvals.
+  stick approvable = guard_words_after(tool, words).filter(pack(w) => not local_word(w)).is_empty() and not once and not global
+  roll tr = {trusted: false, key: ""}
+  if checking and approvable {
+    tr = trusted(t, name)
+  }
+  stick rehearse = checking and not tr.trusted and should_rehearse(t, {risk: risk, findings: findings}, {})
+  roll second = true
+  roll outcome = pick(tr.trusted, "trusted, ran", "ran")
+  if rehearse {
+    roll fp0 = footprint_of(t) ?? {writes: [], reads: [], network: [], execs: [], registry_env: []}
+    if t.stage != "setup" {
+      # A build fetches what setup would: its registries and its caches too.
+      stick su = footprint_of(t.merge({stage: "setup"}))
+      if su != null {
+        fp0 = fp0.merge({writes: fp0.writes + su.writes, network: fp0.network + su.network, registry_env: fp0.registry_env + su.registry_env})
+      }
+    }
+    roll expect = []
+    for w in fp0.writes {
+      expect.push(pick(w.starts_with("~/"), w, touch_under(".", w)))
+    }
+    if global {
+      expect = expect + as_list(spec.get("home", []))
+    }
+    roll allow = []
+    for h in fp0.network + registry_hosts(fp0, {}) {
+      if not allow.contains(h) {
+        allow.push(h)
+      }
+    }
+    log.info("cigo: `${cmdline}` is rehearsed in the box first: its writes judged against the ${spec.tc} footprint, its network the registries")
+    roll r = null
+    burn {
+      try {
+        r = proc.run(real, words, {box: {network: pick(allow.is_empty(), "off", "registry"), allow_hosts: allow, contain: true, apply: "never", quiet: true, expect: expect}, timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}})
+      } ashtray e {
+        r = e
+      }
+    }
+    stick layer = r.get("layer", null)
+    stick refused_hosts = as_list(r.get("refused", []))
+    stick behaviour = behaviour_findings(r.get("outside", []), refused_hosts)
+    findings = findings + behaviour
+    risk = risk_of(findings)
+    if not behaviour.is_empty() {
+      guard_say_verdict(cmdline, {risk: risk, findings: findings})
+    }
+    guard_settle(cmdline, cwd, risk, layer)
+    stick exitc = r.get("code", null)
+    stick ok = exitc == 0
+    if not ok and refused_hosts.is_empty() {
+      # It failed by itself, with nothing refused: the real run would fail
+      # the same way. Its output was shown as it ran.
+      discard_quietly(layer)
+      guard_note({kind: "guarded", command: cmdline, cwd: tilde(cwd), risk: risk, outcome: "failed in the rehearsal", exit: exitc})
+      log.error("`${cmdline}` failed in the rehearsal (" + pick(type_of(exitc) == "int", "exit ${exitc}", clip(str(r.get("message", "")), 200)) + "); nothing of it was applied")
+      exit(pick(type_of(exitc) == "int" and exitc > 0, exitc, 1))
+    }
+    if ok {
+      if layer != null {
+        # What it wrote in this folder goes in as it was, journaled, so
+        # cig unburn takes it out again (what it wrote in your home stays
+        # in the box).
+        roll done = null
+        burn {
+          done = proc.apply_layer(layer)
+        }
+        log.info("cigo: rehearsed: " + pick(risk == "none", "nothing outside its footprint", "rated ${risk}") + "; applied what it wrote here (${done.get("written", 0)} written, ${done.get("removed", 0)} removed)")
+      }
+      if global {
+        log.info("cigo: the rehearsal allows it; installing for real (the box never hands back what lands in your home)")
+      } else {
+        # The rehearsal was the run: what it wrote in this folder went in
+        # as it was, journaled, so cig unburn takes it out again.
+        second = false
+        outcome = "rehearsed and applied"
+        if approvable and (risk == "none" or risk == "low") {
+          approve(t, name, {risk: risk, findings: findings})
+        }
+      }
+    } else {
+      discard_quietly(layer)
+      log.info("cigo: it reached for hosts the rehearsal does not open; running it for real, as allowed")
+    }
+    if second {
+      outcome = "rehearsed, then ran"
+    }
+  }
+  roll code = 0
+  if second {
+    # The manifests and lockfiles it may change are kept in the tin first,
+    # so undo puts them back wherever it ran: in the box on Linux, or on
+    # the tin where the box cannot be had (root, no user namespaces).
+    roll opts = {timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}, touches: (LOCKFILES + GUARD_MANIFESTS).map(pack(f) => "?" + f)}
+    if cig.os() == "linux" and br == null {
+      opts.box = true
+    }
+    roll r = null
+    burn {
+      try {
+        r = proc.run(real, words, opts)
+      } ashtray e {
+        log.error(e.message)
+        r = {code: 1}
+      }
+    }
+    code = int(r.get("code", 1))
+    if code == 0 and checking and approvable and not tr.trusted and not rehearse and (risk == "none" or risk == "low") {
+      approve(t, name, {risk: risk, findings: findings})
+    }
+  }
+  guard_note({kind: "guarded", command: cmdline, cwd: tilde(cwd), risk: risk, outcome: outcome, run: cig.run_id(), exit: code})
+  if code != 0 {
+    exit(pick(code < 0, 1, code))
+  }
+}
+
+# `cigo undo last`: the newest guarded call that ran, taken back through
+# cig unburn (what it changed in its folder; an install into your home was
+# not in the folder).
+pull do_undo() {
+  expect_flags([])
+  if targets.get(0, "") != "last" {
+    fail("cigo undo last: undo the newest guarded call (cig unburn <run> undoes any run)")
+  }
+  stick all = guard_events(0)
+  stick undone = all.filter(pack(e) => e.get("kind", "") == "undo").map(pack(e) => str(e.get("thing", "")))
+  stick evs = all.filter(pack(e) => e.get("kind", "") == "guarded" and e.get("run", null) != null and not undone.contains(str(e.get("run", ""))))
+  if evs.is_empty() {
+    fail("nothing guarded is left to undo (cig runs lists every run; cig unburn <run> undoes one)")
+  }
+  stick ev = evs.last()
+  exhale "undoing: ${ev.get("command", "")} in ${ev.get("cwd", "")} (run ${ev.run})"
+  roll r = null
+  burn {
+    r = proc.run("cig", ["unburn", str(ev.run)], {timeout_ms: 600000, stream: true})
+  }
+  if r.code != 0 {
+    exit(r.code)
+  }
+  guard_note({kind: "undo", thing: str(ev.run)})
+}
+
+# doctor's guard block: the level, whether each piece is in place, and the
+# one command that fixes what is not.
+pull doctor_guard() {
+  stick level = config().guard_scope
+  stick st = guard_state()
+  exhale "guard: level ${guard_level_number(level)} (${level})"
+  roll broken = 0
+  if guard_level_number(level) >= 2 {
+    stick tools = guard_tools()
+    stick missing = tools.filter(pack(t) => not fs.is_file(path.join(SHIMS_DIR, t)) or fs.read_text(path.join(SHIMS_DIR, t)) != shim_text(t))
+    if missing.is_empty() {
+      exhale "    shims    ${tools.len()} in ${tilde(SHIMS_DIR)}"
+    } else {
+      broken += 1
+      exhale "    shims    missing or out of date: ${missing.join(" ")}; cigo guard scope dev --yes writes them"
+    }
+    stick blocks = profile_targets().filter(pack(p) => has_block(p.file))
+    if blocks.is_empty() {
+      broken += 1
+      exhale "    PATH     no startup file puts the shims first; cigo guard scope dev --yes adds the block"
+    } else {
+      exhale "    PATH     " + blocks.map(pack(p) => tilde(p.file)).join(", ")
+    }
+    exhale "    here     " + pick(shims_first(), "the shims come first on this PATH", "not first on this PATH: open a new shell, or move the cigo block below anything else that changes PATH")
+  } else if st.get("asked", null) == null {
+    exhale "    cigo guard setup asks how much more of this machine to guard"
+  }
+  stick br = guard_break()
+  if br != null {
+    exhale "    " + pick(br.off, "off: cigo guard on", "paused until ${local_clock(br.until)}")
+  }
+  snuff broken
 }
 
 # A runtime error on purpose, for the suite: proves the crash path end to end.
@@ -9906,6 +11291,12 @@ pull dispatch() {
     do_rehearse()
   } else if command == "blacklist" {
     do_blacklist()
+  } else if command == "guard" {
+    do_guard()
+  } else if command == "undo" {
+    do_undo()
+  } else if command == "run-url" {
+    do_run_url()
   } else if command == "adopt" {
     do_adopt()
   } else if command == "outputs" {

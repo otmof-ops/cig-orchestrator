@@ -21,7 +21,7 @@ tool="$(CDPATH='' cd -- "$(dirname -- "$self")/.." && pwd)/orchestrate.cig"
 # The cig this cigo is written for: the same floor as the `# cig` pin in the
 # tool, checked here for cigs too old to read the pin themselves.
 needs_major=1
-needs_minor=12
+needs_minor=13
 needs_patch=0
 
 if ! command -v cig >/dev/null 2>&1; then
@@ -79,7 +79,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "${1:-help}" in
-  adopt|help|version|toolchains|update|crash|config|blacklist|--help|-h|--version) ;;
+  adopt|help|version|toolchains|update|crash|config|blacklist|guard|undo|run-url|--help|-h|--version) ;;
   *)
     dir=$PWD
     # Up to the root, or until dirname stops changing (// on MSYS stays //).

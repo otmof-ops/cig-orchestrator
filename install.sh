@@ -37,7 +37,7 @@ if ! command -v cig >/dev/null 2>&1; then
 fi
 # The same floor as the launcher and the tool's `# cig` pin.
 needs_major=1
-needs_minor=12
+needs_minor=13
 needs_patch=0
 version=$(cig --version 2>/dev/null | awk '{print $2}')
 case "$version" in
@@ -83,3 +83,20 @@ case ":$PATH:" in
     echo "note: $bin is not on PATH; add this line to $rc and open a new shell:"
     echo "  $line" ;;
 esac
+# The guard's one question (cig-orchestrator #57), asked once: how much of
+# this machine the guard covers. An installer run through a pipe cannot wait
+# at a prompt, so it prints the question and the command that answers it;
+# unattended it says the level in one line, and an update (cigo update sets
+# CIGO_NO_QUESTION) or a machine that has answered says nothing.
+guard_home=${CIGO_HOME:-$HOME/.cig-orchestrator}
+if [ -z "${CIGO_NO_QUESTION:-}" ] && [ ! -f "$guard_home/guard/state.json" ]; then
+  if [ -t 1 ] && [ -z "${CI:-}" ]; then
+    echo ""
+    echo "one question, once: how much should cigo guard on this machine?"
+    echo "  [1] just cigo runs                    what it does now"
+    echo "  [2] + package managers and scripts    npm, pip, cargo, go, gem, npx, uvx ... go through the guard anywhere   (recommended)"
+    echo "  answer with: $name guard scope <1-2>  (it shows what it would change first; --yes makes the change)"
+  else
+    echo "guard: level 1 (just cigo runs); $name guard setup asks how much more to guard"
+  fi
+fi
