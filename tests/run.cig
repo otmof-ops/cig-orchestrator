@@ -3787,6 +3787,28 @@ test("agent: scope agents --agents=claude-code adds the hook to Claude Code's se
   assert(read(h, "real-settings.json") == "{\"model\": \"linked\"}\n", "a linked settings file was rewritten")
 })
 
+test("guard: called from the home folder itself, cigo runs from its own empty folder, and a guarded call still runs where it was made, without an undo", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  burn {
+    fs.write_text(path.join(h, "package.json"), "{\"name\": \"home\", \"version\": \"1.0.0\"}\n")
+  }
+  # Through the launcher, as a person would, from the home itself.
+  stick st = hop_env(h, "sh", [launcher, "guard", "log"], guard_env(dir, NOT_AN_AGENT))
+  exits(st, 0)
+  assert(fs.is_dir(path.join(h, ".cig-orchestrator", "here")), "the launcher did not move to its own folder")
+  stick r = hop_env(h, "sh", [launcher, "guard", "exec", "--real=" + dir + "-bin/npm", "npm", "--", "install"], guard_env(dir, NOT_AN_AGENT))
+  exits(r, 0)
+  says(r.out, "stub npm: installing")
+  says(r.err, "no undo for what it changes there")
+  says(read(h, "package-lock.json"), "after")
+  # What it wrote there is named (it cannot be undone), and nothing else.
+  says(r.err, "wrote outside the pack: 1 path (" + path.join(h, "package-lock.json") + ")")
+})
+
 # ----- the end --------------------------------------------------------------
 
 # A contained hop's scratch folder lives outside the project (in /var/tmp),
