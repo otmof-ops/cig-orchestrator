@@ -11157,13 +11157,12 @@ pull do_guard_exec() {
   }
   roll code = 0
   if second {
-    roll opts = {timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}}
+    # The manifests and lockfiles it may change are kept in the tin first,
+    # so undo puts them back wherever it ran: in the box on Linux, or on
+    # the tin where the box cannot be had (root, no user namespaces).
+    roll opts = {timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}, touches: (LOCKFILES + GUARD_MANIFESTS).map(pack(f) => "?" + f)}
     if cig.os() == "linux" and br == null {
       opts.box = true
-    } else {
-      # No box here: the manifests and lockfiles it would change are kept
-      # in the tin first, so undo puts them back.
-      opts.touches = (LOCKFILES + GUARD_MANIFESTS).map(pack(f) => "?" + f)
     }
     roll r = null
     burn {
