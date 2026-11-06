@@ -3900,6 +3900,54 @@ test("holes: an agent's write to a startup file waits for a person, and lands on
   says(read(h, ".bashrc"), "export HELD=1")
 })
 
+test("holes: the agent's box opens the task's network: a host outside it is refused, the run waits, and the approval carries that host, once", pack() {
+  if on_windows or not rehearsal_here() or not has_tin_mac() or not which_here("script") or not which_here("python3") or not which_here("curl") {
+    snuff
+  }
+  stick dir = guard_setup()
+  exits(agent_cmd(dir, ["config", "agent_approval", "tty"], {}), 0)
+  stick srv = serve(dir)
+  roll failed_with = null
+  try {
+    # A name, and a file that is not a script: the read lets it run, and the
+    # box is what refuses the host.
+    stick port = srv.base.split(":").last()
+    stick line = "curl -sfp --max-time 10 http://localhost:" + port + "/port.txt -o got.txt"
+    stick w = agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s10", "--", line], {})
+    if no_box_here(w) {
+      stop(srv)
+      snuff
+    }
+    exits(w, 2)
+    says(w.err, "E894")
+    says(w.err, "it reached for localhost:" + port)
+    assert(not there(dir, "got.txt"), "a refused fetch reached the project")
+    stick id = text.captures(w.err, 'cigo approve ([0-9a-f]+)')[1]
+    stick darwin = hop(dir, "uname", ["-s"]).out.trim() == "Darwin"
+    stick approve_line = sh_quote_t(launcher) + " approve " + id
+    roll run = "script -qfec " + sh_quote_t(approve_line) + " /dev/null"
+    if darwin {
+      run = "script -q /dev/null " + approve_line
+    }
+    says(hop_env(dir, "sh", ["-c", run], guard_env(dir, NOT_AN_AGENT)).out, "approved once")
+    # The same command again: the approval opens the host it named.
+    exits(agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s10", "--", line], {}), 0)
+    assert(read(dir, "got.txt").trim() == port, "the approved fetch did not land")
+    # Used up: the box refuses the host again.
+    burn {
+      fs.rm(path.join(dir, "got.txt"))
+    }
+    exits(agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s10", "--", line], {}), 2)
+    assert(not there(dir, "got.txt"), "a used-up approval opened the host again")
+  } ashtray e {
+    failed_with = e
+  }
+  stop(srv)
+  if failed_with != null {
+    cough failed_with
+  }
+})
+
 test("holes: a raw-address fetch-and-run is critical in a task's audit and in an agent's command alike", pack() {
   if on_windows {
     snuff
