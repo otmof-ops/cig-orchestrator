@@ -15,7 +15,7 @@ the project.
 **`cigo: cig is not on PATH`** (exit 127)
 
 The launcher needs the CigScript runtime. [Install
-CigScript](https://github.com/otmof-ops/CigScript#install), then check
+CigScript](https://github.com/otmof-ops/cig-script#install), then check
 `cig --version`.
 
 **`` `uv` is not on PATH, so python-uv tasks cannot run here ``**, a warning from `cigo check`

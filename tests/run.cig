@@ -453,7 +453,7 @@ test("arguments after -- reach the last task named, quoted for a shell", pack() 
   exits(r, 0)
   if on_windows {
     # Git's bash is an MSYS program: started by a native one, it parses its
-    # own command line and drops a bare apostrophe (otmof-ops/CigScript#63).
+    # own command line and drops a bare apostrophe (otmof-ops/cig-script#63).
     # The shell line below still carries it, through sh.
     says(r.out, "[a]\n    [b c]\n")
   } else {

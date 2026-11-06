@@ -4,11 +4,11 @@
 
 <p align="center">
   <b>Every language in the project, one chain, no glue script.</b><br>
-  <i>A tool from the maker of <a href="https://github.com/otmof-ops/CigScript">CigScript</a>, so you can start using it without starting over.</i>
+  <i>A tool from the maker of <a href="https://github.com/otmof-ops/cig-script">CigScript</a>, so you can start using it without starting over.</i>
 </p>
 
 <p align="center">
-  <a href="https://github.com/otmof-ops/CigScript"><img alt="a CigScript tool" src="https://img.shields.io/badge/a-CigScript%20tool-f97316"></a>
+  <a href="https://github.com/otmof-ops/cig-script"><img alt="a CigScript tool" src="https://img.shields.io/badge/a-CigScript%20tool-f97316"></a>
   <img alt="needs cig 1.14.0 or newer" src="https://img.shields.io/badge/needs-cig%201.14.0%2B-6b7280">
   <a href="TOOLCHAINS.md"><img alt="60 toolchains" src="https://img.shields.io/badge/toolchains-60-6b7280"></a>
   <a href="docs/roadmap.md"><img alt="actively maintained" src="https://img.shields.io/badge/status-actively%20maintained-f97316"></a>
@@ -155,7 +155,7 @@ your sanity.
 | have cigo know a language or tool it doesn't | [a toolchain request](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=toolchain-request.yml) |
 | get something your other tool does better | [a quality-of-life request](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=qol-request.yml) |
 | report something that went wrong | [a bug report](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=bug-report.yml) |
-| report a problem in the language itself | [CigScript's issues](https://github.com/otmof-ops/CigScript/issues) |
+| report a problem in the language itself | [CigScript's issues](https://github.com/otmof-ops/cig-script/issues) |
 | report a security problem | [SECURITY.md](SECURITY.md), never a public issue |
 | send a fix or a toolchain | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
@@ -163,7 +163,7 @@ your sanity.
 
 ## Install
 
-Needs `cig` 1.14.0 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/CigScript#install)).
+Needs `cig` 1.14.0 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/cig-script#install)).
 
 ```sh
 tag=v1.9.0
@@ -227,7 +227,7 @@ cigo is written in CigScript, one file (`orchestrate.cig`), and it uses the
 language the way you would: each command is a hop, the tasks are a chain
 built at run time, the project is the pack, and a task's undo is a
 compensation. CigScript itself, the lexicon, and the rules the kernel keeps
-are at [otmof-ops/CigScript](https://github.com/otmof-ops/CigScript).
+are at [otmof-ops/cig-script](https://github.com/otmof-ops/cig-script).
 
 ## Licensing
 
@@ -249,7 +249,7 @@ are at [otmof-ops/CigScript](https://github.com/otmof-ops/CigScript).
   any rights in your manifest, your scripts or what your tools build.
 
 `cig` is installed separately and is not part of this repository; its own
-licensing is at [otmof-ops/CigScript](https://github.com/otmof-ops/CigScript#licensing).
+licensing is at [otmof-ops/cig-script](https://github.com/otmof-ops/cig-script#licensing).
 [REUSE.toml](REUSE.toml) maps every path to its license. Contributions are
 accepted under the same terms; see [CONTRIBUTING.md](CONTRIBUTING.md).
 Security reports: [SECURITY.md](SECURITY.md).

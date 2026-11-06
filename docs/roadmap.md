@@ -48,7 +48,7 @@ people ask for.
 ## What cigo needs from CigScript
 
 From [FINDINGS.md](../FINDINGS.md). These are changes to the language, and
-they land in [CigScript](https://github.com/otmof-ops/CigScript) with its
+they land in [CigScript](https://github.com/otmof-ops/cig-script) with its
 own tests.
 
 Landed in cig 1.2.0, and used by cigo 0.3.0: directories a task creates

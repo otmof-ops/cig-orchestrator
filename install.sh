@@ -32,7 +32,7 @@ share=$prefix/share/cig-orchestrator
 bin=$prefix/bin
 
 if ! command -v cig >/dev/null 2>&1; then
-  echo "install: cig is not on PATH. Install CigScript first: https://github.com/otmof-ops/CigScript#install" >&2
+  echo "install: cig is not on PATH. Install CigScript first: https://github.com/otmof-ops/cig-script#install" >&2
   exit 1
 fi
 # The same floor as the launcher and the tool's `# cig` pin.

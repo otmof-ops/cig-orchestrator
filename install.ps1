@@ -27,7 +27,7 @@ $bin = Join-Path $Prefix 'bin'
 
 if (-not (Get-Command cig -ErrorAction SilentlyContinue)) {
     [Console]::Error.WriteLine('install: cig is not on PATH. Install CigScript first:')
-    [Console]::Error.WriteLine('  irm https://raw.githubusercontent.com/otmof-ops/CigScript/v1.14.0/install.ps1 | iex')
+    [Console]::Error.WriteLine('  irm https://raw.githubusercontent.com/otmof-ops/cig-script/v1.14.0/install.ps1 | iex')
     exit 1
 }
 

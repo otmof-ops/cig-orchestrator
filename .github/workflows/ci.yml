@@ -42,7 +42,7 @@ jobs:
       - name: Install cig
         run: |
           mkdir -p "$HOME/.local/bin" && cd "$RUNNER_TEMP"
-          base="https://github.com/otmof-ops/CigScript/releases/download/$CIG_VERSION"
+          base="https://github.com/otmof-ops/cig-script/releases/download/$CIG_VERSION"
           name="cig-$CIG_VERSION-${{ matrix.asset }}${{ matrix.ext }}"
           curl -fsSLO "$base/$name"
           curl -fsSLO "$base/$name.sha256"
@@ -101,7 +101,7 @@ jobs:
           node-version: 20
       - name: Install cig 1.15.0, the runtime
         run: |
-          base="https://github.com/otmof-ops/CigScript/releases/download/$CIG_RUNTIME_VERSION"
+          base="https://github.com/otmof-ops/cig-script/releases/download/$CIG_RUNTIME_VERSION"
           curl -fsSLO "$base/cig-$CIG_RUNTIME_VERSION-linux-x86_64"
           curl -fsSLO "$base/cig-$CIG_RUNTIME_VERSION-linux-x86_64.sha256"
           sha256sum -c "cig-$CIG_RUNTIME_VERSION-linux-x86_64.sha256"
@@ -130,7 +130,7 @@ jobs:
       - name: Install cig
         run: |
           mkdir -p /usr/local/bin && cd /tmp
-          base="https://github.com/otmof-ops/CigScript/releases/download/$CIG_VERSION"
+          base="https://github.com/otmof-ops/cig-script/releases/download/$CIG_VERSION"
           curl -fsSLO "$base/cig-$CIG_VERSION-linux-x86_64"
           curl -fsSLO "$base/cig-$CIG_VERSION-linux-x86_64.sha256"
           sha256sum -c "cig-$CIG_VERSION-linux-x86_64.sha256"
@@ -152,7 +152,7 @@ jobs:
         env:
           CIG_NO_MODIFY_PATH: '1'
         run: |
-          irm https://raw.githubusercontent.com/otmof-ops/CigScript/main/install.ps1 | iex
+          irm https://raw.githubusercontent.com/otmof-ops/cig-script/main/install.ps1 | iex
           $env:Path = "$env:LOCALAPPDATA\Programs\cig;$env:Path"
           .\install.ps1
           echo "$env:LOCALAPPDATA\Programs\cig;$env:LOCALAPPDATA\cig-orchestrator\bin" >> $env:GITHUB_PATH

@@ -2,7 +2,7 @@
 
 cigo is one CigScript file, `orchestrate.cig`, and it uses the language the
 way any script would. If you know CigScript's
-[lexicon](https://github.com/otmof-ops/CigScript/blob/main/docs/LEXICON.md),
+[lexicon](https://github.com/otmof-ops/cig-script/blob/main/docs/LEXICON.md),
 the whole tool reads as ordinary code; if you don't, this page is the map.
 
 ## The shape of a run
