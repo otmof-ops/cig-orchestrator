@@ -3424,6 +3424,31 @@ pull through_shim(dir, words, more) {
   snuff hop_env(dir, "sh", [path.join(shims_of(dir), "npm")] + words, guard_env(dir, {PATH: p, GUARD_MARK: dir + "-mark"}).merge(more))
 }
 
+test("guard_shells: only the shells it names get the block, and one it leaves out loses its block", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  exits(guard_cmd(dir, ["config", "guard_shells", "sh"], {}), 0)
+  exits(guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {}), 0)
+  says(read(h, ".profile"), "# <<< cigo guard <<<")
+  assert(read(h, ".bashrc") == GUARD_BASHRC, "the bashrc got a block guard_shells did not name:\n" + read(h, ".bashrc"))
+  exits(guard_cmd(dir, ["config", "guard_shells", "bash"], {}), 0)
+  stick moved = guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {})
+  exits(moved, 0)
+  says(read(h, ".bashrc"), "# <<< cigo guard <<<")
+  assert(read(h, ".profile") == GUARD_PROFILE, "the profile kept its block:\n" + read(h, ".profile"))
+  # A named shell with no startup file of its own gets its usual one.
+  exits(guard_cmd(dir, ["config", "guard_shells", "bash,zsh"], {}), 0)
+  exits(guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {}), 0)
+  says(read(h, ".zshrc"), "# <<< cigo guard <<<")
+  exits(guard_cmd(dir, ["config", "guard_shells", "csh"], {}), 0)
+  stick bad = guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {})
+  exits(bad, 2)
+  says(bad.err, "guard_shells names `csh`")
+})
+
 test("guard: scope dev shows what it would change and writes nothing without --yes; --yes writes the shims and one marked block", pack() {
   if on_windows {
     snuff
@@ -3733,6 +3758,51 @@ test("guard: run-url rehearses a script, runs a clean one for real, holds one th
     stick refused = guard_cmd(dir, ["run-url", srv.base + "/bad/x.sh"], l)
     exits(refused, 3)
     says(refused.err, "not fetched")
+  } ashtray e {
+    failed_with = e
+  }
+  stop(srv)
+  if failed_with != null {
+    cough failed_with
+  }
+})
+
+test("guard allow <file|sha256>: run-url runs those bytes without a rehearsal; a forged allowance counts for nothing", pack() {
+  if on_windows or not which_here("python3") or not has_tin_mac() {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick srv = serve(dir)
+  stick www = dir + "-www"
+  roll failed_with = null
+  try {
+    stick a = guard_cmd(dir, ["guard", "allow", path.join(www, "clean.sh")], {})
+    exits(a, 0)
+    says(a.out, "is allowed (sha256 ")
+    stick ok = guard_cmd(dir, ["run-url", srv.base + "/clean.sh", "--", "you"], {CIGO_REHEARSE: "auto"})
+    exits(ok, 0)
+    says(ok.out + ok.err, "these bytes are allowed")
+    never_says(ok.out, "rehearsing")
+    says(ok.out, "installing for you")
+    says(guard_cmd(dir, ["guard", "log"], {}).out, "allowed, then ran")
+    # By its sha256 too; anything else is refused.
+    stick sha = hash.sha256_file(path.join(www, "clean.sh"))
+    says(guard_cmd(dir, ["guard", "allow", sha.upper()], {}).out, "sha256 " + sha.slice(0, 12))
+    stick odd = guard_cmd(dir, ["guard", "allow", "not-a-thing"], {})
+    exits(odd, 2)
+    says(odd.err, "a file or a sha256")
+    # An allowance written by hand, not signed: ignored, so the bytes are
+    # rehearsed (or, with no box here, not run at all).
+    stick sneaky = hash.sha256_file(path.join(www, "sneaky.sh"))
+    stick ad = path.join(guard_home(dir), ".cig-orchestrator", "allowed")
+    burn {
+      fs.write_text(path.join(ad, sneaky + ".json"), "{}\n")
+      fs.write_text(path.join(ad, sneaky + ".mac"), "00\n")
+    }
+    stick forged = guard_cmd(dir, ["run-url", srv.base + "/sneaky.sh"], {CIGO_REHEARSE: "auto"})
+    says(forged.err, "not signed by your key")
+    never_says(forged.out + forged.err, "these bytes are allowed")
+    assert(not there(dir, "sneaky-ran.txt"), "a forged allowance ran the script")
   } ashtray e {
     failed_with = e
   }
