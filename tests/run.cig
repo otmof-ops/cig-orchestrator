@@ -1431,7 +1431,7 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
   }
   stick old = launch_env(dir, launcher, ["version"], {PATH: fake + path_sep + env.get("PATH", "")})
   exits(old, 2)
-  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.16.0 or newer")
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.16.1 or newer")
   stick j = json.parse(launch(dir, launcher, ["version", "--json"]).out)
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
 })
