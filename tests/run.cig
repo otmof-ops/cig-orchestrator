@@ -2739,6 +2739,33 @@ test("a hidden folder from the home packed up, then the network, is high", pack(
   assert(v.risk == "high" and v.findings.any(pack(f) => f.rule == "exfil-dotpack"), "${json.stringify(v)}")
 })
 
+test("a script that checks for a sandbox, or waits it out, is read (E888)", pack() {
+  stick dir = fresh("tests/fixtures/guard-evasion")
+  stick v = audit_of(dir, "probe")
+  assert(has_finding(v, "E888", "probe.sh"), "the probe was not read: ${json.stringify(v.findings)}")
+  assert(v.findings.any(pack(f) => f.rule == "evade-container"), "the container check was missed")
+  assert(v.findings.any(pack(f) => f.rule == "evade-sleep"), "the long wait was missed")
+  assert(v.risk == "medium", "rated ${v.risk}")
+})
+
+test("chat templates, a data-leaking image and look-alike letters are read (E886, E887)", pack() {
+  stick dir = fresh("tests/fixtures/guard-evasion")
+  stick v = audit_of(dir, "pi")
+  for rule in ["pi-template", "pi-image", "pi-homoglyph"] {
+    assert(v.findings.any(pack(f) => f.rule == rule), "${rule} was missed: ${json.stringify(v.findings)}")
+  }
+  assert(has_finding(v, "E886", "pi.sh") and has_finding(v, "E887", "pi.sh"), "the codes were not given")
+})
+
+test("a wiper and a step that asks for root are read (E877, E878)", pack() {
+  stick dir = fresh("tests/fixtures/guard-evasion")
+  stick w = audit_of(dir, "wiper")
+  assert(has_finding(w, "E877", "wiper.sh"), "the wiper was missed: ${json.stringify(w.findings)}")
+  assert(w.risk == "high", "the wiper is ${w.risk}")
+  stick p = audit_of(dir, "priv")
+  assert(has_finding(p, "E878", "priv.sh"), "the set-id chmod was missed: ${json.stringify(p.findings)}")
+})
+
 test("base64 payloads are decoded and read, with both places named", pack() {
   stick dir = fresh("tests/fixtures/guard-evasion")
   stick v = audit_of(dir, "b64")
@@ -2832,6 +2859,19 @@ test("the rehearsal holds what a stage did beyond its footprint; --accept-risk=<
   says(ok.out, "what it did is applied")
   assert(there(dir, ".git/hooks/pre-commit"), "--accept-risk did not apply the rehearsal")
   assert(there(dir, "made.txt"), "--accept-risk did not apply the rehearsal")
+})
+
+test("a rehearsal names a write outside the footprint, and keeps it in the box (E880)", pack() {
+  if not rehearsal_here() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick r = guard_tool(dir, ["rehearse", "./outside.sh"], {})
+  if no_box_here(r) {
+    snuff
+  }
+  says(r.out, "E880")
+  says(r.out, "outside its footprint")
 })
 
 test("cigo rehearse rates a script by what it did, and applies none of it", pack() {

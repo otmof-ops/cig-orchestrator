@@ -60,6 +60,30 @@
         "sh",
         "big.sh"
       ]
+    },
+    "probe": {
+      "cmd": [
+        "sh",
+        "probe.sh"
+      ]
+    },
+    "pi": {
+      "cmd": [
+        "sh",
+        "pi.sh"
+      ]
+    },
+    "wiper": {
+      "cmd": [
+        "sh",
+        "wiper.sh"
+      ]
+    },
+    "priv": {
+      "cmd": [
+        "sh",
+        "priv.sh"
+      ]
     }
   }
 }
