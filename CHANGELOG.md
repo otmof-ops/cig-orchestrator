@@ -11,6 +11,17 @@ repository root lists versions it must not pick.
   registry this project's toolchains use (npm for node, PyPI for Python,
   crates.io for Rust), and said so. A project that uses two names both, and
   you say which.
+- **The read closes most of the corpus's gaps** (#89). Now critical:
+  - the environment, or a secret from it, sent to the network;
+  - a browser profile or keychain piped into `nc`;
+  - a reverse shell (`/dev/tcp`, `sh -i` on a socket);
+  - a set-id copy of a shell;
+  - a program downloaded, marked executable and run from a raw address;
+  - Python or JS that runs code it fetched.
+
+  Fetch-and-run over plain `http://` is high whatever the host, and so is a
+  set-id file. A public key (`~/.ssh/*.pub`), `known_hosts` and the ssh
+  `config` are no longer credentials; private keys and the folder still are.
 - **The read catches a script that checks whether it is watched** (#55,
   `E888`): one that looks for a container or a virtual machine
   (`/proc/1/cgroup`, `/.dockerenv`, `systemd-detect-virt`, the DMI product

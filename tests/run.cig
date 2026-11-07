@@ -2766,6 +2766,19 @@ test("a wiper and a step that asks for root are read (E877, E878)", pack() {
   assert(has_finding(p, "E878", "priv.sh"), "the set-id chmod was missed: ${json.stringify(p.findings)}")
 })
 
+# The detection corpus's gaps (#89): each sample is inert (it exits first)
+# and only read, and each is rated as the issue targets.
+test("the corpus's gaps are rated as targeted, and a public key is no credential (#89)", pack() {
+  stick dir = fresh("tests/fixtures/detection")
+  stick want = {m02: "high", m11: "critical", m12: "critical", m13: "critical", m16: "critical", m17: "critical", m22: "critical", g03: "none"}
+  for task in want {
+    stick v = audit_of(dir, task)
+    assert(v.risk == want[task], "${task} is ${v.risk}, not ${want[task]}: ${json.stringify(v.findings)}")
+  }
+  # The folder of private keys is still a credential.
+  assert(has_finding(audit_of(dir, "key"), "E871", "key.sh"), "~/.ssh is no longer a credential")
+})
+
 test("base64 payloads are decoded and read, with both places named", pack() {
   stick dir = fresh("tests/fixtures/guard-evasion")
   stick v = audit_of(dir, "b64")
