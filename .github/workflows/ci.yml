@@ -22,7 +22,7 @@ jobs:
           - { os: macos-15-intel,   asset: macos-x86_64,   ext: "" }
           - { os: windows-latest,   asset: windows-x86_64, ext: ".exe" }
     env:
-      CIG_VERSION: v1.14.0
+      CIG_VERSION: v1.15.1
     defaults:
       run:
         shell: bash
@@ -83,15 +83,15 @@ jobs:
           include-hidden-files: true
 
   # cigcompile#8: the same suite against cigo compiled to a native program
-  # (cig 1.15.0 with orchestrate.cig appended; ci/compile-native.py writes
-  # the format CigScript's docs/PROGRAMS.md publishes, until cigcompile is
-  # public). CIGO_TEST_BINARY makes the suite run it wherever it would run
+  # by cigcompile's own release, onto cig's release of the version it pins.
+  # CIGO_TEST_BINARY makes the suite run it wherever it would run
   # `cig run orchestrate.cig --`.
   native:
     name: native cigo (cigcompile#8)
     runs-on: ubuntu-latest
     env:
-      CIG_RUNTIME_VERSION: v1.15.0
+      CIG_RUNTIME_VERSION: v1.15.1
+      CIGCOMPILE_VERSION: v0.1.0
     steps:
       - uses: actions/checkout@v7
       - name: Let cig make its box
@@ -99,7 +99,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 20
-      - name: Install cig 1.15.0, the runtime
+      - name: Install cig, the runtime
         run: |
           base="https://github.com/otmof-ops/cig-script/releases/download/$CIG_RUNTIME_VERSION"
           curl -fsSLO "$base/cig-$CIG_RUNTIME_VERSION-linux-x86_64"
@@ -108,8 +108,15 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           install -m 755 "cig-$CIG_RUNTIME_VERSION-linux-x86_64" "$HOME/.local/bin/cig"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install cigcompile
+        run: |
+          base="https://github.com/otmof-ops/cig-compile/releases/download/$CIGCOMPILE_VERSION"
+          curl -fsSLO "$base/cigcompile-$CIGCOMPILE_VERSION-linux-x86_64"
+          curl -fsSLO "$base/cigcompile-$CIGCOMPILE_VERSION-linux-x86_64.sha256"
+          sha256sum -c "cigcompile-$CIGCOMPILE_VERSION-linux-x86_64.sha256"
+          install -m 755 "cigcompile-$CIGCOMPILE_VERSION-linux-x86_64" "$HOME/.local/bin/cigcompile"
       - name: Compile cigo
-        run: python3 ci/compile-native.py "$HOME/.local/bin/cig" orchestrate.cig "$RUNNER_TEMP/cigo-native"
+        run: cigcompile build orchestrate.cig -o "$RUNNER_TEMP/cigo-native" --runtime "$HOME/.local/bin/cig"
       - name: The suite, against the native cigo
         run: CIGO_TEST_BINARY="$RUNNER_TEMP/cigo-native" cig run tests/run.cig
 
@@ -119,7 +126,7 @@ jobs:
     runs-on: ubuntu-latest
     container: alpine:latest
     env:
-      CIG_VERSION: v1.14.0
+      CIG_VERSION: v1.15.1
     steps:
       # git first: without it, checkout downloads a tarball and leaves no .git,
       # and the shell component's `git ls-files` has nothing to list.
