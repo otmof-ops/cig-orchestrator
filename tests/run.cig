@@ -3368,6 +3368,31 @@ test("rehearse --fail-on: the exit code says the risk once it reaches the thresh
   says(bad.err, "--fail-on takes low, medium, high, critical, auto or never")
 })
 
+test("rehearse <bare name>: the registry is the one this project uses; two are asked about", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a list)"
+    snuff
+  }
+  stick dir = blacklist_project()
+  stick l = lists(dir)
+  burn {
+    fs.write_text(path.join(dir, "package.json"), "{\"name\": \"p\", \"version\": \"1.0.0\"}\n")
+  }
+  exits(guard_tool(dir, ["blacklist", "add", "npm:evil-pkg", "--reason=a test entry"], l), 0)
+  # A node project: npm, so the blacklist refuses it before any box.
+  stick r = guard_tool(dir, ["rehearse", "evil-pkg@1.0.0"], l)
+  exits(r, 3)
+  says(r.out + r.err, "as npm:evil-pkg@1.0.0")
+  says(r.out, "not rehearsed: it is on your blacklist")
+  # A project with Python too: say which.
+  burn {
+    fs.write_text(path.join(dir, "requirements.txt"), "requests==2.32.3\n")
+  }
+  stick both = guard_tool(dir, ["rehearse", "evil-pkg@1.0.0"], l)
+  exits(both, 2)
+  says(both.err, "so say which: npm:evil-pkg@1.0.0 or pypi:evil-pkg@1.0.0")
+})
+
 # ----- the guard's reach: guard_scope (#57) -------------------------------------------
 #
 # Every guard test has a home of its own (HOME and CIGO_HOME under the test

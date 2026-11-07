@@ -8457,6 +8457,33 @@ pull guard_run(tasks, names, defaults) {
 stick REHEARSE_DIR = ".cigo-rehearse"
 
 # What to rehearse for a spec: the job, carrying the spec it was asked as.
+# A bare package name, rehearsed in the registry this project uses (#56):
+# the one ecosystem its toolchains name (node npm, python PyPI, rust
+# crates.io). A path, a name with its registry, or a project with two or
+# none of them is left as it is, or refused with the choices.
+pull infer_registry(spec) {
+  if spec.contains(":") or spec.starts_with("./") or spec.starts_with("/") or spec.starts_with("../") {
+    snuff spec
+  }
+  stick kb = toolchains_for(soft_manifest())
+  stick of_family = {node: "npm", python: "pypi", rust: "crates"}
+  roll ecos = []
+  for id in detect_here(ROOT, kb) {
+    stick e = of_family.get(kb[id].get("family", id), "")
+    if e != "" and not ecos.contains(e) {
+      ecos.push(e)
+    }
+  }
+  if ecos.len() == 1 {
+    log.info("cigo: ${spec} is rehearsed as ${ecos[0]}:${spec}, the registry this project uses")
+    snuff ecos[0] + ":" + spec
+  }
+  if ecos.len() > 1 {
+    fail("cigo rehearse ${spec}: this project uses " + ecos.join(" and ") + ", so say which: " + ecos.map(pack(e) => e + ":" + spec).join(" or "))
+  }
+  fail("cigo rehearse ${spec}: say which registry: npm:${spec}, pypi:${spec} or crates:${spec}")
+}
+
 pull rehearse_spec(spec) {
   snuff rehearse_job(spec).merge({spec: spec})
 }
@@ -8650,10 +8677,10 @@ pull do_rehearse() {
     do_rehearse_changed()
     snuff
   }
-  stick spec = targets.get(0, "")
-  if spec == "" or targets.len() > 1 {
+  if targets.get(0, "") == "" or targets.len() > 1 {
     fail("cigo rehearse <npm:name[@version] | pypi:name[==version] | crates:name[@version] | ./script.sh>, or --changed")
   }
+  stick spec = infer_registry(targets.get(0, ""))
   # On your blacklist: refused as it is, with nothing rehearsed.
   stick listed = blacklist_for_spec(spec)
   if not listed.is_empty() {

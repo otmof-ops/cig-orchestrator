@@ -7,6 +7,10 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **`cigo rehearse <name>`** (#56): a bare package name is rehearsed in the
+  registry this project's toolchains use (npm for node, PyPI for Python,
+  crates.io for Rust), and said so. A project that uses two names both, and
+  you say which.
 - **The read catches a script that checks whether it is watched** (#55,
   `E888`): one that looks for a container or a virtual machine
   (`/proc/1/cgroup`, `/.dockerenv`, `systemd-detect-virt`, the DMI product
