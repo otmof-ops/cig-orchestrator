@@ -5,8 +5,14 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
-## Unreleased
+## 1.13.0 — 2026-11-07
 
+The guard reads more, and fails what you tell it to; cigo needs cig 1.15.1.
+
+- **cig 1.15.1 or newer.** It fixes two hops over one file rolling back,
+  and a compiled cigo refuses rather than run as `cig` when it is damaged,
+  unreadable or started with raised rights. The native cigo in CI is now
+  built by cigcompile 0.1.0's own release (`ci/compile-native.py` is gone).
 - **`cigo rehearse <name>`** (#56): a bare package name is rehearsed in the
   registry this project's toolchains use (npm for node, PyPI for Python,
   crates.io for Rust), and said so. A project that uses two names both, and
