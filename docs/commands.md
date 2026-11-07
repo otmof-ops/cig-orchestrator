@@ -585,6 +585,7 @@ cigo rehearse --changed [--base=<rev>] every package the lockfiles add or change
               [--list] [--max=N]       name them and rehearse nothing; at most N (50)
               [--sarif | --markdown]   for code scanning or a pull request comment
               [--fresh]                rehearse even what was rehearsed before
+              [--fail-on=<level>]      the lowest verdict that fails (auto: high under CI, critical at a terminal)
 ```
 
 **Never the same bytes twice.** A verdict is kept under what was rehearsed:
@@ -606,7 +607,12 @@ package is rehearsed on its own and its findings are placed at its entry in
 the lockfile; the rest are named as not rehearsed. `--list` stops at the
 names, and `--max` (50) keeps a lockfile refresh from rehearsing for an hour.
 
-It exits by risk: `0` none or low, `1` medium, `2` high, `3` critical. Off
+It exits by risk, once the verdict reaches `--fail-on`: `0` below it (and
+for none or low), `1` medium, `2` high, `3` critical. `--fail-on` is `low`,
+`medium`, `high`, `critical`, `auto` or `never`; the setting is
+`rehearse_fail_on`, `auto` by default, which is `high` under CI and
+`critical` at a terminal, so a person reading the verdict is not also failed
+by it. A project may raise it, never lower it. Off
 Linux, with an older cig, or where cig cannot make a contained box (root,
 user namespaces turned off, a kernel before 5.12), it says so and does
 nothing; `cigo run` then reads its stages instead of rehearsing them, and

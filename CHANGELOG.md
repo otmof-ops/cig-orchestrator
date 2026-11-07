@@ -18,6 +18,13 @@ repository root lists versions it must not pick.
 - **Every code the read gives has a test**: the wiper (`E877`), the set-id
   `chmod` (`E878`) and a rehearsal's write outside the footprint (`E880`)
   had none.
+- **`cigo rehearse --fail-on=<level>`** (#56): the lowest verdict that fails
+  the run. The exit code still says the risk (`1` medium, `2` high, `3`
+  critical) once the verdict reaches it, and is `0` below it. The setting is
+  `rehearse_fail_on`: `auto` by default, which is `high` under CI and
+  `critical` at a terminal; the `ci` preset says `high`, `paranoid` says
+  `medium`, and a project may only raise it. A medium verdict no longer
+  fails CI by default, as `security = strict` never failed it either.
 - **CigScript's repository is otmof-ops/cig-script** now, named like the rest
   of the cig family. The launchers' and installers' "install CigScript first"
   messages, the knowledge base's install link, the SARIF rules' help links,
