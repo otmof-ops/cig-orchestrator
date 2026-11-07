@@ -5,6 +5,15 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.13.1 — 2026-11-07
+
+- **cig 1.16.1 or newer.** Its box makes the forwarder's listener before
+  the hop starts. With an older cig, an agent's command that connected at
+  once could find no forwarder yet, fail to connect, and go on instead of
+  waiting for a person to approve the host (the connection was never
+  made). 1.16.0 also records a refused connection before it answers it.
+  The native cigo in CI is built by cigcompile 0.1.2 onto cig 1.16.1.
+
 ## 1.13.0 — 2026-11-07
 
 The guard reads more, and fails what you tell it to; cigo needs cig 1.15.1.

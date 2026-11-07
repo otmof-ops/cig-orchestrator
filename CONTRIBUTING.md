@@ -38,7 +38,7 @@ use the installed `cigo`.)
 The suite takes a few seconds; `cig run tests/run.cig -- <words>` runs just
 the tests whose names contain them.
 `CIGO_TEST_BINARY=<program>` runs the same suite against cigo compiled to a
-native program (`cigcompile build orchestrate.cig -o <out>`, cigcompile 0.1.0
+native program (`cigcompile build orchestrate.cig -o <out>`, cigcompile 0.1.2
 or later); CI does both.
 
 ## The workflow
