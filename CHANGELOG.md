@@ -7,6 +7,17 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **The read catches a script that checks whether it is watched** (#55,
+  `E888`): one that looks for a container or a virtual machine
+  (`/proc/1/cgroup`, `/.dockerenv`, `systemd-detect-virt`, the DMI product
+  name), and one that waits half a minute or more before it goes on.
+- **More prompt injection is read** (#55): chat templates and tool-call tags
+  written into text (`<|start_header_id|>`, `<tool_call>`), a Markdown image
+  whose address carries data out when an agent shows it (`E886`), and a
+  word that mixes Latin with look-alike Cyrillic or Greek letters (`E887`).
+- **Every code the read gives has a test**: the wiper (`E877`), the set-id
+  `chmod` (`E878`) and a rehearsal's write outside the footprint (`E880`)
+  had none.
 - **CigScript's repository is otmof-ops/cig-script** now, named like the rest
   of the cig family. The launchers' and installers' "install CigScript first"
   messages, the knowledge base's install link, the SARIF rules' help links,

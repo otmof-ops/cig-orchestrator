@@ -5749,6 +5749,11 @@ stick RULES = [
   {id: "self-guard", code: "E897", cat: "self-defense", w: 1.0, re: '(?:\b(?:sed\s+(?:-[a-zA-Z]*i[a-zA-Z]*|--in-place)\S*|rm|unlink|mv|cp|tee|truncate|shred|chmod|chown|chattr|ln|install|rsync|dd|perl\s+-[a-zA-Z]*i\S*)\b[^\n;|&]*|>>?\s*)["\x27]?(?:~|\$HOME|\$\{HOME\}|/home/[^/\s"\x27]+|/root)?/?\.?(?:claude/settings(?:\.local)?\.json|config/cigscript\b|cig-orchestrator\b|cigscript\b|local/share/cig-orchestrator\b|local/bin/cigo?\b)', says: "changes the guard's own files (the hook's settings, cigscript's config and blacklists, cig's and cigo's own folders)"},
   {id: "pi-addressed", code: "E886", cat: "prompt-injection", w: 0.7, re: '(?i)\b(ignore|disregard)\s+(all\s+|any\s+|the\s+)?(previous|prior|above|earlier)\s+(instructions|prompts|rules)|\byou are (an?|the) (ai|assistant|language model)\b|\bas an ai\b|\bsystem prompt\b|<\|im_start\|>|\[INST\]|<<SYS>>', says: "text addressed to an AI agent, telling it what to do"},
   {id: "pi-invisible", code: "E887", cat: "prompt-injection", w: 0.8, re: '[\x{E0020}-\x{E007F}]{4,}|[\x{200B}\x{200C}\x{200D}\x{2060}]{3,}|[\x{202A}-\x{202E}\x{2066}-\x{2069}]', says: "invisible Unicode text, which a reader cannot see and an agent can"},
+  {id: "pi-template", code: "E886", cat: "prompt-injection", w: 0.7, re: '<\|(start_header_id|end_header_id|eot_id|system|user|assistant|tool_call|im_end)\|>|</?(tool_call|function_calls|tool_use)>', says: "a chat template or a tool call written into text, to pass as the agent's own conversation"},
+  {id: "pi-image", code: "E886", cat: "prompt-injection", w: 0.7, re: '!\[[^\]\n]*\]\(\s*https?://[^)\s]*[?&][^)\s=]+=[^)\s]*(\$\{?[A-Za-z_]|\{\{|%7[Bb])', says: "a Markdown image whose address carries data out the moment an agent shows it"},
+  {id: "pi-homoglyph", code: "E887", cat: "prompt-injection", w: 0.6, re: '\b[A-Za-z_]+[\x{0370}-\x{03FF}\x{0400}-\x{04FF}]+[A-Za-z_]*\b|\b[\x{0370}-\x{03FF}\x{0400}-\x{04FF}]+[A-Za-z_]+\b', says: "a word mixing Latin with look-alike Cyrillic or Greek letters, which reads as one name and is another"},
+  {id: "evade-container", code: "E888", cat: "evasion", w: 0.5, re: '/proc/(1|self)/cgroup\b|/\.dockerenv\b|/run/\.containerenv\b|\bsystemd-detect-virt\b|/sys/class/dmi/id/(product_name|sys_vendor|board_vendor)\b|\bdmidecode\b[^\n]*-s\s+system-', says: "checks whether it runs in a container or a virtual machine, as code that behaves when watched does"},
+  {id: "evade-sleep", code: "E888", cat: "evasion", w: 0.4, re: '(^|[;&|(\s])sleep\s+(\d{3,}|[3-9]\d)\b|\btime\.sleep\(\s*(\d{3,}|[3-9]\d)(\.\d+)?\s*\)|\bsetTimeout\([^\n]*,\s*\d{5,}\s*\)', says: "waits half a minute or more before it goes on, which outlasts a quick look"},
 ]
 
 # A JavaScript line with what it builds at run time written out: char
@@ -5806,9 +5811,10 @@ stick HEADLINES = {
   E879: ["eyeing the tin", "going for the stash"],
   E886: ["someone's whispering to your agent"],
   E887: ["fine print in invisible ink"],
+  E888: ["checking for cops before it lights up"],
   E580: ["this one's on the bad batch list", "you said never again to this one"],
 }
-stick PLAIN = {E580: "on the blacklist", E871: "credential file named", E872: "exfiltration pattern", E873: "persistence", E874: "downloads and executes remote code", E875: "obfuscated code", E877: "destructive command", E878: "privilege escalation", E879: "references cig's or cigo's own state", E886: "text addressed to AI agents", E887: "invisible Unicode text"}
+stick PLAIN = {E580: "on the blacklist", E871: "credential file named", E872: "exfiltration pattern", E873: "persistence", E874: "downloads and executes remote code", E875: "obfuscated code", E877: "destructive command", E878: "privilege escalation", E879: "references cig's or cigo's own state", E886: "text addressed to AI agents", E887: "invisible or look-alike text", E888: "probes for a sandbox"}
 roll SAID = {}
 roll TRUST_NOTED = false
 
@@ -7851,7 +7857,7 @@ pull blacklist_mine() {
 # ----- reports for code scanning and pull requests: SARIF and Markdown (#56 step 6) ---
 
 # The registry's titles for the codes the guard reports (`cig explain <code>`).
-stick CODE_TITLES = {E580: "on the blacklist", E587: "a list that does not verify", E870: "a known malicious package", E871: "reads credentials", E872: "tries to send data out", E873: "persistence", E874: "fetch and run", E875: "obfuscation", E877: "wiper shape", E878: "asks for privilege", E879: "eyes cigo or the tin", E880: "outside the footprint", E885: "a known vulnerability", E886: "prompt injection", E887: "invisible instructions", E889: "a forged approval"}
+stick CODE_TITLES = {E580: "on the blacklist", E587: "a list that does not verify", E870: "a known malicious package", E871: "reads credentials", E872: "tries to send data out", E873: "persistence", E874: "fetch and run", E875: "obfuscation", E877: "wiper shape", E878: "asks for privilege", E879: "eyes cigo or the tin", E880: "outside the footprint", E885: "a known vulnerability", E886: "prompt injection", E887: "invisible instructions", E888: "probes for a sandbox", E889: "a forged approval"}
 
 # A path as the project names it (forward slashes, from its root), or null
 # when it is not in the project.
