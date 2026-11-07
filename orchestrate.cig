@@ -64,6 +64,8 @@ stick SETTINGS = {
     doc: "how much of this machine the guard covers (cigo guard setup asks, cigo guard scope changes it): project (just cigo runs), dev (also every package manager and its scripts, anywhere, through shims first on PATH), agents (also every shell command your AI agents run); downloads and system are not built yet. A project cannot set it"},
   guard_commands: {values: null, default: "npm,npx,pnpm,yarn,bun,bunx,pip,pip3,pipx,uv,uvx,poetry,cargo,go,gem,bundle,composer,dotnet,deno", floor: false, machine: true, presets: {},
     doc: "the programs that get a shim at guard_scope dev, comma-separated; which of their calls the guard reads is cigo's data (cigo guard allow <program> takes one out)"},
+  guard_shells: {values: null, default: "", floor: false, machine: true, presets: {},
+    doc: "the shells whose startup files get the guard's block at guard_scope dev and up, comma-separated: bash, zsh, sh (~/.profile) and fish; empty is every shell found"},
   guard_agents: {values: null, default: "", floor: false, machine: true, presets: {},
     doc: "the AI agents whose shell commands go through cigo agent run at guard_scope agents (claude-code); cigo guard scope agents --agents=claude-code --yes sets it"},
   agent_approval: {values: ["tty", "os-auth", "never"], default: "os-auth", floor: true, presets: {ci: "never"},
@@ -5721,6 +5723,9 @@ stick CIGO_HOME = env.get("CIGO_HOME", path.join(fs.home(), ".cig-orchestrator")
 
 stick TRUST_DIR = path.join(CIGO_HOME, "trust")
 stick TRUST_LABEL = "cigo-trust"
+# Bytes a person allowed (cigo guard allow <file|sha256>, #57).
+stick ALLOW_DIR = path.join(CIGO_HOME, "allowed")
+stick ALLOW_LABEL = "cigo-allow"
 stick SCRIPT_EXTS = [".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".ps1", ".cig"]
 # The scripts whose text the static read looks into: a CigScript file is
 # left to cig (its effects run under cig's own journal), and a rule table
@@ -10508,18 +10513,51 @@ pull shim_text(tool) {
 pull profile_targets() {
   stick h = fs.home()
   roll out = []
-  for name in [".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile"] {
-    stick f = path.join(h, name)
+  for e in [{f: ".bashrc", name: "bash"}, {f: ".zshrc", name: "zsh"}, {f: ".profile", name: "sh"}, {f: ".bash_profile", name: "bash"}, {f: ".zprofile", name: "zsh"}] {
+    stick f = path.join(h, e.f)
     if fs.is_file(f) {
-      out.push({file: f, shell: "sh"})
+      out.push({file: f, shell: "sh", name: e.name})
     }
   }
   stick fish = path.join(h, ".config", "fish")
   if fs.is_dir(fish) or which("fish") != null {
-    out.push({file: path.join(fish, "conf.d", "cigo-guard.fish"), shell: "fish", own: true})
+    out.push({file: path.join(fish, "conf.d", "cigo-guard.fish"), shell: "fish", name: "fish", own: true})
   }
   if out.is_empty() {
-    out.push({file: path.join(h, ".profile"), shell: "sh"})
+    out.push({file: path.join(h, ".profile"), shell: "sh", name: "sh"})
+  }
+  snuff out
+}
+
+# The startup files the guard's block goes in (#57): every shell's that is
+# found, or only the shells guard_shells names. A named shell with no
+# startup file of its own gets its usual one.
+pull hook_targets() {
+  stick want = config().guard_shells.split(",").map(pack(s) => s.trim()).filter(pack(s) => s != "")
+  if want.is_empty() {
+    snuff profile_targets()
+  }
+  for s in want {
+    if not ["bash", "zsh", "sh", "fish"].contains(s) {
+      fail("guard_shells names `${s}`: it takes bash, zsh, sh (for ~/.profile) and fish, comma-separated")
+    }
+  }
+  stick h = fs.home()
+  roll out = []
+  for p in profile_targets() {
+    if want.contains(p.name) {
+      out.push(p)
+    }
+  }
+  stick usual = {bash: ".bashrc", zsh: ".zshrc", sh: ".profile"}
+  for s in want {
+    if not out.any(pack(p) => p.name == s) {
+      if s == "fish" {
+        out.push({file: path.join(h, ".config", "fish", "conf.d", "cigo-guard.fish"), shell: "fish", name: "fish", own: true})
+      } else {
+        out.push({file: path.join(h, usual[s]), shell: "sh", name: s})
+      }
+    }
   }
   snuff out
 }
@@ -10634,7 +10672,13 @@ pull scope_plan(level) {
     plan.push({act: pick(is_link(cs), "by hand", "remove"), kind: "agent-hook", path: cs, what: "Claude Code's PreToolUse hook for cigo"})
   }
   if want_shims {
+    stick targets = hook_targets()
     for p in profile_targets() {
+      if has_block(p.file) and not targets.any(pack(x) => x.file == p.file) {
+        plan.push({act: "remove", kind: "profile", path: p.file, what: "the PATH block (guard_shells leaves this shell out)"})
+      }
+    }
+    for p in targets {
       if not has_block(p.file) {
         plan.push({act: "add", kind: "profile", path: p.file, shell: p.shell, own: p.get("own", false), what: "puts " + tilde(SHIMS_DIR) + " first on PATH" + pick(p.shell == "sh", ", and loads the hook in bash and zsh", "")})
       } else if block_in(p.file) != profile_block(p.shell) {
@@ -10953,10 +10997,11 @@ pull do_guard_pause(given) {
 # after taking it out of the list again.
 pull do_guard_allow(thing) {
   if thing == "" {
-    fail("cigo guard allow <program>: one of ${guard_tools().join(", ")}")
+    fail("cigo guard allow <program | file | sha256>: a program is one of ${guard_tools().join(", ")}; a file or a sha256 is a script you have read")
   }
   if not GUARD_COMMANDS.has(thing) {
-    fail("cigo guard allow ${thing}: not a program the guard shims (${GUARD_COMMANDS.keys().join(", ")}); a task is approved with cigo trust <task>")
+    do_guard_allow_bytes(thing)
+    snuff
   }
   stick left = guard_tools().filter(pack(t) => t != thing)
   write_setting("guard_commands", left.join(","))
@@ -10969,6 +11014,28 @@ pull do_guard_allow(thing) {
   }
   guard_note({kind: "allow", thing: thing})
   exhale "${thing} runs as it is from now on (its shim is gone, guard_commands no longer names it)"
+}
+
+# `cigo guard allow <file|sha256>`: these bytes are not rehearsed again.
+pull do_guard_allow_bytes(thing) {
+  roll sha = ""
+  roll what = ""
+  if text.matches(thing, '^[0-9a-fA-F]{64}$') {
+    sha = thing.lower()
+    what = "sha256 " + sha.slice(0, 12) + "…"
+  } else {
+    stick f = path.join(CALLER_DIR, thing)
+    if not fs.is_file(f) {
+      fail("cigo guard allow ${thing}: not a program the guard shims (${GUARD_COMMANDS.keys().join(", ")}), a file or a sha256; a task is approved with cigo trust <task>")
+    }
+    sha = hash.sha256_file(f)
+    what = tilde(f)
+  }
+  if not allow_bytes(sha, what) {
+    fail("the allowance could not be signed (cig tin mac, cig 1.11.0 or later) or kept in ${tilde(ALLOW_DIR)}")
+  }
+  guard_note({kind: "allow", thing: sha})
+  exhale "${what} is allowed (sha256 ${sha.slice(0, 12)}…): cigo run-url runs these bytes without a rehearsal"
 }
 
 pull do_guard_log() {
@@ -11134,6 +11201,40 @@ pull hook_text(shell) {
 
 stick QUARANTINE = path.join(CIGO_HOME, "quarantine")
 
+# Bytes allowed by hand (#57): `cigo guard allow <file|sha256>`. A script
+# whose sha256 is here is not rehearsed again by run-url (nor the shell's
+# hook, which goes through it), whatever cigo's version: the person read
+# it and said so. Signed with the tin's key (ALLOW_LABEL), as the trust
+# store is, so nothing a script runs can allow itself.
+pull allow_files(sha) {
+  snuff {json: path.join(ALLOW_DIR, sha + ".json"), mac: path.join(ALLOW_DIR, sha + ".mac")}
+}
+
+pull allowed_bytes(sha) {
+  stick f = allow_files(sha)
+  if not fs.is_file(f.json) or not fs.is_file(f.mac) {
+    snuff false
+  }
+  stick r = tin_mac_as(f.json, fs.read_text(f.mac).trim(), ALLOW_LABEL)
+  if r.code == 1 {
+    log.warn("an allowance is not signed by your key (${tilde(f.json)}): ignored")
+  }
+  snuff r.code == 0
+}
+
+pull allow_bytes(sha, what) {
+  stick f = allow_files(sha)
+  if not write_outside(f.json, json.stringify({sha256: sha, what: what, at: time.now_iso(), by: "cig-orchestrator " + VERSION}, 2) + "\n") {
+    snuff false
+  }
+  stick m = tin_mac_as(f.json, null, ALLOW_LABEL)
+  if m.code != 0 {
+    remove_outside(f.json)
+    snuff false
+  }
+  snuff write_outside(f.mac, m.out.trim() + "\n")
+}
+
 pull url_blacklist(url) {
   roll found = []
   for e in blacklist(false) {
@@ -11189,7 +11290,12 @@ pull do_run_url() {
   }
   stick job = {eco: "script", label: url, tool: "sh", spec: file, script: (["sh", sh_quote(file)] + extra.map(sh_quote)).join(" "), fp: {writes: [], network: [host], registry_env: []}}
   roll outcome = "ran"
-  if risk != "critical" and not flags.contains("--trust") {
+  stick allowed = allowed_bytes(sha)
+  if allowed {
+    log.info("cigo: these bytes are allowed (cigo guard allow ${sha.slice(0, 12)}…): not rehearsed")
+    outcome = "allowed, then ran"
+  }
+  if risk != "critical" and not flags.contains("--trust") and not allowed {
     rehearse_ready()
     stick r = rehearse_or_kept(job, null, false)
     say_rehearsal(r)

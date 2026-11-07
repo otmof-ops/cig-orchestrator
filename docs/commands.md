@@ -330,6 +330,7 @@ cigo guard scope <1-5|name>   what going to that level would change; --yes makes
 cigo guard pause [30m]        the guarded calls run unguarded until then (at most guard_pause_max, 8h)
 cigo guard off | on           unguarded until you turn it back on
 cigo guard allow <program>    that program is not read any more (its shim goes)
+cigo guard allow <file|sha256> those bytes are not rehearsed again (run-url, the hook): a script you have read
 cigo guard log [--all|--json] what was guarded, and what came of it
 cigo guard uninstall          every shim and startup-file block it wrote, removed; --yes does it
 cigo undo last                the newest guarded call, taken back (cig unburn of its run)
@@ -340,6 +341,21 @@ The installer asks once, by printing the question and the command that
 answers it; `cigo guard setup` asks again. Nothing outside cigo changes
 without a yes: `cigo guard scope dev` lists the files it would write, and
 `--yes` writes them.
+
+**Which shells.** At level 2 and up, the guard's block goes into every
+shell's startup file it finds (`~/.bashrc`, `~/.zshrc`, `~/.profile`,
+`~/.bash_profile`, `~/.zprofile`, and a `conf.d` file for fish).
+`guard_shells` (comma-separated: `bash`, `zsh`, `sh` for `~/.profile`,
+`fish`) narrows that to the shells it names. A named shell with no startup
+file gets its usual one, and a shell it leaves out loses its block at the
+next `cigo guard scope … --yes`.
+
+**Allowing bytes.** `cigo guard allow ./install.sh`, or its sha256, keeps a
+signed allowance under `~/.cig-orchestrator/allowed/`: `cigo run-url` (and
+so the shell's `curl | sh` hook) runs those exact bytes without a rehearsal,
+whatever cigo's version, as `--trust` does for one run. The read and your
+blacklist still apply, and one byte more is another script. An allowance
+that does not verify under the tin's key is ignored, and said.
 
 **Level 2 is shims.** `~/.cig-orchestrator/shims/` holds a small `sh`
 script for each program `guard_commands` names (npm, npx, pnpm, yarn, bun,

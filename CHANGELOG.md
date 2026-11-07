@@ -25,6 +25,16 @@ repository root lists versions it must not pick.
   `critical` at a terminal; the `ci` preset says `high`, `paranoid` says
   `medium`, and a project may only raise it. A medium verdict no longer
   fails CI by default, as `security = strict` never failed it either.
+- **`guard_shells`** (#57): the shells whose startup files get the guard's
+  block at level 2 and up (`bash`, `zsh`, `sh` for `~/.profile`, `fish`).
+  Empty, the default, is every shell found; a shell it leaves out loses its
+  block at the next `cigo guard scope … --yes`, and a named shell with no
+  startup file gets its usual one.
+- **`cigo guard allow <file|sha256>`** (#57): a script you have read, by
+  its bytes. `cigo run-url` (and the `curl | sh` hook) runs those exact
+  bytes without a rehearsal, whatever cigo's version. The allowance is
+  signed with the tin's key, so nothing a script runs can allow itself; an
+  unsigned one is ignored, and said.
 - **CigScript's repository is otmof-ops/cig-script** now, named like the rest
   of the cig family. The launchers' and installers' "install CigScript first"
   messages, the knowledge base's install link, the SARIF rules' help links,
