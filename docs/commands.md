@@ -596,6 +596,7 @@ cigo rehearse npm:name[@version]       npm install, then require it once
 cigo rehearse pypi:name[==version]     pip install in a scratch venv
 cigo rehearse crates:name[@version]    cargo build of a scratch crate
 cigo rehearse ./install.sh             a script you were told to run
+cigo rehearse name[@version]           in the registry this project's toolchains use (two: it asks which)
               [--json] [--keep]        the full evidence; keep the layer to read (cig box list)
 cigo rehearse --changed [--base=<rev>] every package the lockfiles add or change since the base
               [--list] [--max=N]       name them and rehearse nothing; at most N (50)
