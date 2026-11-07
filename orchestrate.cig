@@ -72,6 +72,8 @@ stick SETTINGS = {
     doc: "the longest cigo guard pause (30m, 2h, 8h)"},
   rehearse: {values: ["never", "auto", "always"], default: "auto", floor: true, presets: {paranoid: "always", chill: "never"},
     doc: "the rehearsal (Linux, cig 1.12.0): auto runs a stage that runs code you did not write (an install, a build that runs its dependencies' scripts) or that the guard flagged in cig's contained box first, and judges what it did against its toolchain's footprint; always does it for every task not approved; never only reads"},
+  rehearse_fail_on: {values: ["never", "critical", "auto", "high", "medium", "low"], default: "auto", floor: true, presets: {ci: "high", paranoid: "medium"},
+    doc: "the lowest rehearsal verdict that fails cigo rehearse (its exit code, which still says the risk): auto (high under CI, critical at a terminal), a level, or never; --fail-on=<level> sets it for one run"},
 }
 # The old shape, kept for the places that read a default and a doc.
 roll CONFIG_KEYS = {}
@@ -8602,6 +8604,33 @@ pull rehearse_or_kept(job, integrity, keep) {
 # rehearsal that could not judge (the install itself failed).
 stick RISK_EXIT = {none: 0, low: 0, medium: 1, high: 2, critical: 3, unknown: 1}
 
+# The lowest verdict that fails a rehearsal (#56): --fail-on, else the
+# rehearse_fail_on setting; auto is high under CI and critical at a terminal.
+pull fail_on() {
+  stick v = flag_value("--fail-on", config().rehearse_fail_on)
+  if not ["never", "critical", "auto", "high", "medium", "low"].contains(v) {
+    fail("--fail-on takes low, medium, high, critical, auto or never; got `${v}`")
+  }
+  if v == "auto" {
+    snuff pick(attended(), "critical", "high")
+  }
+  snuff v
+}
+
+# The exit code a rehearsal's verdict gives: the risk's own code when it is
+# at or above fail_on(), else 0. A rehearsal that could not judge
+# (unknown) fails unless nothing does.
+pull rehearse_exit(risk) {
+  stick at = fail_on()
+  if at == "never" {
+    snuff 0
+  }
+  if risk == "unknown" {
+    snuff RISK_EXIT.unknown
+  }
+  snuff pick(index_of(RISKS, risk) >= index_of(RISKS, at), RISK_EXIT.get(risk, 0), 0)
+}
+
 # Does cig's box report what a rehearsed hop read and which connections it
 # tried? Not yet (CigScript #106's watch); until it does, a rehearsal that
 # finds nothing is not evidence of nothing (#80).
@@ -8610,7 +8639,8 @@ pull box_watches() {
 }
 
 pull do_rehearse() {
-  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh"])
+  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh", "--fail-on"])
+  fail_on()
   if flags.contains("--changed") {
     do_rehearse_changed()
     snuff
@@ -8633,7 +8663,11 @@ pull do_rehearse() {
       report_verdict(spec, {risk: "critical", findings: listed})
       exhale "  not rehearsed: it is on your blacklist (cigo blacklist why ${spec})"
     }
-    exit(3)
+    stick listed_code = rehearse_exit("critical")
+    if listed_code != 0 {
+      exit(listed_code)
+    }
+    snuff
   }
   stick job = rehearse_spec(spec)
   stick kept_already = kept_verdict(verdict_key(job, null)) != null
@@ -8657,9 +8691,9 @@ pull do_rehearse() {
     say_rehearsal(r)
   }
   # The verdict is the answer, not a failure: the exit code says the risk
-  # (CI picks its line with it) and nothing is rolled back, as nothing of the
-  # rehearsal was applied.
-  stick code = RISK_EXIT.get(r.risk, 0)
+  # once it reaches --fail-on (CI picks its line with it) and nothing is
+  # rolled back, as nothing of the rehearsal was applied.
+  stick code = rehearse_exit(r.risk)
   if code != 0 {
     exit(code)
   }
@@ -8948,7 +8982,7 @@ pull do_rehearse_changed() {
     }
     exhale "worst: ${worst}"
   }
-  stick code = RISK_EXIT.get(worst, 0)
+  stick code = rehearse_exit(worst)
   if code != 0 {
     exit(code)
   }

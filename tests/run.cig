@@ -2879,6 +2879,8 @@ test("cigo rehearse rates a script by what it did, and applies none of it", pack
     snuff
   }
   stick dir = fresh("tests/fixtures/rehearse")
+  # A high verdict fails here as it does under CI (rehearse_fail_on).
+  exits(guard_tool(dir, ["config", "rehearse_fail_on", "high"], {}), 0)
   stick bad = guard_tool(dir, ["rehearse", "./replica.sh"], {})
   if no_box_here(bad) {
     snuff
@@ -2912,6 +2914,8 @@ test("a verdict is kept for the same bytes: asked again it is not rehearsed, --f
     snuff
   }
   stick dir = fresh("tests/fixtures/rehearse")
+  # A high verdict fails here as it does under CI (rehearse_fail_on).
+  exits(guard_tool(dir, ["config", "rehearse_fail_on", "high"], {}), 0)
   stick first = guard_tool(dir, ["rehearse", "./replica.sh"], {})
   if no_box_here(first) {
     snuff
@@ -3339,6 +3343,29 @@ test("blacklist: rehearse refuses a blacklisted package before it asks for the b
   exits(why, 1)
   says(why.out, "a test entry")
   exits(guard_tool(dir, ["blacklist", "why", "npm:left-pad@1.3.0"], l), 0)
+})
+
+test("rehearse --fail-on: the exit code says the risk once it reaches the threshold, and never fails nothing", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a list)"
+    snuff
+  }
+  stick dir = blacklist_project()
+  stick l = lists(dir)
+  exits(guard_tool(dir, ["blacklist", "add", "npm:evil-pkg", "--reason=a test entry"], l), 0)
+  # A blacklisted package is critical: it fails at every threshold but never.
+  exits(guard_tool(dir, ["rehearse", "npm:evil-pkg@1.0.0"], l), 3)
+  exits(guard_tool(dir, ["rehearse", "npm:evil-pkg@1.0.0", "--fail-on=high"], l), 3)
+  stick never = guard_tool(dir, ["rehearse", "npm:evil-pkg@1.0.0", "--fail-on=never"], l)
+  exits(never, 0)
+  says(never.out, "not rehearsed: it is on your blacklist")
+  # The setting does what the flag does, and a bad value is refused.
+  exits(guard_tool(dir, ["config", "rehearse_fail_on", "never"], {}), 0)
+  exits(guard_tool(dir, ["rehearse", "npm:evil-pkg@1.0.0"], l), 0)
+  exits(guard_tool(dir, ["config", "rehearse_fail_on", "auto"], {}), 0)
+  stick bad = guard_tool(dir, ["rehearse", "npm:evil-pkg@1.0.0", "--fail-on=sometimes"], l)
+  exits(bad, 2)
+  says(bad.err, "--fail-on takes low, medium, high, critical, auto or never")
 })
 
 # ----- the guard's reach: guard_scope (#57) -------------------------------------------
