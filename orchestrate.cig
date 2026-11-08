@@ -5576,6 +5576,7 @@ pull do_doctor(g) {
     exhale "    pin      ${p.from} pins cig ${p.pin}" + pick(ok == null, ": not a version pin, not compared", pick(ok, ": satisfied by ${have}", ": does not match ${have}"))
   }
   doctor_guard()
+  doctor_rehearse()
   exhale ""
   exhale "${missing} missing tool(s), ${mismatched} version mismatch(es)"
   if missing > 0 or (mismatched > 0 and flags.contains("--strict")) {
@@ -12921,6 +12922,44 @@ pull doctor_guard() {
     exhale "    " + pick(br.off, "off: cigo guard on", "paused until ${local_clock(br.until)}")
   }
   snuff broken
+}
+
+# What `cigo rehearse` can use here (#56): the isolation this machine has,
+# the tool each registry's rehearsal installs with, and what is kept.
+stick REHEARSE_TOOLS = [
+  {registry: "npm", tools: ["npm"], install: "https://nodejs.org/en/download"},
+  {registry: "PyPI", tools: ["uv", "pip3", "pip"], install: "https://www.python.org/downloads/ (or uv: https://docs.astral.sh/uv/)"},
+  {registry: "crates.io", tools: ["cargo"], install: "https://rustup.rs"},
+]
+
+pull doctor_rehearse() {
+  exhale "rehearse:"
+  if not rehearsal_possible() {
+    exhale "    box      no: the rehearsal needs cig 1.12.0 or later on Linux (this is cig ${cig.version()} on ${cig.os()})"
+  } else if contain_possible() {
+    exhale "    box      yes: cig's contained box (the rehearsal's isolation here)"
+  } else {
+    exhale "    box      no: " + clip(CONTAIN_WHY, 160)
+  }
+  stick engines = ["docker", "podman"].filter(pack(t) => which(t) != null)
+  exhale "    other    " + pick(engines.is_empty(), "no Docker or Podman; container, gVisor and VM backends are not built yet (#56)", engines.join(" and ") + " found; container, gVisor and VM backends are not built yet (#56)")
+  for r in REHEARSE_TOOLS {
+    stick found = r.tools.map(pack(t) => {name: t, at: which(t)}).filter(pack(x) => x.at != null)
+    if found.is_empty() {
+      exhale "    ${r.registry}" + " ".repeat(10 - r.registry.len()) + "missing  ${r.tools.join(" or ")}   install: ${r.install}"
+    } else {
+      exhale "    ${r.registry}" + " ".repeat(10 - r.registry.len()) + "found    ${found.first().name}  ${found.first().at}"
+    }
+  }
+  exhale "    kept     ${entries_in(VERDICT_DIR)} verdict(s) in ${tilde(VERDICT_DIR)}, ${entries_in(QUARANTINE)} in the quarantine (${tilde(QUARANTINE)})"
+}
+
+# How many entries a folder holds; none when it is not there.
+pull entries_in(dir) {
+  if not fs.is_dir(dir) {
+    snuff 0
+  }
+  snuff fs.list(dir).len()
 }
 
 # A runtime error on purpose, for the suite: proves the crash path end to end.

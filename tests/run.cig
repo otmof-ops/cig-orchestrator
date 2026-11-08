@@ -1758,6 +1758,23 @@ test("an os: condition names a system cig reports, in any case, or check says wh
   }
 })
 
+test("doctor says what a rehearsal can use here: the isolation, each registry's tool, and what is kept (#56)", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick r = tool_stubbed(dir, ["doctor"])
+  says(r.out, "rehearse:")
+  if fs.is_file("/proc/sys/kernel/osrelease") {
+    assert(r.out.contains("    box      yes") or r.out.contains("    box      no: "), r.out)
+  } else {
+    says(r.out, "    box      no: the rehearsal needs cig 1.12.0 or later on Linux")
+  }
+  # The stubs stand in for npm, pip and cargo.
+  says(r.out, "    npm       found    npm")
+  says(r.out, "    crates.io found    cargo")
+  says(r.out, "verdict(s) in")
+  says(r.out, "in the quarantine")
+})
+
 test("doctor counts a python it cannot find as a missing tool", pack() {
   if on_windows {
     # cig searches the Windows directories after PATH, as CreateProcess does,
