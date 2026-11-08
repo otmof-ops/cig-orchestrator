@@ -76,7 +76,7 @@ if ($i -lt $argsList.Count) { $rest = @($argsList[$i..($argsList.Count - 1)]) }
 $cmd = 'help'
 if ($rest.Count -gt 0) { $cmd = [string]$rest[0] }
 
-$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'crash', 'config', 'blacklist', 'guard', 'undo', 'run-url', 'agent', 'approve', '--help', '-h', '--version')
+$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'crash', 'config', 'blacklist', 'quarantine', 'guard', 'undo', 'run-url', 'agent', 'approve', '--help', '-h', '--version')
 # From the home folder itself (or a drive's root), cig would take all of it
 # as the run's pack and watch every file in it around each step: these run
 # from an empty folder of cigo's instead, told where you are.

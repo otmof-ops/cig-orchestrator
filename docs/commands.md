@@ -351,6 +351,7 @@ cigo guard log [--all|--json] what was guarded, and what came of it
 cigo guard uninstall          every shim and startup-file block it wrote, removed; --yes does it
 cigo undo last                the newest guarded call, taken back (cig unburn of its run)
 cigo run-url <url> [--trust]  the safe way to curl | sh (below)
+cigo quarantine [show <sha256> | clear [--all]]  what run-url downloaded, read again or cleared
 ```
 
 The installer asks once, by printing the question and the command that
@@ -443,6 +444,13 @@ twice: the verdict is kept by their sha256, signed, and `--trust` runs them
 without the rehearsal and keeps that. Like `cigo rehearse`, it runs in a
 project or an empty folder rather than your home, since the box lays over
 the folder you are in.
+
+**`cigo quarantine`** lists what run-url downloaded, newest first: its
+sha256, size, when, and the URL it came from. `cigo quarantine show
+<sha256>` reads one again against the rules and your blacklist and says the
+verdict with each finding, without running it, and the command that runs
+it rehearsed first. `cigo quarantine clear` removes what is older than
+`quarantine_keep_days` (30; 0 keeps everything), and `--all` everything.
 
 Paused or off, a shim says so on every guarded call (`E896`) and runs the
 real program. An install script that runs a package manager again inside a
