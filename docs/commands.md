@@ -209,7 +209,18 @@ a network command is high. Whatever a decoder is fed (`base64 -d`, `xxd
 -r`, `printf '\x…'`, Python's `b64decode`, Node's `Buffer.from(…,
 'base64')`, PowerShell's `FromBase64String`) is decoded and read the same
 way, three levels deep and within a size cap, and its findings name both
-places (`decoded from scripts/x.sh:4`). All of it is text: nothing runs.
+places (`decoded from scripts/x.sh:4`). A command written in escapes,
+`$(printf '\x63\x75\x72\x6c')`, `$(echo -e '…')` or `$'…'`, reads as what it
+spells. The command a JavaScript or Python script hands to a shell
+(`child_process`'s `exec` and `spawn`, `subprocess`, `os.system`) is built
+the way the program builds it, string pieces joined, templates, f-strings
+and string constants filled in, and read as shell (`run from x.js:3`). A
+secret from the environment (`process.env.NPM_TOKEN`, `os.environ[…]`,
+`os.getenv(…)`) or a credentials file (`~/.npmrc`, `~/.pypirc`, `~/.netrc`)
+that reaches a network call (`https.get`, `fetch`, `requests`, `urlopen`,
+`net.connect`) is critical (`E871` and `E872`), unless it goes only to its
+own service (`GITHUB_TOKEN` to github.com, `NPM_TOKEN` to npmjs.org). All
+of it is text: nothing runs.
 
 ```
 cigo audit [<task>...] [--json]        the read, with nothing run
