@@ -99,9 +99,23 @@ as `name args @directory` in `$STUB_LOG`, prints a version when asked, and
 fails on the argument `fail-please`. That's how the suite checks what every
 language would run, and where, without installing any of them.
 
+`tests/fixtures/detection` is the guard's detection corpus (#88): 24 inert
+attacks, 24 benign tasks people really run and 4 grey ones (an official
+installer piped to `sh`, `sudo apt-get install`), each a task that exits
+before its first line and is only ever read. Every sample's header carries
+its label, its ATT&CK technique and the rating it gets today
+(`label: attack | technique: T1027 | expect: medium | target: critical`).
+The suite holds each rating exactly, so a lost detection fails, and so does
+an improvement until its label is raised in the same change. No benign task
+may be flagged at medium or above, and every address an attack names,
+decoded or not, is in a documentation range (RFC 5737) or under `.invalid`
+(RFC 2606). Today: every benign task `none`, 22 of 24 attacks at medium or
+above, 21 at high or above.
+
 ```sh
 cig run tests/run.cig                   # every test
 cig run tests/run.cig -- monorepo       # the tests whose name contains "monorepo"
+cig run tests/run.cig -- corpus         # the detection corpus
 cig run --no-rollback tests/run.cig     # keep .test-work/ to look around after a failure
 cigo run ci                             # cig check, shellcheck, then the suite
 ```
