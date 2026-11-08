@@ -1,6 +1,7 @@
 # what runs leave behind
 .cig-orchestrator/
 .test-work/
+.bench-work/
 TOOLCHAINS.md.new
 examples/demo-app/build/
 examples/demo-app/dist/
