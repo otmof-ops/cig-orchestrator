@@ -1,0 +1,4 @@
+[package]
+name = "itoa-stand-in"
+version = "1.0.11"
+edition = "2021"

@@ -1,0 +1,12 @@
+{
+  "project": "rehearse-setup",
+  "tasks": {
+    "install": {
+      "shell": "echo installed > done.txt",
+      "stage": "setup",
+      "toolchain": "node-npm",
+      "footprint": {"writes": ["done.txt"]},
+      "desc": "a harmless stand-in for npm ci; the lockfile beside it names what it would install"
+    }
+  }
+}
