@@ -7,6 +7,23 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **The ransomware shape** (#55, `E876`). The rehearsal's footprint reader
+  rates a task critical when it sees many files renamed to one ransomware-
+  tagged extension (`.locked`, `.encrypted`, `.enc` and the rest), or a
+  ransom-note-shaped file dropped in three or more directories; the
+  thresholds are named constants (`RANSOM_EXT_FLOOR`, `RANSOM_NOTE_DIRS_FLOOR`)
+  and the finding reads with the rest of a rehearsal's behavior evidence.
+  A labelled attack sample (`m27`) and a benign twin (`b30`: a formatter
+  rewriting many files without renaming) joined the detection corpus.
+- **The package-docs scan** (#55). The rehearsal's static read now reads each
+  installed npm package's README and its `package.json` `description` for
+  prompt-injection rules only (`E886`, `E887`): a README that quotes
+  `curl | sh` as an install example is not a fetch-and-run.
+- **Shim and update output fenced for an agent** (#55). The shim's
+  pass-through (`cigo guard exec`) and `cigo update`'s installer output are
+  fenced the same way as `cigo agent run`: when an agent variable is set,
+  output that reads as instructions to an AI (`E886`, `E887`) is captured,
+  marked and then shown, instead of streamed straight through.
 - **Local inputs for `cigo rehearse`** (#56). A `.tgz`, `.tar.gz`, `.whl` or
   `.crate` on disk is rehearsed the same way the registry form of its
   ecosystem is: installed with the ecosystem's own tool against the local
