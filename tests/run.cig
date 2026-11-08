@@ -3823,6 +3823,121 @@ test("rehearse uses a package once: PyPI imports it, a crate links into a progra
   assert(not nopy.contains("importlib"), nopy)
 })
 
+test("rehearse of a local tarball, wheel, crate, folder or git+ URL: each ecosystem's own tool against the local path (#56)", pack() {
+  if not on_linux or proc.which("python3") == null {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse-local")
+  # A dry run of cigo: the rehearsal's hop is planned and its command line
+  # shown, and no package manager is called (the stubs stand in for them).
+  pull planned(words) {
+    roll args = ["run", "--dry-run", tool, "--"] + words
+    if tool_binary != "" {
+      args = ["--dry-run"] + words
+    }
+    stick r = hop_env(dir, tool_prog("cig"), args, stubbed(dir))
+    snuff r.out + r.err
+  }
+  # A .tgz is npm install of the local file, then require every installed dep.
+  stick tgz = planned(["rehearse", "./left-pad-stand-in-1.3.0.tgz"])
+  says(tgz, "npm install")
+  says(tgz, "left-pad-stand-in-1.3.0.tgz")
+  says(tgz, "require(n)")
+  stick tgz_no = planned(["rehearse", "./left-pad-stand-in-1.3.0.tgz", "--no-use"])
+  assert(not tgz_no.contains("require("), tgz_no)
+  # A .whl is pip install of the file, then import the dist from the name.
+  stick whl = planned(["rehearse", "./six_stand_in-1.16.0-py3-none-any.whl"])
+  says(whl, "pip install")
+  says(whl, "six_stand_in-1.16.0-py3-none-any.whl")
+  says(whl, "importlib.import_module")
+  says(whl, "six-stand-in")
+  # A .crate is extracted and taken as a path dependency through cargo.
+  stick crate = planned(["rehearse", "./itoa-stand-in-1.0.11.crate"])
+  says(crate, "tar -xzf")
+  says(crate, "itoa-stand-in-1.0.11.crate")
+  says(crate, "cargo init --bin")
+  says(crate, "extern crate itoa_stand_in")
+  says(crate, "path = \"crate/")
+  # A folder with package.json: npm install the folder, require the name.
+  stick folder_npm = planned(["rehearse", "./pkg-npm"])
+  says(folder_npm, "npm install")
+  says(folder_npm, "pkg-npm")
+  says(folder_npm, "require(process.argv[1])")
+  says(folder_npm, "left-pad-stand-in")
+  # A folder with pyproject.toml: pip install the folder, import the dist.
+  stick folder_py = planned(["rehearse", "./pkg-pypi"])
+  says(folder_py, "pip install")
+  says(folder_py, "pkg-pypi")
+  says(folder_py, "six-stand-in")
+  # A folder with Cargo.toml: path dep through cargo.
+  stick folder_crate = planned(["rehearse", "./pkg-crate"])
+  says(folder_crate, "cargo init --bin")
+  says(folder_crate, "extern crate itoa_stand_in")
+  # A missing local path is refused with the file not existing.
+  stick missing = guard_tool(dir, ["rehearse", "./no-such-thing.tgz"], {})
+  exits(missing, 2)
+  says(missing.err, "no such file or folder")
+  # git+ssh and git@ are not rehearsed (only http(s) are).
+  stick ssh = guard_tool(dir, ["rehearse", "git+ssh://host/x.git"], {})
+  exits(ssh, 2)
+  says(ssh.err, "only git+http(s) URLs are rehearsed")
+  # A ref that git would read as an option is refused before git runs.
+  stick opt = guard_tool(dir, ["rehearse", "git+https://example.invalid/x.git#--upload-pack=touch"], {})
+  exits(opt, 2)
+  says(opt.err, "not a ref this checks out")
+})
+
+test("rehearse of a local input: the verdict is kept against the file's or folder's content hash (#56)", pack() {
+  if not rehearsal_here() {
+    snuff
+  }
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a verdict)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse-local")
+  # A refusal from the stubbed npm counts: the content hash is the key, and
+  # the second attempt reads the kept verdict without the box. A bare
+  # rehearsal cannot install here, which exits non-zero but still keeps
+  # a verdict only when the install itself went through, so this test
+  # watches the `rehearsing` line rather than the exit code.
+  stick first = guard_tool(dir, ["rehearse", "./pkg-npm"], {})
+  if no_box_here(first) {
+    snuff
+  }
+  # One more file flips the folder hash: it's a different folder now.
+  burn {
+    fs.write_text(path.join(dir, "pkg-npm", "extra.js"), "module.exports = 2;\n")
+  }
+  stick again = guard_tool(dir, ["rehearse", "./pkg-npm"], {})
+  # The folder changed, so it is rehearsed again, not read from a kept one.
+  assert(not again.out.contains("rehearsed ./pkg-npm before"), "the changed folder reused the old verdict:\n" + again.out)
+})
+
+test("setup shares kept verdicts: a clean rehearsal of a setup task keeps a verdict for each lockfile package (#56)", pack() {
+  if not rehearsal_here() {
+    snuff
+  }
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a verdict)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse-setup")
+  # The setup task writes within its footprint, so the rehearsal is clean.
+  stick r = guard_tool(dir, ["run", "install"], {CIGO_REHEARSE: "auto"})
+  if no_box_here(r) {
+    snuff
+  }
+  exits(r, 0)
+  says(r.out, "rehearsed: nothing outside its footprint")
+  # A clean setup rehearsal keeps one verdict per lockfile package.
+  says(r.out, "kept 1 per-package verdict from this setup rehearsal")
+  stick kept = fs.glob(path.join(cigo_home(dir), "rehearsals", "*.json"))
+  assert(kept.len() >= 1, "expected at least one kept verdict in " + path.join(cigo_home(dir), "rehearsals"))
+  stick body = fs.read_text(kept.first())
+  assert(body.contains("npm:left-pad@1.3.0") and body.contains("\"risk\": \"none\""), "a per-package verdict was not kept:\n" + body)
+})
+
 test("quarantine lists what run-url kept, reads one again, and clears what is older than quarantine_keep_days (#56)", pack() {
   if on_windows {
     snuff

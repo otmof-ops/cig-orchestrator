@@ -1,0 +1,4 @@
+[project]
+name = "six-stand-in"
+version = "1.16.0"
+description = "a tiny stand-in for a wheel, read by cigo rehearse of a folder"
