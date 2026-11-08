@@ -7,6 +7,29 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **Overrides, bundles and the two warnings** (#62 steps 1 and 3). The
+  blacklist takes a per-user override on top of the lists: `cigo blacklist
+  allow <entry> --reason=...` asks for OS authentication so a script cannot
+  whitelist its own payload, and records who, when and why. The entry stays
+  on the list and `cigo blacklist why <thing>` names the override next to
+  it; `cigo blacklist unallow <entry>` takes it back (also
+  OS-authenticated). Overrides live in `blacklist.d/allows.jsonl`, signed
+  with the tin's key under a separate label so a tampered allows file
+  never stands in for a blacklist file, and a file that does not verify is
+  said (`E587`) and ignored. `cigo blacklist export <file>` writes your
+  own entries and overrides as one signed JSON bundle, and `cigo blacklist
+  import <file>` is OS-authenticated and refuses any bundle whose
+  signature does not verify. Running a blacklisted task goes through two
+  warnings: `cigo run <task>` prints `E580` and refuses, then
+  `--run-untrusted=<task>` prints `E581` and refuses, then `--light-it`
+  takes OS authentication; with `blacklist_unboxed = ask` and `--no-box`,
+  a second OS authentication and the run goes outside the box (`E583`,
+  the box is CigScript#106 and is not built yet). The approval is kept
+  for `blacklist_exception_ttl` (default 24h) so a re-run in that window
+  does not ask again (`E582`); agents and CI never approve a blacklisted
+  run (`E895`). Two new settings, `blacklist_unboxed` and
+  `blacklist_exception_ttl`, govern the flow, and `cigo blacklist
+  exceptions` lists what is in force.
 - **The ransomware shape** (#55, `E876`). The rehearsal's footprint reader
   rates a task critical when it sees many files renamed to one ransomware-
   tagged extension (`.locked`, `.encrypted`, `.enc` and the rest), or a
@@ -24,6 +47,22 @@ repository root lists versions it must not pick.
   fenced the same way as `cigo agent run`: when an agent variable is set,
   output that reads as instructions to an AI (`E886`, `E887`) is captured,
   marked and then shown, instead of streamed straight through.
+- **Local inputs for `cigo rehearse`** (#56). A `.tgz`, `.tar.gz`, `.whl` or
+  `.crate` on disk is rehearsed the same way the registry form of its
+  ecosystem is: installed with the ecosystem's own tool against the local
+  path, used once (or not, with `--no-use`). A folder is rehearsed by its
+  manifest (`package.json` as npm, `pyproject.toml` or `setup.py` as PyPI,
+  `Cargo.toml` as crates.io). A `git+https://…` URL is cloned into the
+  scratch (never into your tree) and rehearsed as a folder, with
+  `git+https://…#ref` taking that ref. The verdict is kept against the
+  sha256 of the local file, the sha256 of a folder's content, or the
+  commit at HEAD for a clone.
+- **Setup shares kept verdicts** (#56). A clean rehearsal of a setup task
+  keeps a verdict for each package the project's lockfiles name, under the
+  same key `cigo rehearse` reads: npm and crates.io by version with the
+  lockfile's integrity, PyPI by version with its hash. The next
+  `cigo rehearse npm:name@1.2.3` of the same bytes answers from the kept
+  verdict without the box.
 The guard reaches fish and PowerShell; level 3 catches the first run of a
 downloaded file.
 

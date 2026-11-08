@@ -3743,6 +3743,289 @@ test("blacklist: rehearse refuses a blacklisted package before it asks for the b
   exits(guard_tool(dir, ["blacklist", "why", "npm:left-pad@1.3.0"], l), 0)
 })
 
+# ----- the blacklist: allows, export and import, the two warnings (#62 steps 1 and 3) ---
+#
+# `os_auth` reaches `/usr/bin/pkexec` (or /bin/pkexec) directly and prompts
+# polkit for real. No test drives it: refusal paths cover what fails without
+# a prompt (unattended under CI, bundle verification, missing --reason), and
+# success paths that only `allows` or an `exception` reach are set up by
+# writing a signed file with the suite's own cig and that CIGSCRIPT_HOME.
+
+# Sign a file with `cig tin mac` for the test's own cig home.
+pull bl_sign(dir, file, label) {
+  stick r = hop_env(dir, "cig", ["tin", "mac", file, "--label", label], {})
+  assert(r.code == 0, "cig tin mac failed (${r.code}): ${r.err}")
+  burn {
+    fs.write_text(file + ".mac", r.out.trim() + "\n")
+  }
+}
+
+# A signed allows file under BLACKLIST_DIR (the test's own `<dir>-lists`).
+pull bl_sign_allows(dir, items) {
+  stick ldir = dir + "-lists"
+  burn {
+    if not fs.is_dir(ldir) {
+      fs.mkdir(ldir)
+    }
+  }
+  roll lines = ["# cigo blacklist allows"]
+  for a in items {
+    lines.push(json.stringify(a))
+  }
+  stick f = path.join(ldir, "allows.jsonl")
+  burn {
+    fs.write_text(f, lines.join("\n") + "\n")
+  }
+  bl_sign(dir, f, "cigo-blacklist-allow")
+}
+
+# A signed exceptions file under CIGO_HOME/blacklist-exceptions.jsonl.
+pull bl_sign_exceptions(dir, rows) {
+  stick h = cigo_home(dir)
+  burn {
+    if not fs.is_dir(h) {
+      fs.mkdir(h)
+    }
+  }
+  roll lines = ["# cigo blacklist exceptions"]
+  for o in rows {
+    lines.push(json.stringify(o))
+  }
+  stick f = path.join(h, "blacklist-exceptions.jsonl")
+  burn {
+    fs.write_text(f, lines.join("\n") + "\n")
+  }
+  bl_sign(dir, f, "cigo-blacklist-allow")
+}
+
+test("blacklist allow: refused without --reason, refused under CI (E895), and a signed allows file takes effect in why and audit", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a list)"
+    snuff
+  }
+  stick dir = blacklist_project()
+  stick l = lists(dir)
+  exits(guard_tool(dir, ["blacklist", "add", "npm:event-stream@3.3.6", "--reason=stole tokens"], l), 0)
+  # Allow without --reason is refused before any OS prompt.
+  stick no_reason = guard_tool(dir, ["blacklist", "allow", "npm:event-stream@3.3.6"], l)
+  exits(no_reason, 2)
+  says(no_reason.err, "--reason")
+  # Under CI (unattended) a script cannot allow anything: E895 before os_auth.
+  stick ci = guard_tool(dir, ["blacklist", "allow", "npm:event-stream@3.3.6", "--reason=false positive"], l.merge({CI: "1"}))
+  exits(ci, 2)
+  says(ci.err, "E895")
+  # Same for unallow.
+  stick ci2 = guard_tool(dir, ["blacklist", "unallow", "npm:event-stream@3.3.6", "--reason=x"], l.merge({CI: "1"}))
+  exits(ci2, 2)
+  # unallow of an entry that is not allowed is refused before os_auth.
+  stick not_allowed = guard_tool(dir, ["blacklist", "unallow", "npm:not-allowed"], l)
+  exits(not_allowed, 2)
+  says(not_allowed.err, "not allowed")
+  # Set up a signed allows file by hand (the way save_allows signs). From
+  # here the guard's readers must respect the override as if `allow` had
+  # written it.
+  bl_sign_allows(dir, [{entry: "npm:event-stream@3.3.6", reason: "false positive, our own package", by: "jay", at: "2026-11-08", expires: ""}])
+  # `allows` lists it, with by and at.
+  stick listed = guard_tool(dir, ["blacklist", "allows"], l)
+  exits(listed, 0)
+  says(listed.out, "npm:event-stream@3.3.6")
+  says(listed.out, "by jay")
+  says(listed.out, "false positive")
+  # `why` names the override next to the entry.
+  stick why = guard_tool(dir, ["blacklist", "why", "npm:event-stream@3.3.6"], l)
+  says(why.out, "overridden by")
+  says(why.out, "false positive")
+  # Audit's install task has no E580 finding now, although the entry stays
+  # on the blacklist.
+  stick a = guard_tool(dir, ["audit", "install", "--json"], l)
+  exits(a, 0)
+  stick tasks_j = json.parse(a.out).tasks
+  assert(not tasks_j.install.findings.any(pack(f) => f.code == "E580"), "E580 still fires through an allow: " + json.stringify(tasks_j.install))
+  says(guard_tool(dir, ["blacklist", "list"], l).out, "npm:event-stream@3.3.6")
+  # An expired allow is dropped: E580 comes back.
+  bl_sign_allows(dir, [{entry: "npm:event-stream@3.3.6", reason: "false positive, lapsed", by: "jay", at: "2026-01-01", expires: "2020-01-01"}])
+  stick after = guard_tool(dir, ["audit", "install", "--json"], l)
+  exits(after, 0)
+  assert(json.parse(after.out).tasks.install.findings.any(pack(f) => f.code == "E580"), "E580 did not come back after an expired allow")
+  # An allows file whose signature does not verify is said (E587) and
+  # ignored: the override does not stand in for a real one.
+  burn {
+    fs.write_text(path.join(dir + "-lists", "allows.jsonl.mac"), "0000000000000000000000000000000000000000000000000000000000000000\n")
+  }
+  stick tampered = guard_tool(dir, ["blacklist", "allows"], l)
+  says(tampered.err, "E587")
+  # Successful real-auth paths for `allow`, `unallow`, and the reload of
+  # a hand-edited allows file are not tested here: no polkit agent, no
+  # bypass. The code that writes save_allows is exercised through the
+  # export it feeds and through `blacklist allows` reading its output.
+})
+
+test("blacklist export writes a signed bundle, and import refuses a tampered or unsigned bundle (E587) and refuses under CI (E895)", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a list)"
+    snuff
+  }
+  stick dir = blacklist_project()
+  stick l = lists(dir)
+  exits(guard_tool(dir, ["blacklist", "add", "npm:event-stream@3.3.6", "--reason=stole tokens"], l), 0)
+  exits(guard_tool(dir, ["blacklist", "add", "evil.example.com", "--reason=a test entry"], l), 0)
+  bl_sign_allows(dir, [{entry: "domain:evil.example.com", reason: "a false positive", by: "jay", at: "2026-11-08", expires: ""}])
+  stick bundle = path.join(dir, "team.bundle")
+  stick wrote = guard_tool(dir, ["blacklist", "export", bundle], l)
+  exits(wrote, 0)
+  # The path is said as cigo shows paths: `~/…` under the home folder.
+  says(wrote.out, "team.bundle and ")
+  says(wrote.out, "team.bundle.mac")
+  assert(fs.is_file(bundle), "the bundle was not written")
+  assert(fs.is_file(bundle + ".mac"), "the bundle's signature was not written")
+  stick payload = json.parse(fs.read_text(bundle))
+  assert(str(payload.get("format", "")) == "cigo-blacklist-bundle", str(payload))
+  assert(payload.mine.len() == 2, json.stringify(payload.mine))
+  assert(payload.allows.len() == 1, json.stringify(payload.allows))
+  # Fresh dir for import. The verification happens before os_auth, so the
+  # refusals below are reached under CI and without auth.
+  stick dir2 = blacklist_project()
+  stick l2 = lists(dir2)
+  # A bundle whose signature was tampered: E587 before any auth prompt.
+  stick bad = path.join(dir2, "bad.bundle")
+  burn {
+    fs.write_text(bad, fs.read_text(bundle))
+    fs.write_text(bad + ".mac", "0000000000000000000000000000000000000000000000000000000000000000\n")
+  }
+  stick bad_r = guard_tool(dir2, ["blacklist", "import", bad], l2.merge({CI: "1"}))
+  exits(bad_r, 2)
+  says(bad_r.err, "E587")
+  # A bundle without a .mac is refused the same way.
+  stick lone = path.join(dir2, "unsigned.bundle")
+  burn {
+    fs.write_text(lone, fs.read_text(bundle))
+  }
+  stick lone_r = guard_tool(dir2, ["blacklist", "import", lone], l2.merge({CI: "1"}))
+  exits(lone_r, 2)
+  says(lone_r.err, "E587")
+  # A valid bundle under CI: verification passes but the OS-auth gate
+  # refuses (E895) before any merge.
+  stick ci = guard_tool(dir2, ["blacklist", "import", bundle], l2.merge({CI: "1"}))
+  exits(ci, 2)
+  says(ci.err, "E895")
+  stick listed_after = guard_tool(dir2, ["blacklist", "list"], l2).out
+  assert(not listed_after.contains("npm:event-stream@3.3.6"), "an entry was imported although auth refused")
+  # Success-path (real-auth) import is not tested here: no polkit agent,
+  # no bypass. The merge logic itself is deterministic given the bundle.
+})
+
+test("blacklist run: the two warnings; a signed exception skips them; CI refuses with E895", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a list)"
+    snuff
+  }
+  stick dir = blacklist_project()
+  stick l = lists(dir)
+  exits(guard_tool(dir, ["blacklist", "add", "evil.example.com", "--reason=a test entry"], l), 0)
+  # Plain run: warning one, then refused; names the next step.
+  stick one = guard_tool(dir, ["run", "fetch"], l)
+  exits(one, 1)
+  says(one.err, "E580 this one's on the bad batch list")
+  says(one.out, "cigo run fetch --run-untrusted=fetch --light-it")
+  assert(not there(dir, "fetch.txt"), "the task ran at warning one")
+  # With --run-untrusted alone: warning two, still refused.
+  stick two = guard_tool(dir, ["run", "fetch", "--run-untrusted=fetch"], l)
+  exits(two, 1)
+  says(two.err, "E581 last warning")
+  says(two.out, "--light-it")
+  assert(not there(dir, "fetch.txt"), "the task ran at warning two")
+  # Under CI (unattended), every path is refused before os_auth: E895.
+  stick ci = guard_tool(dir, ["run", "fetch", "--run-untrusted=fetch", "--light-it", "--no-box"], l.merge({CI: "1"}))
+  exits(ci, 1)
+  says(ci.err, "E895")
+  assert(not there(dir, "fetch.txt"), "the task ran under CI")
+  # A signed exception in force skips the warnings: E582, the task runs.
+  stick future = time.format_ms(time.now_ms() + 86400000, "%Y-%m-%dT%H:%M:%S")
+  bl_sign_exceptions(dir, [{task: "fetch", by: "jay", at: time.now_iso(), until: future, unboxed: true}])
+  stick again = guard_tool(dir, ["run", "fetch"], l)
+  exits(again, 0)
+  says(again.err, "E582 your call")
+  assert(there(dir, "fetch.txt"), "the task did not run under an active exception")
+  # `blacklist exceptions` lists the row.
+  stick ex = guard_tool(dir, ["blacklist", "exceptions"], l)
+  exits(ex, 0)
+  says(ex.out, "fetch")
+  says(ex.out, "no box")
+  # An expired exception is dropped: the warnings come back.
+  burn {
+    fs.rm(path.join(dir, "fetch.txt"))
+  }
+  bl_sign_exceptions(dir, [{task: "fetch", by: "jay", at: "2020-01-01T00:00:00", until: "2020-01-02T00:00:00", unboxed: true}])
+  stick again2 = guard_tool(dir, ["run", "fetch"], l)
+  exits(again2, 1)
+  says(again2.err, "E580")
+  # An exceptions file whose signature does not verify is said (E587) and
+  # ignored: a hand-edited exception does not stand in for a real one.
+  burn {
+    fs.write_text(path.join(cigo_home(dir), "blacklist-exceptions.jsonl.mac"), "0000000000000000000000000000000000000000000000000000000000000000\n")
+  }
+  stick tampered = guard_tool(dir, ["blacklist", "exceptions"], l)
+  says(tampered.err, "E587")
+  # The --light-it + attended path that would actually prompt polkit is
+  # not tested: no agent is attached to the test, so os_auth fails, which
+  # looks the same as a deny. That path is covered through the exception
+  # above, which is exactly what the two-warnings flow writes on a go.
+})
+
+test("os_auth never consults PATH: the source names a fixed absolute path and never which/proc.which for pkexec or osascript", pack() {
+  # Calling a real polkit prompt from a test hangs for the user to type,
+  # so a runtime test of os_auth is not reliable across machines (some
+  # have a polkit agent attached, some do not, and no bypass is allowed).
+  # Instead this test reads orchestrate.cig and checks what the source
+  # resolves from: only `/usr/bin/pkexec`, `/bin/pkexec` and
+  # `/usr/bin/osascript` are passed to `proc.run`, never through PATH.
+  stick src = fs.read_text(tool)
+  # Find the os_auth function block: everything between its definition
+  # and the next top-level `pull ` at column zero.
+  stick start = src.find("pull os_auth(")
+  assert(start >= 0, "os_auth not found in orchestrate.cig")
+  stick after = src.slice(start)
+  stick end_at = after.slice(1).find("\npull ")
+  roll block = after
+  if end_at >= 0 {
+    block = after.slice(0, 1 + end_at)
+  }
+  # Also the one function the block calls.
+  stick bin_start = src.find("pull os_auth_bin(")
+  assert(bin_start >= 0, "os_auth_bin not found in orchestrate.cig")
+  stick bin_after = src.slice(bin_start)
+  stick bin_end = bin_after.slice(1).find("\npull ")
+  roll bin_block = bin_after
+  if bin_end >= 0 {
+    bin_block = bin_after.slice(0, 1 + bin_end)
+  }
+  stick both = block + "\n" + bin_block
+  # Neither function may use PATH lookup for an auth program.
+  assert(not both.contains("which(\"pkexec"), "os_auth consults PATH for pkexec: " + both)
+  assert(not both.contains("which(\"osascript"), "os_auth consults PATH for osascript: " + both)
+  # What pkexec runs as root is named by its full path: pkexec finds a bare
+  # name through PATH, so `true` alone could be anyone's program.
+  assert(both.contains("\"/usr/bin/true\"") and both.contains("\"/bin/true\""), "pkexec is not given a full path: " + both)
+  assert(not both.contains("[\"true\"]"), "pkexec is given a bare name: " + both)
+  assert(not both.contains("proc.which(\"pkexec"), "os_auth consults proc.which for pkexec: " + both)
+  assert(not both.contains("proc.which(\"osascript"), "os_auth consults proc.which for osascript: " + both)
+  # Every proc.run call in the block that would start an auth program
+  # must pass a fixed absolute path, never a bare name resolved through
+  # PATH. Flag `proc.run("pkexec"` or `proc.run("osascript"` with no
+  # directory prefix.
+  roll offending = []
+  for line in both.lines() {
+    stick t = line.trim()
+    if t.starts_with("#") {
+      continue
+    }
+    if t.contains("proc.run(\"pkexec") or t.contains("proc.run(\"osascript") {
+      offending.push(line)
+    }
+  }
+  assert(offending.is_empty(), "os_auth calls proc.run on a PATH-resolved name:\n  " + offending.join("\n  "))
+})
+
 test("rehearse --fail-on: the exit code says the risk once it reaches the threshold, and never fails nothing", pack() {
   if not has_tin_mac() {
     exhale "      (skipped: this cig cannot sign a list)"
@@ -3821,6 +4104,121 @@ test("rehearse uses a package once: PyPI imports it, a crate links into a progra
   says(planned(["rehearse", "npm:left-pad@1.3.0"]), "require(process.argv[1])")
   stick nopy = planned(["rehearse", "pypi:six==1.16.0", "--no-use"])
   assert(not nopy.contains("importlib"), nopy)
+})
+
+test("rehearse of a local tarball, wheel, crate, folder or git+ URL: each ecosystem's own tool against the local path (#56)", pack() {
+  if not on_linux or proc.which("python3") == null {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse-local")
+  # A dry run of cigo: the rehearsal's hop is planned and its command line
+  # shown, and no package manager is called (the stubs stand in for them).
+  pull planned(words) {
+    roll args = ["run", "--dry-run", tool, "--"] + words
+    if tool_binary != "" {
+      args = ["--dry-run"] + words
+    }
+    stick r = hop_env(dir, tool_prog("cig"), args, stubbed(dir))
+    snuff r.out + r.err
+  }
+  # A .tgz is npm install of the local file, then require every installed dep.
+  stick tgz = planned(["rehearse", "./left-pad-stand-in-1.3.0.tgz"])
+  says(tgz, "npm install")
+  says(tgz, "left-pad-stand-in-1.3.0.tgz")
+  says(tgz, "require(n)")
+  stick tgz_no = planned(["rehearse", "./left-pad-stand-in-1.3.0.tgz", "--no-use"])
+  assert(not tgz_no.contains("require("), tgz_no)
+  # A .whl is pip install of the file, then import the dist from the name.
+  stick whl = planned(["rehearse", "./six_stand_in-1.16.0-py3-none-any.whl"])
+  says(whl, "pip install")
+  says(whl, "six_stand_in-1.16.0-py3-none-any.whl")
+  says(whl, "importlib.import_module")
+  says(whl, "six-stand-in")
+  # A .crate is extracted and taken as a path dependency through cargo.
+  stick crate = planned(["rehearse", "./itoa-stand-in-1.0.11.crate"])
+  says(crate, "tar -xzf")
+  says(crate, "itoa-stand-in-1.0.11.crate")
+  says(crate, "cargo init --bin")
+  says(crate, "extern crate itoa_stand_in")
+  says(crate, "path = \"crate/")
+  # A folder with package.json: npm install the folder, require the name.
+  stick folder_npm = planned(["rehearse", "./pkg-npm"])
+  says(folder_npm, "npm install")
+  says(folder_npm, "pkg-npm")
+  says(folder_npm, "require(process.argv[1])")
+  says(folder_npm, "left-pad-stand-in")
+  # A folder with pyproject.toml: pip install the folder, import the dist.
+  stick folder_py = planned(["rehearse", "./pkg-pypi"])
+  says(folder_py, "pip install")
+  says(folder_py, "pkg-pypi")
+  says(folder_py, "six-stand-in")
+  # A folder with Cargo.toml: path dep through cargo.
+  stick folder_crate = planned(["rehearse", "./pkg-crate"])
+  says(folder_crate, "cargo init --bin")
+  says(folder_crate, "extern crate itoa_stand_in")
+  # A missing local path is refused with the file not existing.
+  stick missing = guard_tool(dir, ["rehearse", "./no-such-thing.tgz"], {})
+  exits(missing, 2)
+  says(missing.err, "no such file or folder")
+  # git+ssh and git@ are not rehearsed (only http(s) are).
+  stick ssh = guard_tool(dir, ["rehearse", "git+ssh://host/x.git"], {})
+  exits(ssh, 2)
+  says(ssh.err, "only git+http(s) URLs are rehearsed")
+  # A ref that git would read as an option is refused before git runs.
+  stick opt = guard_tool(dir, ["rehearse", "git+https://example.invalid/x.git#--upload-pack=touch"], {})
+  exits(opt, 2)
+  says(opt.err, "not a ref this checks out")
+})
+
+test("rehearse of a local input: the verdict is kept against the file's or folder's content hash (#56)", pack() {
+  if not rehearsal_here() {
+    snuff
+  }
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a verdict)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse-local")
+  # A refusal from the stubbed npm counts: the content hash is the key, and
+  # the second attempt reads the kept verdict without the box. A bare
+  # rehearsal cannot install here, which exits non-zero but still keeps
+  # a verdict only when the install itself went through, so this test
+  # watches the `rehearsing` line rather than the exit code.
+  stick first = guard_tool(dir, ["rehearse", "./pkg-npm"], {})
+  if no_box_here(first) {
+    snuff
+  }
+  # One more file flips the folder hash: it's a different folder now.
+  burn {
+    fs.write_text(path.join(dir, "pkg-npm", "extra.js"), "module.exports = 2;\n")
+  }
+  stick again = guard_tool(dir, ["rehearse", "./pkg-npm"], {})
+  # The folder changed, so it is rehearsed again, not read from a kept one.
+  assert(not again.out.contains("rehearsed ./pkg-npm before"), "the changed folder reused the old verdict:\n" + again.out)
+})
+
+test("setup shares kept verdicts: a clean rehearsal of a setup task keeps a verdict for each lockfile package (#56)", pack() {
+  if not rehearsal_here() {
+    snuff
+  }
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign a verdict)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse-setup")
+  # The setup task writes within its footprint, so the rehearsal is clean.
+  stick r = guard_tool(dir, ["run", "install"], {CIGO_REHEARSE: "auto"})
+  if no_box_here(r) {
+    snuff
+  }
+  exits(r, 0)
+  says(r.out, "rehearsed: nothing outside its footprint")
+  # A clean setup rehearsal keeps one verdict per lockfile package.
+  says(r.out, "kept 1 per-package verdict from this setup rehearsal")
+  stick kept = fs.glob(path.join(cigo_home(dir), "rehearsals", "*.json"))
+  assert(kept.len() >= 1, "expected at least one kept verdict in " + path.join(cigo_home(dir), "rehearsals"))
+  stick body = fs.read_text(kept.first())
+  assert(body.contains("npm:left-pad@1.3.0") and body.contains("\"risk\": \"none\""), "a per-package verdict was not kept:\n" + body)
 })
 
 test("quarantine lists what run-url kept, reads one again, and clears what is older than quarantine_keep_days (#56)", pack() {
