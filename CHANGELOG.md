@@ -24,6 +24,41 @@ repository root lists versions it must not pick.
   fenced the same way as `cigo agent run`: when an agent variable is set,
   output that reads as instructions to an AI (`E886`, `E887`) is captured,
   marked and then shown, instead of streamed straight through.
+Four more codes the guard reads before a lockfile is touched.
+
+- **`E881` typosquats** (#55, #56). Every name a task's lockfiles hold
+  is compared against a bundled list of popular package names for its
+  ecosystem (npm, PyPI, crates.io), composed from each registry's own
+  download-count rankings. A name within an edit distance of one or two
+  of a popular one is reported medium with the popular name in the
+  finding (`reqeusts` → one letter from `requests`). Short names
+  (three characters or fewer) are left alone. PyPI's dash/underscore/dot
+  equivalence and npm's scope prefix are normalised before the compare.
+- **`E882` a recently published version**, medium (#55, #56). The
+  ecosystem's own registry is asked for each name in the lockfiles
+  and the version's publish date is read; one published inside
+  `metadata_young_days` (default 7) is reported.
+- **`E883` a new install script**, high (#55, #56). For npm, this
+  version's `preinstall`/`install`/`postinstall` is compared to the
+  version published just before it; a script that version did not run is
+  the finding ("2.4.0 ran no install script; 2.4.1 adds one").
+- **`E884` no linked source repository**, low (#55, #56). When the
+  registry entry has no `repository` link (npm), no `project_urls` or
+  `home_page` that points at a repository (PyPI), or no `repository`
+  (crates.io), the package is reported: what is on the registry cannot
+  be read against source.
+- **`registry_meta`** (`off`, the default, or `online`; a floor; the
+  paranoid preset sets `online`). Off, the guard makes no request of its
+  own and `E882` to `E884` are not read; the typosquat check needs no
+  network and always runs. Online, each name is asked once and the answer
+  kept a day under
+  `~/.cig-orchestrator/registry`. Only the name is sent, never a path
+  or a project's own name. A test points `CIGO_REGISTRY_NPM`,
+  `CIGO_REGISTRY_PYPI` and `CIGO_REGISTRY_CRATES` at a `file://`
+  directory of fixture responses, the way the OSV online test does
+  with `CIGO_OSV_API`.
+- **`metadata_young_days`** (default `7`). The E882 window in days; `0`
+  turns it off without touching the other two.
 
 ## 1.15.0 — 2026-11-08
 

@@ -78,6 +78,10 @@ stick SETTINGS = {
     doc: "how many days cigo quarantine clear keeps what run-url downloaded, by when it came (0 keeps everything); --all takes everything"},
   rehearse_fail_on: {values: ["never", "critical", "auto", "high", "medium", "low"], default: "auto", floor: true, presets: {ci: "high", paranoid: "medium"},
     doc: "the lowest rehearsal verdict that fails cigo rehearse (its exit code, which still says the risk): auto (high under CI, critical at a terminal), a level, or never; --fail-on=<level> sets it for one run"},
+  registry_meta: {values: ["off", "online"], default: "off", floor: true, presets: {paranoid: "online", chill: "off"},
+    doc: "registry metadata reads: the ecosystem's own registry (npm, PyPI, crates.io) is asked once per package for the signals E882 (a version published in the last few days), E883 (a new install script this version adds) and E884 (no source repository linked); online reads each name once and keeps the answers a day, off does not look"},
+  metadata_young_days: {values: null, default: "7", floor: false, presets: {},
+    doc: "how recent `recently published` is for E882, in days (default 7); 0 turns the E882 check off without turning registry_meta off"},
 }
 # The old shape, kept for the places that read a default and a doc.
 roll CONFIG_KEYS = {}
@@ -5830,12 +5834,16 @@ stick HEADLINES = {
   E877: ["torching the place"],
   E878: ["asking for the good stuff", "wants the keys to the cabinet"],
   E879: ["eyeing the tin", "going for the stash"],
+  E881: ["one letter off the real one", "a draw that reads like the real pack"],
+  E882: ["still warm from the press", "the ink is not dry on this one"],
+  E883: ["new recipe, this batch", "a line this blend never carried before"],
+  E884: ["no label on the pack", "no address on the carton"],
   E886: ["someone's whispering to your agent"],
   E887: ["fine print in invisible ink"],
   E888: ["checking for cops before it lights up"],
   E580: ["this one's on the bad batch list", "you said never again to this one"],
 }
-stick PLAIN = {E580: "on the blacklist", E871: "credential file named", E872: "exfiltration pattern", E873: "persistence", E874: "downloads and executes remote code", E875: "obfuscated code", E876: "ransomware shape", E877: "destructive command", E878: "privilege escalation", E879: "references cig's or cigo's own state", E886: "text addressed to AI agents", E887: "invisible or look-alike text", E888: "probes for a sandbox"}
+stick PLAIN = {E580: "on the blacklist", E871: "credential file named", E872: "exfiltration pattern", E873: "persistence", E874: "downloads and executes remote code", E875: "obfuscated code", E876: "ransomware shape", E877: "destructive command", E878: "privilege escalation", E879: "references cig's or cigo's own state", E886: "text addressed to AI agents", E887: "invisible or look-alike text", E888: "probes for a sandbox", E881: "a typosquat of a popular package", E882: "a recently published version", E883: "a new install script this version adds", E884: "no linked source repository"}
 roll SAID = {}
 roll TRUST_NOTED = false
 
@@ -6135,6 +6143,18 @@ stick OSV_ECOSYSTEMS = ["npm", "PyPI", "crates.io", "Go", "RubyGems", "Packagist
 roll OSV_NOTED = false
 roll OSV_INDEXES = {}
 roll OSV_PARSED = {}
+
+# Registry metadata: where each ecosystem's own registry lives and how
+# long an answer is kept (a day). A test points one at a file:// fixture
+# directory, the way the OSV online test does with CIGO_OSV_API.
+stick REGISTRY_NPM = env.get("CIGO_REGISTRY_NPM", "https://registry.npmjs.org")
+stick REGISTRY_PYPI = env.get("CIGO_REGISTRY_PYPI", "https://pypi.org")
+stick REGISTRY_CRATES = env.get("CIGO_REGISTRY_CRATES", "https://crates.io")
+stick REGISTRY_DIR = path.join(CIGO_HOME, "registry")
+stick REGISTRY_CACHE_MS = 86400000
+stick REGISTRY_ECOSYSTEMS = ["npm", "PyPI", "crates.io"]
+roll REGISTRY_NOTED = false
+roll REGISTRY_CACHE_MEM = {}
 
 # What the read decodes and how it reads shell (see "the read, harder to
 # fool" below).
@@ -6781,10 +6801,11 @@ pull scan_text(where, body, shellish, comments, depth, budget) {
 }
 
 # The guard's read of a task: the static read, and its lockfiles' packages
-# against OSV.
+# against OSV, the blacklist, the top-names list (typosquats, E881) and the
+# ecosystem's own registry (metadata signals E882, E883, E884).
 pull read_task(t, name) {
   stick v = static_read(t, name)
-  stick known = osv_findings(t) + blacklist_findings(t)
+  stick known = osv_findings(t) + blacklist_findings(t) + typosquat_findings(t) + metadata_findings(t)
   if known.is_empty() {
     snuff v
   }
@@ -7603,6 +7624,631 @@ pull do_update_db(g) {
   }
 }
 
+# ----- typosquats and registry metadata (#55 step 2, codes E881..E884) -----------
+#
+# E881: the package's name is within a letter or two of a popular one in its
+#   ecosystem. The list of popular names is bundled per ecosystem below.
+# E882: this version was published in the last `metadata_young_days` days.
+# E883: the previous version ran nothing at install; this one does.
+# E884: no source repository is linked on the registry.
+# The registry is asked once per name and the answer is kept a day.
+#
+# The top-names lists are chosen by hand from names that rank high in each
+# registry's public download counts (npm's downloads, PyPI's
+# top-pypi-packages, lib.rs's most-used crates): not a snapshot of today's
+# ranking, and refreshed by hand. They are names only, which are facts,
+# not the registries' content. Names kept here only for the typosquat
+# check; a project adds its own by writing them into its toolchain's
+# footprint if it needs to.
+
+stick TOP_NPM = [
+  "abort-controller", "acorn", "acorn-walk", "agent-base", "ajv", "ansi-colors", "ansi-escapes",
+  "ansi-regex", "ansi-styles", "anymatch", "argparse", "array-flatten", "asn1", "assert",
+  "async", "async-hook", "asynckit", "axios", "babel-core", "babel-loader", "babel-runtime",
+  "balanced-match", "base64-js", "big.js", "binary-extensions", "bluebird", "body-parser",
+  "boolbase", "brace-expansion", "braces", "browserify-aes", "browserify-cipher", "browserify-des",
+  "browserify-sign", "browserify-zlib", "browserslist", "buffer", "buffer-from", "builtin-modules",
+  "builtins", "bytes", "cacache", "call-bind", "callsites", "camelcase", "caniuse-lite", "chalk",
+  "chardet", "chokidar", "chownr", "ci-info", "classnames", "cliui", "clone", "clone-deep",
+  "color-convert", "color-name", "combined-stream", "commander", "concat-map", "concat-stream",
+  "console-browserify", "constants-browserify", "content-disposition", "content-type", "cookie",
+  "cookie-signature", "core-js", "core-util-is", "cors", "cross-env", "cross-spawn", "crypto-browserify",
+  "crypto-js", "css-loader", "css-select", "cssom", "csstype", "csv-parse", "damerau-levenshtein",
+  "date-fns", "debug", "decamelize", "decompress-response", "deep-equal", "deep-extend", "deepmerge",
+  "define-properties", "delayed-stream", "detect-indent", "detect-newline", "detect-port", "dir-glob",
+  "doctrine", "dom-serializer", "domelementtype", "domhandler", "domutils", "dotenv", "duplexer",
+  "duplexify", "ejs", "electron-to-chromium", "elliptic", "emoji-regex", "encodeurl", "encoding",
+  "end-of-stream", "enhanced-resolve", "entities", "env-paths", "err-code", "es-abstract", "escape-html",
+  "escape-string-regexp", "eslint", "eslint-config-prettier", "eslint-plugin-import", "eslint-plugin-react",
+  "eslint-scope", "eslint-utils", "eslint-visitor-keys", "espree", "esprima", "esquery", "esrecurse",
+  "estraverse", "esutils", "etag", "eventemitter3", "events", "execa", "expect", "express", "extend",
+  "external-editor", "fast-deep-equal", "fast-glob", "fast-json-stable-stringify", "fast-levenshtein",
+  "fastq", "fb-watchman", "figures", "file-entry-cache", "file-type", "filelist", "fill-range",
+  "finalhandler", "find-cache-dir", "find-up", "flat-cache", "flatted", "follow-redirects",
+  "for-in", "forever-agent", "form-data", "forwarded", "fresh", "from2", "fs-constants", "fs-extra",
+  "fs-minipass", "fs.realpath", "fsevents", "function-bind", "functional-red-black-tree", "gensync",
+  "get-caller-file", "get-intrinsic", "get-stream", "get-value", "glob", "glob-parent", "glob-to-regexp",
+  "globals", "globby", "got", "graceful-fs", "handlebars", "har-schema", "har-validator",
+  "has", "has-flag", "has-property-descriptors", "has-symbols", "hash-base", "hash.js", "hmac-drbg",
+  "hosted-git-info", "html-escaper", "http-cache-semantics", "http-errors", "http-proxy-agent",
+  "http-signature", "https-browserify", "https-proxy-agent", "iconv-lite", "ieee754", "ignore",
+  "immediate", "import-fresh", "imurmurhash", "indent-string", "inflight", "inherits", "ini",
+  "internal-slot", "invariant", "ipaddr.js", "is-arguments", "is-arrayish", "is-binary-path",
+  "is-boolean-object", "is-buffer", "is-callable", "is-ci", "is-core-module", "is-date-object",
+  "is-extendable", "is-extglob", "is-fullwidth-code-point", "is-generator-fn", "is-glob", "is-interactive",
+  "is-negative-zero", "is-number", "is-number-object", "is-obj", "is-path-inside", "is-plain-obj",
+  "is-regex", "is-stream", "is-string", "is-symbol", "is-typed-array", "is-typedarray", "is-unicode-supported",
+  "is-weakref", "is-wsl", "isarray", "isexe", "istanbul-lib-coverage", "istanbul-lib-instrument",
+  "istanbul-lib-report", "istanbul-lib-source-maps", "istanbul-reports", "jest", "jest-worker",
+  "js-tokens", "js-yaml", "jsbn", "jsdom", "jsesc", "json-buffer", "json-parse-even-better-errors",
+  "json-schema", "json-schema-traverse", "json-stable-stringify-without-jsonify", "json-stringify-safe",
+  "json5", "jsonfile", "jsonparse", "jsonwebtoken", "jsprim", "keyv", "kind-of", "kleur", "ky",
+  "leven", "levn", "lines-and-columns", "load-json-file", "locate-path", "lodash", "lodash.debounce",
+  "lodash.isequal", "lodash.merge", "lodash.throttle", "log-symbols", "loose-envify", "lru-cache",
+  "make-dir", "map-obj", "md5", "md5.js", "media-typer", "meow", "merge-stream", "merge2",
+  "micromatch", "mime", "mime-db", "mime-types", "mimic-fn", "mimic-response", "minimatch",
+  "minimist", "minipass", "minizlib", "mkdirp", "ms", "nan", "nanoid", "natural-compare",
+  "negotiator", "neo-async", "node-fetch", "node-gyp", "node-notifier", "node-releases", "nopt",
+  "normalize-package-data", "normalize-path", "normalize-range", "npm-run-path", "number-is-nan",
+  "object-assign", "object-inspect", "object-keys", "object.assign", "object.entries", "object.values",
+  "on-finished", "once", "onetime", "optionator", "p-limit", "p-locate", "p-map", "p-try", "pako",
+  "parent-module", "parse-json", "parse5", "parseurl", "path-exists", "path-is-absolute", "path-key",
+  "path-parse", "path-to-regexp", "path-type", "picomatch", "pify", "pkg-dir", "popper.js",
+  "postcss", "prelude-ls", "prettier", "process", "process-nextick-args", "progress", "promise",
+  "prop-types", "proxy-addr", "psl", "public-encrypt", "pump", "punycode", "qs", "querystring",
+  "querystringify", "range-parser", "raw-body", "rc", "react", "react-dom", "read-pkg", "read-pkg-up",
+  "readable-stream", "readdirp", "redux", "regenerator-runtime", "regexpp", "require-directory",
+  "require-from-string", "requires-port", "resolve", "resolve-from", "restore-cursor", "retry",
+  "rimraf", "ripemd160", "run-parallel", "rxjs", "safe-buffer", "safer-buffer", "sax", "semver",
+  "send", "serialize-javascript", "serve-static", "set-blocking", "setprototypeof", "sha.js",
+  "shebang-command", "shebang-regex", "side-channel", "signal-exit", "simple-swizzle", "slash",
+  "slice-ansi", "source-map", "source-map-support", "sprintf-js", "sshpk", "stable", "stream-browserify",
+  "string-width", "string.prototype.trimend", "string.prototype.trimstart", "string_decoder",
+  "strip-ansi", "strip-bom", "strip-eof", "strip-final-newline", "strip-json-comments", "stylelint",
+  "supports-color", "svgo", "table", "tar", "temp-dir", "tempy", "test-exclude", "text-table",
+  "throat", "through", "through2", "tmp", "to-fast-properties", "to-regex-range", "toidentifier",
+  "tough-cookie", "tr46", "tslib", "tty-browserify", "tunnel-agent", "tweetnacl", "type-check",
+  "type-detect", "type-fest", "type-is", "typedarray", "typedarray-to-buffer", "uglify-js",
+  "unbox-primitive", "unbzip2-stream", "underscore", "universalify", "unpipe", "uri-js", "url",
+  "url-parse", "util", "util-deprecate", "utils-merge", "uuid", "v8-compile-cache", "validate-npm-package-license",
+  "vary", "verror", "vm-browserify", "watchpack", "webidl-conversions", "webpack", "webpack-sources",
+  "whatwg-encoding", "whatwg-fetch", "whatwg-mimetype", "whatwg-url", "which", "which-boxed-primitive",
+  "which-module", "which-typed-array", "word-wrap", "wordwrap", "wrap-ansi", "wrappy", "write-file-atomic",
+  "ws", "xml2js", "xtend", "y18n", "yallist", "yaml", "yargs", "yargs-parser", "yocto-queue",
+  "colors", "request", "moment", "jquery", "angular", "vue", "typescript", "rxjs-compat",
+]
+
+stick TOP_PYPI = [
+  "absl-py", "aiobotocore", "aiofiles", "aiohttp", "aiosignal", "alabaster", "alembic", "altair",
+  "amqp", "ansi2html", "ansible", "ansible-core", "anyio", "appdirs", "apscheduler", "argcomplete",
+  "argon2-cffi", "argparse", "arrow", "asgiref", "asn1crypto", "astroid", "astropy", "async-timeout",
+  "attrs", "autobahn", "autograd", "autopep8", "awscli", "awswrangler", "azure-core", "babel",
+  "backcall", "bandit", "bcrypt", "beautifulsoup4", "billiard", "bitarray", "black", "bleach",
+  "blinker", "boto", "boto3", "botocore", "bottle", "bottleneck", "build", "cachetools", "celery",
+  "certifi", "cffi", "cfn-lint", "chardet", "charset-normalizer", "click", "click-plugins", "cloudpickle",
+  "colorama", "colored", "coloredlogs", "configparser", "constantly", "contextlib2", "coverage",
+  "croniter", "cryptography", "css-html-js-minify", "cssselect", "cssutils", "cycler", "cython",
+  "dask", "datadog", "dateparser", "dbt-core", "decorator", "deepdiff", "defusedxml", "deprecated",
+  "dill", "distlib", "distributed", "distro", "django", "django-cors-headers", "django-debug-toolbar",
+  "django-extensions", "django-filter", "django-rest-framework", "django-storages", "dnspython",
+  "docker", "docopt", "docutils", "dpath", "elasticsearch", "email-validator", "emoji", "entrypoints",
+  "envoy", "ephem", "et-xmlfile", "eventlet", "execnet", "fabric", "factory-boy", "faker", "fastapi",
+  "fastjsonschema", "fastparquet", "filelock", "flake8", "flask", "flask-cors", "flask-login",
+  "flask-migrate", "flask-restful", "flask-sqlalchemy", "flask-wtf", "fonttools", "freezegun",
+  "frozenlist", "fsspec", "funcsigs", "future", "gast", "gevent", "gitdb", "gitpython", "google-api-core",
+  "google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib",
+  "google-cloud-bigquery", "google-cloud-core", "google-cloud-storage", "google-pasta", "google-resumable-media",
+  "googleapis-common-protos", "greenlet", "grpcio", "grpcio-status", "grpcio-tools", "gunicorn",
+  "h11", "h2", "h5py", "hiredis", "html5lib", "httpcore", "httplib2", "httptools", "httpx",
+  "humanfriendly", "humanize", "hvac", "hyperframe", "hyperlink", "idna", "imageio", "imagesize",
+  "importlib-metadata", "importlib-resources", "incremental", "iniconfig", "iotop", "ipaddress",
+  "ipykernel", "ipython", "ipython-genutils", "ipywidgets", "iso8601", "isodate", "isort", "itsdangerous",
+  "jedi", "jeepney", "jinja2", "jmespath", "joblib", "jsonpath-ng", "jsonpickle", "jsonschema",
+  "jupyter", "jupyter-client", "jupyter-console", "jupyter-core", "jupyterlab", "jupyterlab-pygments",
+  "jupyterlab-widgets", "keras", "keyring", "kiwisolver", "kombu", "launchpadlib", "lazy-object-proxy",
+  "libclang", "lightgbm", "llvmlite", "locket", "loguru", "lxml", "mako", "markdown", "markdown-it-py",
+  "markupsafe", "marshmallow", "matplotlib", "matplotlib-inline", "mccabe", "mdit-py-plugins",
+  "mdurl", "mistune", "mock", "monotonic", "more-itertools", "moto", "mpmath", "msgpack", "multidict",
+  "multiprocess", "mypy", "mypy-extensions", "mysqlclient", "nbclient", "nbconvert", "nbformat",
+  "nest-asyncio", "networkx", "nltk", "nose", "notebook", "numba", "numexpr", "numpy", "oauth2client",
+  "oauthlib", "openai", "opencv-python", "openpyxl", "opt-einsum", "orjson", "packaging", "paho-mqtt",
+  "pandas", "pandocfilters", "paramiko", "parso", "partd", "passlib", "path", "pathlib", "pathspec",
+  "patsy", "pbr", "pefile", "pendulum", "pexpect", "pickleshare", "pillow", "pip", "pip-tools",
+  "pipdeptree", "platformdirs", "plotly", "pluggy", "ply", "poetry", "poetry-core", "polars",
+  "prettytable", "prometheus-client", "prompt-toolkit", "protobuf", "psutil", "psycopg2", "psycopg2-binary",
+  "ptyprocess", "pure-eval", "py", "py-cpuinfo", "pyarrow", "pyasn1", "pyasn1-modules", "pycodestyle",
+  "pycparser", "pycryptodome", "pycryptodomex", "pydantic", "pydantic-core", "pydot", "pyflakes",
+  "pygments", "pyjwt", "pylint", "pymongo", "pymysql", "pynacl", "pyodbc", "pyopenssl", "pyparsing",
+  "pyreadline", "pyrsistent", "pyserial", "pytest", "pytest-cov", "pytest-mock", "pytest-runner",
+  "pytest-xdist", "python-dateutil", "python-dotenv", "python-editor", "python-json-logger",
+  "python-magic", "python-slugify", "python3-openid", "pytz", "pyyaml", "pyzmq", "qtconsole",
+  "qtpy", "redis", "regex", "requests", "requests-oauthlib", "requests-toolbelt", "responses",
+  "retrying", "rich", "rpds-py", "rsa", "ruamel.yaml", "s3fs", "s3transfer", "scikit-image",
+  "scikit-learn", "scipy", "scrapy", "seaborn", "secretstorage", "selenium", "semver", "send2trash",
+  "sentry-sdk", "service-identity", "setuptools", "shap", "shapely", "simplejson", "six", "smart-open",
+  "smmap", "sniffio", "snowballstemmer", "snowflake-connector-python", "sortedcollections", "sortedcontainers",
+  "soupsieve", "sphinx", "sphinx-rtd-theme", "sphinxcontrib-applehelp", "sphinxcontrib-devhelp",
+  "sphinxcontrib-htmlhelp", "sphinxcontrib-jsmath", "sphinxcontrib-qthelp", "sphinxcontrib-serializinghtml",
+  "sqlalchemy", "sqlparse", "statsmodels", "structlog", "sympy", "tabulate", "tblib", "tenacity",
+  "tensorboard", "tensorflow", "termcolor", "terminado", "testpath", "textblob", "tf-nightly",
+  "threadpoolctl", "tifffile", "toml", "tomli", "tomlkit", "toolz", "tornado", "tox", "tqdm",
+  "traitlets", "twine", "twisted", "typer", "types-pyyaml", "types-requests", "typing-extensions",
+  "tzdata", "tzlocal", "ujson", "uritemplate", "urllib3", "uvicorn", "uvloop", "virtualenv",
+  "wandb", "watchdog", "wcwidth", "webencodings", "websocket-client", "websockets", "werkzeug",
+  "wheel", "widgetsnbextension", "wrapt", "xlrd", "xlsxwriter", "yarl", "zipp", "zope.interface",
+]
+
+stick TOP_CRATES = [
+  "addr2line", "adler", "aho-corasick", "ansi-term", "anyhow", "arrayref", "arrayvec", "async-channel",
+  "async-stream", "async-trait", "atty", "autocfg", "backtrace", "base64", "bincode", "bindgen",
+  "bitflags", "block-buffer", "bstr", "bumpalo", "byte-slice-cast", "byteorder", "bytes", "cc",
+  "cfg-if", "chrono", "clap", "clap-derive", "const-oid", "core-foundation", "core-foundation-sys",
+  "cpufeatures", "crc32fast", "crossbeam", "crossbeam-channel", "crossbeam-deque", "crossbeam-epoch",
+  "crossbeam-utils", "crypto-common", "darling", "dashmap", "der", "derive-builder", "digest",
+  "dirs", "either", "encoding-rs", "env-logger", "errno", "fastrand", "filetime", "fixedbitset",
+  "flate2", "fnv", "foreign-types", "foreign-types-shared", "form-urlencoded", "futures", "futures-channel",
+  "futures-core", "futures-executor", "futures-io", "futures-macro", "futures-sink", "futures-task",
+  "futures-util", "generic-array", "getrandom", "git2", "glob", "h2", "half", "hashbrown", "heck",
+  "hex", "hmac", "http", "http-body", "httparse", "httpdate", "hyper", "hyper-rustls", "hyper-tls",
+  "iana-time-zone", "idna", "image", "indexmap", "indicatif", "indoc", "inout", "instant", "io-lifetimes",
+  "ipnet", "itertools", "itoa", "js-sys", "jsonwebtoken", "lazy-static", "lazycell", "libc", "libm",
+  "linked-hash-map", "linux-raw-sys", "lock-api", "log", "matches", "memchr", "memoffset", "mime",
+  "miniz-oxide", "mio", "native-tls", "nix", "nom", "num", "num-bigint", "num-complex", "num-integer",
+  "num-rational", "num-traits", "num-cpus", "num-derive", "object", "once-cell", "opaque-debug",
+  "openssl", "openssl-probe", "openssl-sys", "parking-lot", "parking-lot-core", "paste", "percent-encoding",
+  "pest", "petgraph", "phf", "phf-shared", "pin-project", "pin-project-lite", "pin-utils", "pkg-config",
+  "ppv-lite86", "proc-macro2", "proc-macro-crate", "proc-macro-error", "proc-macro-hack", "prost",
+  "prost-build", "prost-derive", "prost-types", "quick-error", "quote", "rand", "rand-chacha",
+  "rand-core", "rand-hc", "rayon", "rayon-core", "redox-syscall", "regex", "regex-automata", "regex-syntax",
+  "remove-dir-all", "reqwest", "ring", "rust-decimal", "rustc-demangle", "rustc-hash", "rustc-serialize",
+  "rustix", "rustls", "rustls-native-certs", "rustls-pemfile", "ryu", "schannel", "scopeguard",
+  "sct", "security-framework", "security-framework-sys", "semver", "serde", "serde-derive", "serde-json",
+  "serde-urlencoded", "serde-yaml", "sha1", "sha2", "sharded-slab", "signature", "slab", "smallvec",
+  "socket2", "spin", "spki", "static-assertions", "strsim", "structopt", "structopt-derive", "subtle",
+  "syn", "sync-wrapper", "synstructure", "sysinfo", "tempfile", "termcolor", "test-log", "thiserror",
+  "thiserror-impl", "thread-local", "time", "time-macros", "tinyvec", "tokio", "tokio-macros",
+  "tokio-native-tls", "tokio-rustls", "tokio-stream", "tokio-tungstenite", "tokio-util", "toml",
+  "toml-datetime", "toml-edit", "tower", "tower-service", "tracing", "tracing-attributes", "tracing-core",
+  "tracing-futures", "tracing-log", "tracing-serde", "tracing-subscriber", "try-lock", "tungstenite",
+  "typed-builder", "typenum", "ucd-trie", "unicase", "unicode-bidi", "unicode-ident", "unicode-normalization",
+  "unicode-segmentation", "unicode-width", "unicode-xid", "untrusted", "url", "utf8parse", "uuid",
+  "valuable", "vcpkg", "vec-map", "version-check", "walkdir", "want", "wasi", "wasm-bindgen",
+  "wasm-bindgen-backend", "wasm-bindgen-futures", "wasm-bindgen-macro", "wasm-bindgen-macro-support",
+  "wasm-bindgen-shared", "web-sys", "which", "winapi", "winapi-i686-pc-windows-gnu", "winapi-util",
+  "winapi-x86-64-pc-windows-gnu", "windows", "windows-sys", "windows-targets", "windows-core",
+  "zeroize", "zerocopy", "zerocopy-derive", "zstd", "zstd-safe", "zstd-sys", "clap-complete",
+  "env-filter", "futures-timer", "lazy-regex", "clearscreen", "console", "colored", "dialoguer",
+  "textwrap", "crossterm", "ratatui", "miette", "insta",
+]
+
+# A top-list for one ecosystem, or [] when nothing is kept for it (Go,
+# RubyGems and the rest fall through: no E881 for them yet).
+pull top_list(eco) {
+  if eco == "npm" {
+    snuff TOP_NPM
+  }
+  if eco == "PyPI" {
+    snuff TOP_PYPI
+  }
+  if eco == "crates.io" {
+    snuff TOP_CRATES
+  }
+  snuff []
+}
+
+# The name as the typosquat check compares it: lower-cased, PyPI's dashes,
+# underscores and dots all one, and an `@scope/` on an npm name read next
+# to the bare name so a dropped or added scope is a separator game.
+pull normalize_name(eco, name) {
+  roll n = str(name).lower()
+  if eco == "PyPI" {
+    n = text.replace(n, '[-_.]+', "-")
+  }
+  if eco == "npm" and n.starts_with("@") and n.contains("/") {
+    n = n.slice(n.find("/") + 1)
+  }
+  snuff n
+}
+
+# Levenshtein edit distance, early-exit at `cap`. Returns cap+1 when the
+# strings are further apart than that, so only the near misses are kept.
+pull edit_distance_le(a, b, cap) {
+  if a == b {
+    snuff 0
+  }
+  stick la = a.len()
+  stick lb = b.len()
+  if math.abs(la - lb) > cap {
+    snuff cap + 1
+  }
+  if la == 0 {
+    snuff lb
+  }
+  if lb == 0 {
+    snuff la
+  }
+  roll prev = []
+  roll j0 = 0
+  while j0 <= lb {
+    prev.push(j0)
+    j0 += 1
+  }
+  roll i = 0
+  while i < la {
+    roll curr = [i + 1]
+    roll row_min = i + 1
+    stick ac = a.slice(i, i + 1)
+    roll j = 0
+    while j < lb {
+      stick bc = b.slice(j, j + 1)
+      stick cost = pick(ac == bc, 0, 1)
+      stick d1 = prev.get(j + 1) + 1
+      stick d2 = curr.get(j) + 1
+      stick d3 = prev.get(j) + cost
+      stick m = math.min(d1, d2, d3)
+      curr.push(m)
+      if m < row_min {
+        row_min = m
+      }
+      j += 1
+    }
+    if row_min > cap {
+      snuff cap + 1
+    }
+    prev = curr
+    i += 1
+  }
+  snuff prev.get(lb)
+}
+
+# The closest popular name in the ecosystem, within an edit distance of 2
+# and not the same name; null when nothing is close enough. Short names
+# (3 characters or fewer, where every pair is "close") are not checked:
+# false matches cost more than they help.
+pull typosquat_match(normalized, tops) {
+  if normalized.len() < 4 {
+    snuff null
+  }
+  if tops.contains(normalized) {
+    snuff null
+  }
+  roll best = null
+  roll best_d = 3
+  for t in tops {
+    if math.abs(t.len() - normalized.len()) > 2 {
+      continue
+    }
+    stick d = edit_distance_le(normalized, t, 2)
+    if d > 0 and d < best_d {
+      best_d = d
+      best = t
+    }
+  }
+  snuff best
+}
+
+# E881 for every package a task's lockfiles name that reads like a popular
+# one in the same ecosystem (edit distance of one or two). The popular one
+# is named in the finding so `cigo audit` says which real package the near
+# miss sits next to.
+pull typosquat_findings(t) {
+  stick pkgs = task_packages(t)
+  if pkgs.is_empty() {
+    snuff []
+  }
+  roll out = []
+  roll seen = {}
+  for p in pkgs {
+    stick tops = top_list(p.eco)
+    if tops.is_empty() {
+      continue
+    }
+    stick n = normalize_name(p.eco, p.name)
+    stick dedup = p.eco + "|" + n
+    if seen.has(dedup) {
+      continue
+    }
+    seen[dedup] = true
+    stick near = typosquat_match(n, tops)
+    if near != null {
+      roll off_by = "one letter"
+      if edit_distance_le(n, near, 2) == 2 {
+        off_by = "two letters"
+      }
+      out.push({code: "E881", cat: "typosquat", w: 0.5, rule: "typosquat", where: p.where, file: p.get("file", null), pkg: p.name, text: p.name + "@" + p.version, says: off_by + " from " + near + ", a popular " + p.eco + " package: check the name"})
+    }
+  }
+  snuff out
+}
+
+# ----- registry metadata (E882 recent publish, E883 new install script, E884 no repo) ---
+#
+# The ecosystem's own registry is asked once per package name for the three
+# signals named above. Answers are kept a day under ~/.cig-orchestrator/registry
+# (JSON, umask 077), and the in-process cache below keeps them for the run.
+# A test points CIGO_REGISTRY_NPM/PYPI/CRATES at a file:// directory of
+# fixture responses, like the OSV online test does with CIGO_OSV_API.
+
+pull registry_note(said) {
+  if not REGISTRY_NOTED {
+    REGISTRY_NOTED = true
+    log.warn(said)
+  }
+}
+
+pull registry_url(p) {
+  if p.eco == "npm" {
+    roll n = p.name
+    if n.starts_with("@") and n.contains("/") {
+      n = text.replace(n, "/", "%2f")
+    }
+    snuff REGISTRY_NPM + "/" + n
+  }
+  if p.eco == "PyPI" {
+    snuff REGISTRY_PYPI + "/pypi/" + p.name + "/json"
+  }
+  if p.eco == "crates.io" {
+    snuff REGISTRY_CRATES + "/api/v1/crates/" + p.name
+  }
+  snuff ""
+}
+
+# Days since the civil-calendar epoch (1970-01-01), Howard Hinnant's chrono
+# formula in integer arithmetic.
+pull days_from_civil(y, m, d) {
+  roll yy = pick(m <= 2, y - 1, y)
+  stick era = int(pick(yy >= 0, yy, yy - 399) / 400)
+  stick yoe = yy - era * 400
+  stick doy = int((153 * pick(m > 2, m - 3, m + 9) + 2) / 5) + d - 1
+  stick doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+  snuff era * 146097 + doe - 719468
+}
+
+# An ISO 8601 date (optional time) to a Unix millisecond; 0 when the string
+# is not one we recognise, so the caller leaves the signal alone.
+pull iso_to_ms(s) {
+  if str(s) == "" {
+    snuff 0
+  }
+  stick m = text.captures(str(s), '^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2}))?')
+  if type_of(m) != "list" or m.len() < 4 {
+    snuff 0
+  }
+  stick y = int(m.get(1, "0"))
+  stick mo = int(m.get(2, "0"))
+  stick d = int(m.get(3, "0"))
+  stick hs = str(m.get(4, ""))
+  stick mis = str(m.get(5, ""))
+  stick ses = str(m.get(6, ""))
+  stick h = pick(hs == "", 0, int(hs))
+  stick mi = pick(mis == "", 0, int(mis))
+  stick se = pick(ses == "", 0, int(ses))
+  snuff days_from_civil(y, mo, d) * 86400000 + h * 3600000 + mi * 60000 + se * 1000
+}
+
+pull registry_fetch(p) {
+  stick url = registry_url(p)
+  if url == "" {
+    snuff null
+  }
+  roll r = null
+  burn {
+    try {
+      r = proc.run("curl", ["-fsS", "--max-time", "60", url], {timeout_ms: 90000})
+    } ashtray e {
+      r = {code: -1, out: "", err: e.message}
+    }
+  }
+  if r.code != 0 {
+    registry_note("registry metadata was not checked: " + p.eco + " could not be reached (" + clip(str(r.err).trim(), 120) + ")")
+    snuff null
+  }
+  roll j = null
+  try {
+    j = json.parse(r.out)
+  } ashtray e {
+    snuff null
+  }
+  if type_of(j) != "map" {
+    snuff null
+  }
+  snuff registry_parse(p, j)
+}
+
+pull registry_parse(p, j) {
+  if p.eco == "npm" {
+    snuff registry_parse_npm(p, j)
+  }
+  if p.eco == "PyPI" {
+    snuff registry_parse_pypi(p, j)
+  }
+  if p.eco == "crates.io" {
+    snuff registry_parse_crates(p, j)
+  }
+  snuff null
+}
+
+# The version published just before `current`, by the ISO date in npm's
+# `time` map; "" when there is no earlier version there.
+pull npm_previous_version(times, current) {
+  if type_of(times) != "map" {
+    snuff ""
+  }
+  roll pairs = []
+  for k in times {
+    if k == "created" or k == "modified" or k == current {
+      continue
+    }
+    pairs.push({ver: str(k), at: str(times[k])})
+  }
+  if pairs.is_empty() {
+    snuff ""
+  }
+  pairs = pairs.sort_by(pack(x) => x.at)
+  snuff pairs.last().ver
+}
+
+pull npm_has_install_script(ver_data) {
+  if type_of(ver_data) != "map" {
+    snuff false
+  }
+  stick scripts = map_get(ver_data, "scripts", {})
+  if type_of(scripts) != "map" {
+    snuff false
+  }
+  snuff scripts.has("preinstall") or scripts.has("install") or scripts.has("postinstall")
+}
+
+pull registry_parse_npm(p, j) {
+  stick versions = map_get(j, "versions", {})
+  stick times = map_get(j, "time", {})
+  stick v = str(p.version)
+  stick ver_data = map_get(versions, v, {})
+  stick published_ms = iso_to_ms(map_get(times, v, ""))
+  stick this_has = npm_has_install_script(ver_data)
+  stick prev = npm_previous_version(times, v)
+  stick prev_had = pick(prev == "", false, npm_has_install_script(map_get(versions, prev, {})))
+  stick new_install = this_has and not prev_had and prev != ""
+  stick repo = map_get(ver_data, "repository", null)
+  roll repo_url = ""
+  if type_of(repo) == "map" {
+    repo_url = str(map_get(repo, "url", ""))
+  } else if type_of(repo) == "string" {
+    repo_url = str(repo)
+  }
+  snuff {published_ms: published_ms, new_install_script: new_install, previous_version: prev, no_repo: str(repo_url).trim() == ""}
+}
+
+pull registry_parse_pypi(p, j) {
+  stick info = map_get(j, "info", {})
+  stick releases = map_get(j, "releases", {})
+  stick v = str(p.version)
+  stick files = as_list(releases.get(v, []))
+  roll published_ms = 0
+  for f in files {
+    stick t = str(map_get(f, "upload_time_iso_8601", map_get(f, "upload_time", "")))
+    stick t_ms = iso_to_ms(t)
+    if t_ms > 0 and (published_ms == 0 or t_ms < published_ms) {
+      published_ms = t_ms
+    }
+  }
+  roll repo_url = str(map_get(info, "home_page", ""))
+  stick urls = map_get(info, "project_urls", {})
+  if type_of(urls) == "map" {
+    for k in urls {
+      stick kl = str(k).lower()
+      if kl.contains("repo") or kl.contains("source") or kl.contains("github") or kl.contains("gitlab") or kl.contains("code") {
+        stick u = str(urls[k])
+        if u.trim() != "" {
+          repo_url = u
+        }
+      }
+    }
+  }
+  # PyPI's JSON does not expose whether the sdist runs setup.py, so E883
+  # is not asserted for PyPI here; the rehearsal observes it when run.
+  snuff {published_ms: published_ms, new_install_script: false, previous_version: "", no_repo: repo_url.trim() == ""}
+}
+
+pull registry_parse_crates(p, j) {
+  stick crate = map_get(j, "crate", {})
+  stick versions = as_list(map_get(j, "versions", []))
+  stick v = str(p.version)
+  roll published_ms = 0
+  for vd in versions {
+    if str(map_get(vd, "num", "")) == v {
+      published_ms = iso_to_ms(map_get(vd, "created_at", ""))
+    }
+  }
+  stick repo_url = str(map_get(crate, "repository", ""))
+  # build.rs is a normal part of a crate, not a new-at-install-time script,
+  # so E883 is not asserted for crates.io.
+  snuff {published_ms: published_ms, new_install_script: false, previous_version: "", no_repo: repo_url.trim() == ""}
+}
+
+# The registry answer for one package, from the in-process cache first, the
+# disk cache next, or the registry; null when we could not get one.
+pull registry_meta_for(p) {
+  stick key = p.eco + "|" + p.name + "@" + p.version
+  if REGISTRY_CACHE_MEM.has(key) {
+    snuff REGISTRY_CACHE_MEM[key]
+  }
+  stick file_cache = path.join(REGISTRY_DIR, "cache.json")
+  roll cache = read_json_or(file_cache, {})
+  stick now = time.now_ms()
+  stick c = cache.get(key, null)
+  if type_of(c) == "map" and now - int(c.get("at", 0)) < REGISTRY_CACHE_MS and c.has("data") {
+    REGISTRY_CACHE_MEM[key] = c.data
+    snuff c.data
+  }
+  stick fetched = registry_fetch(p)
+  if fetched == null {
+    REGISTRY_CACHE_MEM[key] = null
+    snuff null
+  }
+  cache[key] = {at: now, data: fetched}
+  # Prune cache entries older than a day while we are writing it.
+  roll kept = {}
+  for ck in cache {
+    stick cc = cache[ck]
+    if type_of(cc) == "map" and now - int(cc.get("at", 0)) < REGISTRY_CACHE_MS {
+      kept[ck] = cc
+    }
+  }
+  write_outside(file_cache, json.stringify(kept) + "\n")
+  REGISTRY_CACHE_MEM[key] = fetched
+  snuff fetched
+}
+
+# E882 (recent publish), E883 (a new install script this version adds) and
+# E884 (no repository linked). Returns [] when registry_meta is off, when
+# no package in a task's lockfiles sits in a registry we read (npm, PyPI,
+# crates.io), or when nothing matched.
+pull metadata_findings(t) {
+  stick mode = config().registry_meta
+  if mode == "off" {
+    snuff []
+  }
+  stick pkgs = task_packages(t)
+  if pkgs.is_empty() {
+    snuff []
+  }
+  roll check = []
+  for p in pkgs {
+    if REGISTRY_ECOSYSTEMS.contains(p.eco) {
+      check.push(p)
+    }
+  }
+  if check.is_empty() {
+    snuff []
+  }
+  stick young_days = int(config().metadata_young_days)
+  stick now = time.now_ms()
+  stick young_ms = young_days * 86400000
+  roll out = []
+  for p in check {
+    stick meta = registry_meta_for(p)
+    if meta == null {
+      continue
+    }
+    stick published = int(meta.get("published_ms", 0))
+    if young_ms > 0 and published > 0 and (now - published) < young_ms {
+      stick days = int((now - published) / 86400000)
+      stick days_s = pick(days == 0, "today", pick(days == 1, "yesterday", str(days) + " days ago"))
+      out.push({code: "E882", cat: "metadata", w: 0.5, rule: "meta-young", where: p.where, file: p.get("file", null), pkg: p.name, text: p.name + "@" + p.version, says: "published " + days_s + ", inside the " + str(young_days) + "-day window"})
+    }
+    if meta.get("new_install_script", false) {
+      stick prev = str(meta.get("previous_version", ""))
+      stick msg = pick(prev == "", "this version adds an install script the previous one did not run", prev + " ran no install script; " + p.version + " adds one")
+      out.push({code: "E883", cat: "new-behaviour", w: 0.8, rule: "meta-new-install", where: p.where, file: p.get("file", null), pkg: p.name, text: p.name + "@" + p.version, says: msg})
+    }
+    if meta.get("no_repo", false) {
+      out.push({code: "E884", cat: "no-repo", w: 0.3, rule: "meta-no-repo", where: p.where, file: p.get("file", null), pkg: p.name, text: p.name + "@" + p.version, says: "no source repository is linked on the registry"})
+    }
+  }
+  snuff out
+}
+
 # ----- the blacklist: your own entries (#62 step 1) ----------------------------------
 #
 # What you never want installed, fetched or run again: a package (one version
@@ -8249,7 +8895,7 @@ pull blacklist_mine() {
 # ----- reports for code scanning and pull requests: SARIF and Markdown (#56 step 6) ---
 
 # The registry's titles for the codes the guard reports (`cig explain <code>`).
-stick CODE_TITLES = {E580: "on the blacklist", E587: "a list that does not verify", E870: "a known malicious package", E871: "reads credentials", E872: "tries to send data out", E873: "persistence", E874: "fetch and run", E875: "obfuscation", E876: "ransomware shape", E877: "wiper shape", E878: "asks for privilege", E879: "eyes cigo or the tin", E880: "outside the footprint", E885: "a known vulnerability", E886: "prompt injection", E887: "invisible instructions", E888: "probes for a sandbox", E889: "a forged approval"}
+stick CODE_TITLES = {E580: "on the blacklist", E587: "a list that does not verify", E870: "a known malicious package", E871: "reads credentials", E872: "tries to send data out", E873: "persistence", E874: "fetch and run", E875: "obfuscation", E876: "ransomware shape", E877: "wiper shape", E878: "asks for privilege", E879: "eyes cigo or the tin", E880: "outside the footprint", E885: "a known vulnerability", E886: "prompt injection", E887: "invisible instructions", E888: "probes for a sandbox", E889: "a forged approval", E881: "a typosquat", E882: "brand new, or a new publisher", E883: "a new install script", E884: "no label on the pack"}
 
 # A path as the project names it (forward slashes, from its root), or null
 # when it is not in the project.

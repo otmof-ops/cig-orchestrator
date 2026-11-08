@@ -102,7 +102,7 @@ pull hop_env(dir, program, words, more) {
       # folder, never your own. OSV is never asked: off, and under CI
       # (where the environment cannot loosen it) pointed at nothing, so it
       # fails at once; a test that wants it points it at a fixture.
-      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CIG_SEAL_KEY: "file", CI: "", DEMO_REMOTE: dir + "-remote", CIGO_REHEARSE: "never", CIGO_OSV: "off", CIGO_OSV_API: "file:///nonexistent/osv-api", CIGO_OSV_DUMPS: "file:///nonexistent/osv-dumps", CIGO_BLACKLIST_DIR: path.join(work, "blacklist.d"), CIG_INTERNAL_TRACKER_DIR: path.join(work, "tracker")}.merge(more),
+      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CIG_SEAL_KEY: "file", CI: "", DEMO_REMOTE: dir + "-remote", CIGO_REHEARSE: "never", CIGO_OSV: "off", CIGO_OSV_API: "file:///nonexistent/osv-api", CIGO_OSV_DUMPS: "file:///nonexistent/osv-dumps", CIGO_REGISTRY_META: "off", CIGO_REGISTRY_NPM: "file:///nonexistent/registry-npm", CIGO_REGISTRY_PYPI: "file:///nonexistent/registry-pypi", CIGO_REGISTRY_CRATES: "file:///nonexistent/registry-crates", CIGO_BLACKLIST_DIR: path.join(work, "blacklist.d"), CIG_INTERNAL_TRACKER_DIR: path.join(work, "tracker")}.merge(more),
       timeout_ms: 120000,
     })
   }
@@ -2479,8 +2479,8 @@ test("a preset sets the keys it names, and config diff shows what differs from i
   stick dir = fresh("tests/fixtures/chain")
   exits(tool_layers(dir, ["config", "preset", "paranoid"], {}), 0)
   says(tool_layers(dir, ["config", "versions"], {}).out, "always")
-  # The suite turns the rehearsal and OSV off in the environment; not here.
-  says(tool_layers(dir, ["config", "diff"], {CIGO_REHEARSE: "", CIGO_OSV: ""}).out, "every setting is as the paranoid preset has it")
+  # The suite turns the rehearsal, OSV and registry_meta off in the environment; not here.
+  says(tool_layers(dir, ["config", "diff"], {CIGO_REHEARSE: "", CIGO_OSV: "", CIGO_REGISTRY_META: ""}).out, "every setting is as the paranoid preset has it")
   exits(tool_layers(dir, ["config", "install", "never"], {}), 0)
   stick d = tool_layers(dir, ["config", "diff"], {})
   says(d.out, "install")
@@ -3495,6 +3495,105 @@ test("OSV: a project cannot turn it off, off asks nothing, and OSV out of reach 
   exits(far, 0)
   says(far.err, "known-bad packages were not checked: OSV could not be reached")
   assert(there(dir, "done.txt"), "the task did not run")
+})
+
+# ----- typosquats and registry metadata (#55 E881..E884) -----------------------
+
+# Every finding of a given code against a given package name.
+pull findings_of(audit_json, code, pkg_name) {
+  stick list = audit_json.tasks.install.findings
+  snuff list.filter(pack(f) => f.code == code and str(f.get("pkg", "")) == pkg_name)
+}
+
+pull has_pkg_finding(audit_json, code, pkg_name) {
+  snuff not findings_of(audit_json, code, pkg_name).is_empty()
+}
+
+test("typosquats in a lockfile are flagged E881; the top package and an unrelated name are not", pack() {
+  stick dir = fresh("tests/fixtures/typosquat")
+  stick r = guard_tool(dir, ["audit", "install", "--json"], {})
+  exits(r, 0)
+  stick j = json.parse(r.out)
+  stick findings = j.tasks.install.findings
+  roll squats = findings.filter(pack(f) => f.code == "E881").map(pack(f) => str(f.get("pkg", "")))
+  assert(squats.contains("expresss"), "expresss missed:\n" + r.out)
+  assert(squats.contains("lodahs"), "lodahs missed:\n" + r.out)
+  assert(not squats.contains("lodash"), "lodash wrongly flagged:\n" + r.out)
+  assert(not squats.contains("my-local-project-widget"), "unrelated name flagged:\n" + r.out)
+  # The near one is named in the finding (its what-to-do).
+  stick e = findings.find(pack(f) => f.code == "E881" and str(f.get("pkg", "")) == "lodahs")
+  says(str(e.get("says", "")), "two letters from lodash")
+  stick x = findings.find(pack(f) => f.code == "E881" and str(f.get("pkg", "")) == "expresss")
+  says(str(x.get("says", "")), "one letter from express")
+})
+
+test("registry metadata reads produce E882, E883 and E884 from fixtures; a clean name has none", pack() {
+  if not has_sh_and_curl() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/registry-meta")
+  stick npm_dir = path.join(dir, "npm")
+  stick today = time.now_iso().slice(0, 10) + "T00:00:00Z"
+  stick way_back = "2026-01-01T00:00:00Z"
+  burn {
+    fs.mkdir(npm_dir)
+    fs.write_text(path.join(npm_dir, "freshbox-util"), json.stringify({
+      versions: {"1.0.0": {scripts: {}, repository: {url: "git+https://github.com/x/freshbox-util.git"}}},
+      time: {created: way_back, modified: today, "1.0.0": today}
+    }))
+    fs.write_text(path.join(npm_dir, "freshbox-added-script"), json.stringify({
+      versions: {
+        "1.0.0": {scripts: {}, repository: {url: "git+https://github.com/x/foo.git"}},
+        "2.0.0": {scripts: {postinstall: "node install.js"}, repository: {url: "git+https://github.com/x/foo.git"}}
+      },
+      time: {created: way_back, modified: today, "1.0.0": way_back, "2.0.0": today}
+    }))
+    fs.write_text(path.join(npm_dir, "freshbox-no-repo"), json.stringify({
+      versions: {"1.0.0": {scripts: {}}},
+      time: {created: way_back, modified: way_back, "1.0.0": way_back}
+    }))
+    fs.write_text(path.join(npm_dir, "freshbox-clean"), json.stringify({
+      versions: {"1.0.0": {scripts: {}, repository: {url: "git+https://github.com/x/clean.git"}}},
+      time: {created: way_back, modified: way_back, "1.0.0": way_back}
+    }))
+  }
+  stick on = {CIGO_REGISTRY_META: "online", CIGO_REGISTRY_NPM: "file://" + npm_dir}
+  stick r = guard_tool(dir, ["audit", "install", "--json"], on)
+  exits(r, 0)
+  stick j = json.parse(r.out)
+  assert(has_pkg_finding(j, "E882", "freshbox-util"), "E882 missed on freshbox-util:\n" + r.out)
+  assert(has_pkg_finding(j, "E882", "freshbox-added-script"), "E882 missed on freshbox-added-script:\n" + r.out)
+  assert(has_pkg_finding(j, "E883", "freshbox-added-script"), "E883 missed on freshbox-added-script:\n" + r.out)
+  assert(has_pkg_finding(j, "E884", "freshbox-no-repo"), "E884 missed on freshbox-no-repo:\n" + r.out)
+  # The clean name has none of the three.
+  assert(not has_pkg_finding(j, "E882", "freshbox-clean"), "E882 wrongly on freshbox-clean:\n" + r.out)
+  assert(not has_pkg_finding(j, "E883", "freshbox-clean"), "E883 wrongly on freshbox-clean:\n" + r.out)
+  assert(not has_pkg_finding(j, "E884", "freshbox-clean"), "E884 wrongly on freshbox-clean:\n" + r.out)
+  # freshbox-no-repo is old: E882 does not fire on it.
+  assert(not has_pkg_finding(j, "E882", "freshbox-no-repo"), "E882 wrongly on old freshbox-no-repo:\n" + r.out)
+  # The E883 finding names the previous version.
+  stick e = findings_of(j, "E883", "freshbox-added-script").first()
+  says(str(e.get("says", "")), "1.0.0 ran no install script")
+})
+
+test("registry_meta off makes no registry read", pack() {
+  if not has_sh_and_curl() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/registry-meta")
+  # No fixture files written: if the code asked the registry at this file:// URL
+  # it would fail, so any metadata finding would mean something was tried.
+  stick off = {CIGO_REGISTRY_META: "off", CIGO_REGISTRY_NPM: "file:///nonexistent/registry-npm"}
+  stick r = guard_tool(dir, ["audit", "install", "--json"], off)
+  exits(r, 0)
+  stick j = json.parse(r.out)
+  stick findings = j.tasks.install.findings
+  for f in findings {
+    stick code = str(f.get("code", ""))
+    assert(code != "E882" and code != "E883" and code != "E884", "metadata code with registry_meta off: " + json.stringify(f))
+  }
+  # curl was not run, so the warning OSV-style was never raised.
+  assert(not r.err.contains("registry metadata was not checked"), "registry asked anyway: " + r.err)
 })
 
 # ----- reports for code scanning and pull requests (#56 step 6) -------------------

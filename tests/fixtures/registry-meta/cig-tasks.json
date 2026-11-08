@@ -1,0 +1,6 @@
+{
+  "project": "registry-meta",
+  "tasks": {
+    "install": {"cmd": ["sh", "-c", "echo installed > done.txt"], "desc": "stands in for npm ci: the lockfile beside it names packages whose registry fixtures carry each of E882, E883 and E884, plus a clean one"}
+  }
+}
