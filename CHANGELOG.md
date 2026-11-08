@@ -7,6 +7,29 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **Overrides, bundles and the two warnings** (#62 steps 1 and 3). The
+  blacklist takes a per-user override on top of the lists: `cigo blacklist
+  allow <entry> --reason=...` asks for OS authentication so a script cannot
+  whitelist its own payload, and records who, when and why. The entry stays
+  on the list and `cigo blacklist why <thing>` names the override next to
+  it; `cigo blacklist unallow <entry>` takes it back (also
+  OS-authenticated). Overrides live in `blacklist.d/allows.jsonl`, signed
+  with the tin's key under a separate label so a tampered allows file
+  never stands in for a blacklist file, and a file that does not verify is
+  said (`E587`) and ignored. `cigo blacklist export <file>` writes your
+  own entries and overrides as one signed JSON bundle, and `cigo blacklist
+  import <file>` is OS-authenticated and refuses any bundle whose
+  signature does not verify. Running a blacklisted task goes through two
+  warnings: `cigo run <task>` prints `E580` and refuses, then
+  `--run-untrusted=<task>` prints `E581` and refuses, then `--light-it`
+  takes OS authentication; with `blacklist_unboxed = ask` and `--no-box`,
+  a second OS authentication and the run goes outside the box (`E583`,
+  the box is CigScript#106 and is not built yet). The approval is kept
+  for `blacklist_exception_ttl` (default 24h) so a re-run in that window
+  does not ask again (`E582`); agents and CI never approve a blacklisted
+  run (`E895`). Two new settings, `blacklist_unboxed` and
+  `blacklist_exception_ttl`, govern the flow, and `cigo blacklist
+  exceptions` lists what is in force.
 - **The ransomware shape** (#55, `E876`). The rehearsal's footprint reader
   rates a task critical when it sees many files renamed to one ransomware-
   tagged extension (`.locked`, `.encrypted`, `.enc` and the rest), or a

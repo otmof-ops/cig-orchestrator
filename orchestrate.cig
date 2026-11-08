@@ -78,6 +78,10 @@ stick SETTINGS = {
     doc: "how many days cigo quarantine clear keeps what run-url downloaded, by when it came (0 keeps everything); --all takes everything"},
   rehearse_fail_on: {values: ["never", "critical", "auto", "high", "medium", "low"], default: "auto", floor: true, presets: {ci: "high", paranoid: "medium"},
     doc: "the lowest rehearsal verdict that fails cigo rehearse (its exit code, which still says the risk): auto (high under CI, critical at a terminal), a level, or never; --fail-on=<level> sets it for one run"},
+  blacklist_unboxed: {values: ["refuse", "ask"], default: "refuse", floor: true, presets: {ci: "refuse", paranoid: "refuse"},
+    doc: "whether blacklisted things may ever run outside the box: refuse (never, the default), ask (a second OS authentication and the typed phrase `no box`); the box itself is CigScript#106 and is not built yet, so with refuse the two warnings end in a refuse that points here"},
+  blacklist_exception_ttl: {values: null, default: "24h", floor: false, presets: {},
+    doc: "how long a one-off run of a blacklisted task is remembered (24h), so a re-run within that window does not ask again; a span (30m, 2h, 24h)"},
 }
 # The old shape, kept for the places that read a default and a doc.
 roll CONFIG_KEYS = {}
@@ -3536,7 +3540,7 @@ pull run_task(ctx, name, index, total) {
 }
 
 pull do_run(g, wanted) {
-  expect_flags(["--only", "--force", "--strict", "--versions", "--install", "--box", "--no-box", "--accept-risk", "--run-untrusted", "--no-guard", "--plain"])
+  expect_flags(["--only", "--force", "--strict", "--versions", "--install", "--box", "--no-box", "--accept-risk", "--run-untrusted", "--light-it", "--no-guard", "--plain"])
   if wanted.is_empty() {
     fail("run what? `cigo run <task>`, or one stage everywhere: `cigo run test`; `cigo list` shows them")
   }
@@ -3923,6 +3927,10 @@ pull do_help() {
   exhale "  cigo rehearse --changed [--base=<rev>] [--list] [--max=N] [--fresh] [--json|--sarif|--markdown]"
   exhale "                              every package the lockfiles add or change since the default branch, rehearsed"
   exhale "  cigo blacklist [list | add <thing> [--reason=...] [--expires=90d] | remove <entry> | why <thing> | reload]"
+  exhale "  cigo blacklist [allow <entry> --reason=... | unallow <entry> | allows]"
+  exhale "                              overrides of a blacklist entry for this user (OS-authenticated)"
+  exhale "  cigo blacklist [export <file> | import <file> | exceptions]"
+  exhale "                              your entries and allows as one signed file; the one-off runs in force"
   exhale "  cigo quarantine [list | show <sha256> | clear [--all]]   what run-url downloaded, kept to read again"
   exhale "                              your own blacklist: packages, files, domains, ranges and URLs the guard refuses"
   exhale "  cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes]]"
@@ -7617,12 +7625,17 @@ pull do_update_db(g) {
 stick BLACKLIST_DIR = env.get("CIGO_BLACKLIST_DIR", path.join(pick(env.get("XDG_CONFIG_HOME", "") == "", path.join(fs.home(), ".config"), env.get("XDG_CONFIG_HOME", "")), "cigscript", "blacklist.d"))
 stick BLACKLIST_KEEP = path.join(CIGO_HOME, "blacklist")
 stick BLACKLIST_LABEL = "cigo-blacklist"
+stick BL_ALLOW_LABEL = "cigo-blacklist-allow"
+stick BL_BUNDLE_LABEL = "cigo-blacklist-bundle"
 stick MINE = "mine.list"
+stick ALLOWS_FILE = "allows.jsonl"
+stick EXCEPTIONS_FILE = path.join(CIGO_HOME, "blacklist-exceptions.jsonl")
 stick ECO_OF = {npm: "npm", pypi: "PyPI", crates: "crates.io", go: "Go", gem: "RubyGems", composer: "Packagist", maven: "Maven", nuget: "NuGet"}
 stick PREFIX_OF = {npm: "npm", PyPI: "pypi", "crates.io": "crates", Go: "go", RubyGems: "gem", Packagist: "composer", Maven: "maven", NuGet: "nuget"}
 stick URL_RE = '(?i)\bhttps?://[^\s"\x27`<>)\]]+'
 roll BLACKLIST = null
 roll BLACKLIST_NOTED = {}
+roll ALLOWS = null
 
 # An IPv4 address as a number, or null.
 pull ipv4(s) {
@@ -7892,6 +7905,9 @@ pull blacklist(all) {
     if fs.is_dir(BLACKLIST_DIR) {
       for f in fs.list(BLACKLIST_DIR).sort() {
         stick name = path.base(f)
+        if name == ALLOWS_FILE {
+          continue
+        }
         if name.ends_with(".list") {
           roll entries = list_entries(fs.read_text(f), name)
           stick ok = list_verifies(f)
@@ -7971,7 +7987,9 @@ pull blacklist_says(e) {
 }
 
 # The guard's read against the blacklist: the lockfiles' packages, the
-# scripts the task names by their sha256, and the URLs in its text.
+# scripts the task names by their sha256, and the URLs in its text. An
+# allow in force for the same thing drops the finding and the entry stays
+# on the list, named by `cigo blacklist why`.
 pull blacklist_findings(t) {
   stick entries = blacklist(false)
   if entries.is_empty() {
@@ -7979,9 +7997,11 @@ pull blacklist_findings(t) {
   }
   roll found = []
   for p in task_packages(t) {
-    for e in entries {
-      if entry_matches_pkg(e, p.eco, p.name, p.version) {
-        found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: p.where, file: p.get("file", null), pkg: p.name, text: p.name + "@" + p.version, says: blacklist_says(e) + ": " + e.entry})
+    if allow_for_package(p.eco, p.name, p.version) == null {
+      for e in entries {
+        if entry_matches_pkg(e, p.eco, p.name, p.version) {
+          found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: p.where, file: p.get("file", null), pkg: p.name, text: p.name + "@" + p.version, says: blacklist_says(e) + ": " + e.entry})
+        }
       }
     }
   }
@@ -7989,9 +8009,11 @@ pull blacklist_findings(t) {
   if not hashes.is_empty() {
     for f in task_files(t) {
       stick h = hash.sha256_file(f)
-      for e in hashes {
-        if e.value == h {
-          found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: tilde(f), file: f, text: path.base(f) + " (sha256 " + h.slice(0, 12) + "…)", says: blacklist_says(e)})
+      if allow_for_sha(h) == null {
+        for e in hashes {
+          if e.value == h {
+            found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: tilde(f), file: f, text: path.base(f) + " (sha256 " + h.slice(0, 12) + "…)", says: blacklist_says(e)})
+          }
         }
       }
     }
@@ -8015,11 +8037,13 @@ pull blacklist_findings(t) {
     roll said = {}
     for src in texts {
       for url in text.find_all(src.text, URL_RE) {
-        for e in nets {
-          stick key = src.where + " " + url + " " + e.entry
-          if not said.has(key) and entry_matches_url(e, url) {
-            said[key] = true
-            found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: src.where, file: src.file, needle: url, text: url, says: blacklist_says(e) + ": " + e.entry})
+        if allow_for_url(url) == null {
+          for e in nets {
+            stick key = src.where + " " + url + " " + e.entry
+            if not said.has(key) and entry_matches_url(e, url) {
+              said[key] = true
+              found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: src.where, file: src.file, needle: url, text: url, says: blacklist_says(e) + ": " + e.entry})
+            }
           }
         }
       }
@@ -8029,7 +8053,7 @@ pull blacklist_findings(t) {
 }
 
 # The blacklist's word on a rehearsal spec: findings for a package or a
-# script it names.
+# script it names. An allow in force drops the finding.
 pull blacklist_for_spec(spec) {
   stick entries = blacklist(false)
   if entries.is_empty() {
@@ -8038,6 +8062,9 @@ pull blacklist_for_spec(spec) {
   roll found = []
   if fs.is_file(spec) {
     stick h = hash.sha256_file(spec)
+    if allow_for_sha(h) != null {
+      snuff []
+    }
     for e in entries {
       if e.kind == "sha256" and e.value == h {
         found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: spec, text: spec, says: blacklist_says(e)})
@@ -8047,6 +8074,9 @@ pull blacklist_for_spec(spec) {
   }
   stick want = blacklist_parse(spec)
   if want != null and want.kind == "package" {
+    if allow_for_package(want.eco, want.name, pick(want.version == "", "*any*", want.version)) != null {
+      snuff []
+    }
     for e in entries {
       if entry_matches_pkg(e, want.eco, want.name, pick(want.version == "", "*any*", want.version)) or (want.version == "" and e.kind == "package" and e.eco == want.eco and e.name == want.name) {
         found.push({code: "E580", cat: "blacklist", w: 1.0, rule: "blacklist", where: spec, text: spec, says: blacklist_says(e) + ": " + e.entry})
@@ -8098,6 +8128,201 @@ pull save_list(name, entries) {
   BLACKLIST = null
 }
 
+# ----- allows: overrides of a blacklist entry for this user (#62 step 1) ---------
+#
+# Overriding a false positive in a built-in or your own list: `cigo blacklist
+# allow <entry> --reason <text>` takes OS authentication and records who, when
+# and why, so a script cannot whitelist its own payload; `cigo blacklist why`
+# shows the override next to the entry it nullifies, and `unallow` takes it
+# back. Allows live one JSON object per line in blacklist.d/allows.jsonl,
+# signed with the tin's key under a separate label so a tampered allows file
+# never stands in for a blacklist file; the signature is checked like the
+# lists', and an allows file that does not verify is said (E587) and
+# ignored until `cigo blacklist reload`.
+
+# The entries of the allows file: {kind, value (or eco, name, version), entry,
+# reason, by, at, expires}. A line that does not parse as JSON is skipped.
+pull allow_entries(body) {
+  roll out = []
+  for line in body.lines() {
+    stick s = line.trim()
+    if s == "" or s.starts_with("#") {
+      continue
+    }
+    roll obj = null
+    try {
+      obj = json.parse(s)
+    } ashtray e {
+      obj = null
+    }
+    if obj == null {
+      continue
+    }
+    stick entry = str(obj.get("entry", ""))
+    stick parsed = blacklist_parse(entry)
+    if parsed == null {
+      continue
+    }
+    out.push(parsed.merge({entry: entry_text(parsed), reason: str(obj.get("reason", "")), by: str(obj.get("by", "")), at: str(obj.get("at", "")), expires: str(obj.get("expires", ""))}))
+  }
+  snuff out
+}
+
+# Allows in force: expired ones are dropped; a file that does not verify is
+# said once (E587) and its entries are ignored (the last copy that verified
+# never stands in: taking an allow out never widens a block).
+pull allows_verify(f) {
+  stick mac = f + ".mac"
+  if not fs.is_file(f) or not fs.is_file(mac) {
+    snuff false
+  }
+  snuff tin_mac_as(f, fs.read_text(mac).trim(), BL_ALLOW_LABEL).code == 0
+}
+
+pull allows() {
+  if ALLOWS == null {
+    stick f = path.join(BLACKLIST_DIR, ALLOWS_FILE)
+    roll out = []
+    if fs.is_file(f) {
+      if allows_verify(f) {
+        out = allow_entries(fs.read_text(f))
+      } else {
+        if not BLACKLIST_NOTED.has(ALLOWS_FILE) {
+          BLACKLIST_NOTED[ALLOWS_FILE] = true
+          log.warn("E587 a list that does not verify: ${tilde(f)} was changed outside cigo blacklist; the allows in it are ignored until cigo blacklist reload")
+        }
+      }
+    }
+    ALLOWS = out
+  }
+  stick now = today()
+  snuff ALLOWS.filter(pack(a) => a.expires == "" or a.expires >= now)
+}
+
+# Write allows and sign them, keeping the copy that verified in cigo's own
+# folder the way lists are kept.
+pull save_allows(items) {
+  stick f = path.join(BLACKLIST_DIR, ALLOWS_FILE)
+  roll lines = ["# cigo blacklist allows: one JSON object per line; recorded by `cigo blacklist allow`, removed by `cigo blacklist unallow`"]
+  for a in items {
+    lines.push(json.stringify({entry: a.entry, reason: a.reason, by: a.by, at: a.at, expires: a.expires}))
+  }
+  stick body = lines.join("\n") + "\n"
+  for target in [f, path.join(BLACKLIST_KEEP, ALLOWS_FILE)] {
+    if not write_outside(target, body) {
+      fail("could not write ${tilde(target)}")
+    }
+    stick r = tin_mac_as(target, null, BL_ALLOW_LABEL)
+    if r.code != 0 {
+      fail("the allows file was written but could not be signed (" + clip(str(r.err).trim(), 160) + ")")
+    }
+    if not write_outside(target + ".mac", r.out.trim() + "\n") {
+      fail("could not write ${tilde(target)}.mac")
+    }
+  }
+  guard_note({kind: "blacklist-allow", outcome: "signed (${items.len()} allow" + pick(items.len() == 1, "", "s") + ")"})
+  ALLOWS = null
+}
+
+# The allow in force for an entry, or null. A finding on it is dropped and
+# the entry stays on the list, said with its override by `cigo blacklist why`.
+pull allow_for_entry(entry) {
+  for a in allows() {
+    if a.entry == entry {
+      snuff a
+    }
+  }
+  snuff null
+}
+
+pull allow_for_package(eco, name, version) {
+  for a in allows() {
+    if entry_matches_pkg(a, eco, name, version) {
+      snuff a
+    }
+  }
+  snuff null
+}
+
+pull allow_for_sha(h) {
+  for a in allows() {
+    if a.kind == "sha256" and a.value == h {
+      snuff a
+    }
+  }
+  snuff null
+}
+
+pull allow_for_url(url) {
+  for a in allows() {
+    if entry_matches_url(a, url) {
+      snuff a
+    }
+  }
+  snuff null
+}
+
+# ----- exceptions: a one-off run of a blacklisted task (#62 step 3) ---------------
+#
+# A task approved through the two warnings, OS authentication and the box
+# setting is remembered for `blacklist_exception_ttl` so a re-run in that
+# window does not ask again. Signed into the tin like the allows: a tampered
+# exceptions file is said and ignored.
+
+# {task, by, at, until, unboxed}, newest first; expired rows dropped.
+pull blacklist_exceptions() {
+  stick f = EXCEPTIONS_FILE
+  if not fs.is_file(f) or not fs.is_file(f + ".mac") {
+    snuff []
+  }
+  if tin_mac_as(f, fs.read_text(f + ".mac").trim(), BL_ALLOW_LABEL).code != 0 {
+    log.warn("E587 a list that does not verify: ${tilde(f)} was changed outside cigo blacklist; the one-off exceptions in it are ignored")
+    snuff []
+  }
+  roll out = []
+  stick now = time.now_iso()
+  for line in fs.read_text(f).lines() {
+    stick s = line.trim()
+    if s == "" or s.starts_with("#") {
+      continue
+    }
+    try {
+      stick o = json.parse(s)
+      if str(o.get("until", "")) > now {
+        out.push(o)
+      }
+    } ashtray e {
+    }
+  }
+  snuff out
+}
+
+pull write_exceptions(rows) {
+  stick f = EXCEPTIONS_FILE
+  roll lines = ["# cigo blacklist exceptions: one JSON object per line; set by the two-warnings flow, cleared after blacklist_exception_ttl"]
+  for o in rows {
+    lines.push(json.stringify(o))
+  }
+  stick body = lines.join("\n") + "\n"
+  if not write_outside(f, body) {
+    snuff false
+  }
+  stick m = tin_mac_as(f, null, BL_ALLOW_LABEL)
+  if m.code != 0 {
+    snuff false
+  }
+  snuff write_outside(f + ".mac", m.out.trim() + "\n")
+}
+
+pull blacklist_exception_for(task_name) {
+  for o in blacklist_exceptions() {
+    if str(o.get("task", "")) == task_name {
+      snuff o
+    }
+  }
+  snuff null
+}
+
 # --expires=90d or a date; "" for never.
 pull expiry(given) {
   if given == "" {
@@ -8113,9 +8338,9 @@ pull expiry(given) {
   snuff time.format_ms(time.now_ms() + int(d[1]) * 86400000, "%Y-%m-%d")
 }
 
-# `cigo blacklist [list|add|remove|why|reload]`.
+# `cigo blacklist [list|add|remove|why|reload|allow|unallow|allows|export|import|exceptions]`.
 pull do_blacklist() {
-  expect_flags(["--json", "--plain", "--reason", "--expires", "--all"])
+  expect_flags(["--json", "--plain", "--reason", "--expires", "--all", "--out", "--force"])
   stick sub = targets.get(0, "list")
   stick rest = targets.slice(math.min(1, targets.len()))
   if sub == "list" {
@@ -8183,21 +8408,60 @@ pull do_blacklist() {
       fail("cigo blacklist why <package | file | url | host>")
     }
     stick thing = rest.first()
+    # The matching entries, through the guard's own readers so an allow in
+    # force drops the hit the same way the rest of the guard does.
     roll found = blacklist_for_spec(thing)
     if found.is_empty() and (text.matches(thing, '(?i)^https?://') or blacklist_parse(thing) != null) {
       stick url = pick(text.matches(thing, '(?i)^https?://'), thing, "https://" + thing + "/")
-      for e in blacklist(false) {
-        if entry_matches_url(e, url) {
-          found.push({code: "E580", text: thing, says: blacklist_says(e) + ": " + e.entry})
+      if allow_for_url(url) == null {
+        for e in blacklist(false) {
+          if entry_matches_url(e, url) {
+            found.push({code: "E580", text: thing, says: blacklist_says(e) + ": " + e.entry})
+          }
         }
       }
     }
-    if found.is_empty() {
+    # The entries that would have matched but are overridden by an allow in
+    # force: said as such, so an override is never silent.
+    roll overrides = []
+    stick want = blacklist_parse(thing)
+    if want != null {
+      roll a = null
+      if want.kind == "package" {
+        a = allow_for_package(want.eco, want.name, pick(want.version == "", "*any*", want.version))
+      } else if want.kind == "sha256" {
+        a = allow_for_sha(want.value)
+      } else {
+        a = allow_for_entry(entry_text(want))
+      }
+      if a != null {
+        overrides.push(a)
+      }
+    }
+    if fs.is_file(thing) {
+      stick a = allow_for_sha(hash.sha256_file(thing))
+      if a != null and not overrides.any(pack(x) => x.entry == a.entry) {
+        overrides.push(a)
+      }
+    }
+    if text.matches(thing, '(?i)^https?://') {
+      stick a = allow_for_url(thing)
+      if a != null and not overrides.any(pack(x) => x.entry == a.entry) {
+        overrides.push(a)
+      }
+    }
+    if found.is_empty() and overrides.is_empty() {
       exhale "${thing} is not on your blacklist"
       snuff
     }
     for f in found {
       exhale "${thing}: " + f.says
+    }
+    for a in overrides {
+      exhale "${thing}: overridden by `cigo blacklist allow " + a.entry + "`" + pick(a.by == "", "", " (by " + a.by + pick(a.at == "", "", " at " + a.at) + ")") + pick(a.reason == "", "", ": " + a.reason) + pick(a.expires == "", "", "  until " + a.expires)
+    }
+    if found.is_empty() {
+      snuff
     }
     exit(1)
   }
@@ -8234,7 +8498,208 @@ pull do_blacklist() {
     exhale "signed ${tilde(f)} as it is now: ${now.len()} entr" + pick(now.len() == 1, "y", "ies")
     snuff
   }
-  fail("cigo blacklist [list | add <thing> | remove <entry> | why <thing> | reload]")
+  if sub == "allow" {
+    if rest.len() != 1 {
+      fail("cigo blacklist allow <entry> --reason=<text> [--expires=90d]: an override for one blacklist entry, OS-authenticated so a script cannot whitelist its own payload")
+    }
+    stick thing = rest.first()
+    stick reason = flag_value("--reason", "")
+    if reason == "" {
+      fail("cigo blacklist allow needs --reason=<text>: say why it is a false positive, who told you, when")
+    }
+    roll e = null
+    if fs.is_file(thing) {
+      e = {kind: "sha256", value: hash.sha256_file(thing)}
+    } else {
+      e = blacklist_parse(thing)
+    }
+    if e == null {
+      fail("cigo blacklist allow ${thing}: not an entry this reads (as cigo blacklist list shows them)")
+    }
+    stick entry = entry_text(e)
+    stick now_allows = allows()
+    if now_allows.any(pack(a) => a.entry == entry) {
+      exhale "${entry} is already allowed (cigo blacklist why ${thing} shows the override)"
+      snuff
+    }
+    if not attended() {
+      fail("E895 nice try. agents can't sign their own permission slip. cigo blacklist allow is for a person at a terminal, with OS authentication")
+    }
+    if not os_auth("cigo: override a blacklist entry (${entry})") {
+      guard_note({kind: "blacklist-allow", thing: entry, outcome: "not approved: the system's prompt was refused"})
+      fail("not approved: the system's password prompt was cancelled or failed; the entry stays in force")
+    }
+    stick by_who = env.get("USER", env.get("USERNAME", env.get("LOGNAME", "someone")))
+    stick at_when = time.now_iso().slice(0, 10)
+    save_allows(now_allows + [e.merge({entry: entry, reason: reason, by: by_who, at: at_when, expires: expiry(flag_value("--expires", ""))})])
+    exhale "allowed ${entry} (${reason}): the guard no longer refuses it; cigo blacklist why ${entry} shows the override"
+    snuff
+  }
+  if sub == "unallow" {
+    if rest.len() != 1 {
+      fail("cigo blacklist unallow <entry>, as cigo blacklist allows shows it")
+    }
+    stick want = blacklist_parse(rest.first())
+    stick entry = pick(want == null, rest.first(), entry_text(want))
+    stick now_allows = allows()
+    stick kept = now_allows.filter(pack(a) => a.entry != entry)
+    if kept.len() == now_allows.len() {
+      fail("${entry} is not allowed (cigo blacklist allows shows what is)")
+    }
+    if not attended() {
+      fail("E895 nice try. agents can't sign their own permission slip. cigo blacklist unallow is for a person at a terminal, with OS authentication")
+    }
+    if not os_auth("cigo: take back the override for ${entry}") {
+      guard_note({kind: "blacklist-unallow", thing: entry, outcome: "not approved: the system's prompt was refused"})
+      fail("not approved: the system's password prompt was cancelled or failed; the override stays")
+    }
+    save_allows(kept)
+    exhale "took back the override for ${entry}; the entry is back in force"
+    snuff
+  }
+  if sub == "allows" {
+    stick now_allows = allows()
+    if flags.contains("--json") {
+      exhale json.stringify({dir: BLACKLIST_DIR, allows: now_allows.map(pack(a) => {entry: a.entry, kind: a.kind, reason: a.reason, by: a.by, at: a.at, expires: a.expires})}, 2)
+      snuff
+    }
+    if now_allows.is_empty() {
+      exhale "no overrides; cigo blacklist allow <entry> --reason=... takes OS authentication and records one"
+      snuff
+    }
+    stick width = now_allows.map(pack(a) => a.entry.len()).max()
+    for a in now_allows {
+      exhale a.entry.pad_right(width) + pick(a.by == "", "", "  by " + a.by) + pick(a.at == "", "", "  at " + a.at) + pick(a.reason == "", "", "  " + a.reason) + pick(a.expires == "", "", "  until " + a.expires)
+    }
+    snuff
+  }
+  if sub == "export" {
+    # The bundle: your own entries and allows as one signed file. The
+    # signature is the tin's under BL_BUNDLE_LABEL, so a bundle exported on
+    # one machine imports on one that shares that tin's key.
+    stick out_flag = flag_value("--out", "")
+    stick dest = pick(out_flag != "", out_flag, pick(rest.is_empty(), "", rest.first()))
+    if dest == "" {
+      fail("cigo blacklist export <file> or cigo blacklist export --out=<file>: writes your entries and allows as one signed file")
+    }
+    stick payload = {
+      format: "cigo-blacklist-bundle",
+      version: 1,
+      by: env.get("USER", env.get("USERNAME", env.get("LOGNAME", "someone"))),
+      at: time.now_iso(),
+      mine: blacklist_mine().map(pack(e) => {entry: e.entry, kind: e.kind, reason: e.reason, expires: e.expires}),
+      allows: allows().map(pack(a) => {entry: a.entry, kind: a.kind, reason: a.reason, by: a.by, at: a.at, expires: a.expires}),
+    }
+    stick body = json.stringify(payload, 2) + "\n"
+    if not write_outside(dest, body) {
+      fail("could not write ${tilde(dest)}")
+    }
+    stick m = tin_mac_as(dest, null, BL_BUNDLE_LABEL)
+    if m.code != 0 {
+      remove_outside(dest)
+      fail("the bundle was written but could not be signed (" + clip(str(m.err).trim(), 160) + "); cig 1.11.0 or later with a key here signs it")
+    }
+    if not write_outside(dest + ".mac", m.out.trim() + "\n") {
+      remove_outside(dest)
+      fail("could not write ${tilde(dest)}.mac")
+    }
+    guard_note({kind: "blacklist-export", thing: dest, outcome: "signed (${payload.mine.len()} entr" + pick(payload.mine.len() == 1, "y", "ies") + ", ${payload.allows.len()} allow" + pick(payload.allows.len() == 1, "", "s") + ")"})
+    exhale "wrote ${tilde(dest)} and ${tilde(dest + ".mac")}: ${payload.mine.len()} entr" + pick(payload.mine.len() == 1, "y", "ies") + ", ${payload.allows.len()} allow" + pick(payload.allows.len() == 1, "", "s")
+    snuff
+  }
+  if sub == "import" {
+    if rest.len() != 1 {
+      fail("cigo blacklist import <file>: reads a bundle that cigo blacklist export wrote (OS-authenticated; a file that does not verify is refused, E587)")
+    }
+    stick src = rest.first()
+    if not fs.is_file(src) {
+      fail("no file at ${tilde(src)}")
+    }
+    stick mac_file = src + ".mac"
+    if not fs.is_file(mac_file) {
+      fail("E587 a list that does not verify: no signature next to ${tilde(src)}; cigo blacklist import refuses an unsigned bundle")
+    }
+    stick check = tin_mac_as(src, fs.read_text(mac_file).trim(), BL_BUNDLE_LABEL)
+    if check.code != 0 {
+      guard_note({kind: "blacklist-import", thing: src, outcome: "refused: a list that does not verify"})
+      fail("E587 a list that does not verify: ${tilde(src)} was signed on another machine, or edited after it was signed; nothing imported")
+    }
+    roll payload = null
+    try {
+      payload = json.parse(fs.read_text(src))
+    } ashtray e {
+      payload = null
+    }
+    if payload == null or str(payload.get("format", "")) != "cigo-blacklist-bundle" {
+      fail("${tilde(src)} is signed by this key but is not a cigo-blacklist-bundle; nothing imported")
+    }
+    if not attended() {
+      fail("E895 nice try. agents can't sign their own permission slip. cigo blacklist import is for a person at a terminal, with OS authentication")
+    }
+    if not os_auth("cigo: import a blacklist bundle (${src})") {
+      guard_note({kind: "blacklist-import", thing: src, outcome: "not approved: the system's prompt was refused"})
+      fail("not approved: the system's password prompt was cancelled or failed; nothing imported")
+    }
+    roll added_entries = 0
+    roll added_allows = 0
+    stick mine_now = blacklist_mine()
+    stick seen = mine_now.map(pack(x) => x.entry)
+    roll next_mine = mine_now
+    for row in as_list(payload.get("mine", [])) {
+      stick parsed = blacklist_parse(str(row.get("entry", "")))
+      if parsed == null {
+        continue
+      }
+      stick et = entry_text(parsed)
+      if seen.contains(et) {
+        continue
+      }
+      seen.push(et)
+      next_mine = next_mine + [parsed.merge({entry: et, reason: str(row.get("reason", "")), expires: str(row.get("expires", ""))})]
+      added_entries += 1
+    }
+    if added_entries > 0 {
+      save_list(MINE, next_mine)
+    }
+    stick allows_now = allows()
+    stick seen_a = allows_now.map(pack(x) => x.entry)
+    roll next_allows = allows_now
+    for row in as_list(payload.get("allows", [])) {
+      stick parsed = blacklist_parse(str(row.get("entry", "")))
+      if parsed == null {
+        continue
+      }
+      stick et = entry_text(parsed)
+      if seen_a.contains(et) {
+        continue
+      }
+      seen_a.push(et)
+      next_allows = next_allows + [parsed.merge({entry: et, reason: str(row.get("reason", "")), by: str(row.get("by", "")), at: str(row.get("at", "")), expires: str(row.get("expires", ""))})]
+      added_allows += 1
+    }
+    if added_allows > 0 {
+      save_allows(next_allows)
+    }
+    guard_note({kind: "blacklist-import", thing: src, outcome: "imported ${added_entries} entr" + pick(added_entries == 1, "y", "ies") + ", ${added_allows} allow" + pick(added_allows == 1, "", "s")})
+    exhale "imported ${added_entries} entr" + pick(added_entries == 1, "y", "ies") + " and ${added_allows} allow" + pick(added_allows == 1, "", "s") + " from ${tilde(src)}"
+    snuff
+  }
+  if sub == "exceptions" {
+    stick rows = blacklist_exceptions()
+    if flags.contains("--json") {
+      exhale json.stringify({exceptions: rows}, 2)
+      snuff
+    }
+    if rows.is_empty() {
+      exhale "no one-off run exceptions in force; one is set by the two-warnings flow and lasts blacklist_exception_ttl (${config().blacklist_exception_ttl})"
+      snuff
+    }
+    for o in rows {
+      exhale str(o.get("task", "")) + "  by " + str(o.get("by", "")) + "  at " + str(o.get("at", "")) + "  until " + str(o.get("until", "")) + pick(o.get("unboxed", false), "  (no box)", "  (boxed)")
+    }
+    snuff
+  }
+  fail("cigo blacklist [list | add <thing> | remove <entry> | why <thing> | reload | allow <entry> --reason=... | unallow <entry> | allows | export <file> | import <file> | exceptions]")
 }
 
 # Your own list's entries, as written (expired ones too).
@@ -8244,6 +8709,118 @@ pull blacklist_mine() {
     snuff missing_list_entries(MINE)
   }
   snuff list_entries(fs.read_text(f), MINE)
+}
+
+# ----- the two warnings and the boxed run (#62 step 3) -------------------------
+#
+# Running a blacklisted task warns twice and asks for OS authentication; with
+# `blacklist_unboxed = ask` and the typed `no box`, it runs outside the box
+# (loud, E583), and the exception is kept for `blacklist_exception_ttl` so a
+# re-run in that window does not ask again. The box itself is CigScript#106,
+# not built yet, so with `blacklist_unboxed = refuse` (the default) the two
+# warnings end here: the one-line way through is to set the setting.
+#
+# The warnings are shown in two steps so the escalation is visible:
+#
+# - `cigo run <task>` on a blacklisted task: print E580 (what it is), then
+#   refuse with the next command (`--run-untrusted=<task> --light-it`).
+# - with `--run-untrusted=<task>` but no `--light-it`: print E581 (what it
+#   could cost), then refuse with the next command (`add --light-it`).
+# - with both: ask the OS, then honour `blacklist_unboxed`.
+#
+# `--run-untrusted=<task>` stands in for typing the task name (what warning
+# one asks for); `--light-it` stands in for typing `light it` (what warning
+# two asks for); `--no-box` stands in for typing `no box`. The flags make
+# the escalation reviewable and tells the box, when it is here, what to do.
+
+# The blacklist findings of a task, by E580 code. One or more means the task
+# is blacklist-critical and the two-warnings flow applies.
+pull blacklist_criticals(findings) {
+  snuff findings.filter(pack(f) => f.code == "E580")
+}
+
+# One finding, short as a line for the warnings.
+pull blacklist_crit_line(f) {
+  snuff "  " + str(f.get("code", "E580")) + "  " + str(f.get("text", "")) + ": " + str(f.get("says", ""))
+}
+
+# Decision: "go-boxed" (apply in the box, kept for CigScript#106), "go-unboxed"
+# (run loose, E583), "refused" (the caller refuses). Prints the two warnings,
+# asks for OS authentication, honours `blacklist_unboxed` and the one-off
+# exception window.
+pull blacklist_light_it(name, findings) {
+  stick crits = blacklist_criticals(findings)
+  if crits.is_empty() {
+    snuff "go-unboxed"
+  }
+  # A one-off exception in force: a re-run in the TTL window does not ask.
+  stick kept_ex = blacklist_exception_for(name)
+  if kept_ex != null {
+    log.warn("E582 your call. `${name}` runs under a one-off exception recorded " + str(kept_ex.get("at", "")) + " (until " + str(kept_ex.get("until", "")) + ", cigo blacklist exceptions)" + pick(kept_ex.get("unboxed", false), "; the box is not here yet", ""))
+    snuff pick(kept_ex.get("unboxed", false), "go-unboxed", "go-boxed")
+  }
+  if not attended() {
+    # Agents and CI never approve a blacklisted run.
+    log.error("E895 agents and CI can never approve a blacklisted run (" + crits.first().text + "); nothing ran")
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: unattended"})
+    snuff "refused"
+  }
+  stick untrusted = guard_flag("--run-untrusted")
+  # Warning one: what it is. The command line answers the typed name.
+  if untrusted != name {
+    log.error("E580 this one's on the bad batch list. `${name}` would install, fetch or run something you said never again to.")
+    for f in crits {
+      exhale blacklist_crit_line(f)
+    }
+    exhale "  don't light it. if you are sure, this is the next step:"
+    exhale "    cigo run ${name} --run-untrusted=${name} --light-it"
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "warning one (${crits.len()} entr" + pick(crits.len() == 1, "y", "ies") + ")"})
+    snuff "refused"
+  }
+  # Warning two: what it could cost. --light-it answers the typed phrase.
+  if not flags.contains("--light-it") {
+    log.error("E581 last warning. running something on your blacklist can cost you every password on this machine.")
+    exhale "  if you go on, cigo will note the run in the smoke log and ask for your OS password."
+    exhale "  type `light it` to go on; the command line is:"
+    exhale "    cigo run ${name} --run-untrusted=${name} --light-it"
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "warning two (${crits.len()} entr" + pick(crits.len() == 1, "y", "ies") + ")"})
+    snuff "refused"
+  }
+  # OS authentication: the first time.
+  if not os_auth("cigo: run a blacklisted task (${name})") {
+    log.error("not approved: the system's password prompt was cancelled or failed; `${name}` did not run")
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: OS authentication"})
+    snuff "refused"
+  }
+  stick mode = config().blacklist_unboxed
+  stick want_unboxed = flags.contains("--no-box")
+  if mode == "refuse" and want_unboxed {
+    log.error("--no-box takes blacklist_unboxed = ask (default: refuse); `${name}` did not run")
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: blacklist_unboxed = refuse"})
+    snuff "refused"
+  }
+  if mode == "ask" and want_unboxed {
+    # A second OS authentication for the no-box path.
+    if not os_auth("cigo: run a blacklisted task outside the box (${name})") {
+      log.error("not approved: the second system's password prompt was cancelled or failed; `${name}` did not run")
+      guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: second OS authentication"})
+      snuff "refused"
+    }
+    stick ms = span_ms(config().blacklist_exception_ttl) ?? 86400000
+    stick until = time.format_ms(time.now_ms() + ms, "%Y-%m-%dT%H:%M:%S")
+    write_exceptions([{task: name, by: env.get("USER", env.get("USERNAME", "someone")), at: time.now_iso(), until: until, unboxed: true}] + blacklist_exceptions())
+    log.warn("E583 no box. `${name}` is running loose on your machine because you said so twice.")
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "approved: no box (until ${until})"})
+    snuff "go-unboxed"
+  }
+  # The box path. CigScript#106 is the box; until it lands, boxed = refused
+  # with the one line that opens the no-box path.
+  log.error("the box is CigScript#106 and is not built yet; `${name}` cannot run in it")
+  exhale "  set blacklist_unboxed = ask and add --no-box to run outside the box:"
+  exhale "    cigo config blacklist_unboxed ask"
+  exhale "    cigo run ${name} --run-untrusted=${name} --light-it --no-box"
+  guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: the box is not built yet"})
+  snuff "refused"
 }
 
 # ----- reports for code scanning and pull requests: SARIF and Markdown (#56 step 6) ---
@@ -8872,7 +9449,16 @@ pull guard_run(tasks, names, defaults) {
           } else if v.risk == "low" or mode == "report" {
             exhale "  it runs (" + pick(mode == "report", "security = report", "rated low") + ")"
           } else if v.risk == "critical" {
-            if untrusted == n and attended() {
+            if not blacklist_criticals(v.findings).is_empty() {
+              # A blacklist-critical goes through the two-warnings flow: it
+              # ends in "refused" for every path the user has not escalated.
+              stick decision = blacklist_light_it(n, v.findings)
+              if decision == "refused" {
+                refuse("`${n}` is refused: on your blacklist (cigo audit ${n} shows the entries)")
+              } else {
+                log.warn("running `${n}` although it is on your blacklist (" + decision + ")")
+              }
+            } else if untrusted == n and attended() {
               log.warn("running `${n}` although it is rated critical (--run-untrusted=${n}); no backup of the tin was taken first")
             } else {
               refuse("`${n}` is refused: rated critical by the guard. cigo audit ${n} shows the evidence; at a terminal, cigo run ${n} --run-untrusted=${n} runs it anyway")
@@ -12916,17 +13502,48 @@ pull person_here() {
 }
 
 # The operating system's own prompt: polkit on Linux (a dialog, or the
-# terminal's agent), an administrator prompt on macOS.
+# terminal's agent), an administrator prompt on macOS. The program is
+# resolved from a fixed system path, never from PATH, so a `pkexec` earlier
+# on PATH never stands in for the real one. No environment variable, file
+# or flag stands in for the answer: if the program is not at a system path
+# or the prompt is cancelled, the authentication fails.
+pull os_auth_bin() {
+  if cig.os() == "macos" {
+    if fs.is_file("/usr/bin/osascript") {
+      snuff {prog: "/usr/bin/osascript", kind: "osascript"}
+    }
+    snuff null
+  }
+  if fs.is_file("/usr/bin/pkexec") {
+    snuff {prog: "/usr/bin/pkexec", kind: "pkexec"}
+  }
+  if fs.is_file("/bin/pkexec") {
+    snuff {prog: "/bin/pkexec", kind: "pkexec"}
+  }
+  snuff null
+}
+
 pull os_auth(why) {
+  stick b = os_auth_bin()
+  if b == null {
+    snuff false
+  }
   roll r = null
   burn {
     try {
-      if cig.os() == "macos" {
-        r = proc.run("osascript", ["-e", "do shell script \"true\" with prompt \"" + why.replace("\"", "'") + "\" with administrator privileges"], {timeout_ms: 300000})
-      } else if which("pkexec") != null {
-        r = proc.run("pkexec", ["true"], {timeout_ms: 300000})
+      if b.kind == "osascript" {
+        # The reason is cigo's text, which can carry a package or task
+        # name: no quote or backslash of it reaches the AppleScript string.
+        stick said = why.replace("\"", "'").replace("\\", "/")
+        r = proc.run(b.prog, ["-e", "do shell script \"/usr/bin/true\" with prompt \"" + said + "\" with administrator privileges"], {timeout_ms: 300000})
       } else {
-        r = {code: 1}
+        # pkexec runs what it is given as root once you approve, and finds a
+        # bare name through PATH: the program is named by its full path.
+        roll t = "/usr/bin/true"
+        if not fs.is_file(t) {
+          t = "/bin/true"
+        }
+        r = proc.run(b.prog, [t], {timeout_ms: 300000})
       }
     } ashtray e {
       r = {code: 1}
