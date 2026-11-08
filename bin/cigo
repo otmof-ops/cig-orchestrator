@@ -79,7 +79,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "${1:-help}" in
-  adopt|help|version|toolchains|update|crash|config|blacklist|guard|undo|run-url|agent|approve|--help|-h|--version)
+  adopt|help|version|toolchains|update|crash|config|blacklist|quarantine|guard|undo|run-url|agent|approve|--help|-h|--version)
     # From the home folder itself (or /), cig would take all of it as the
     # run's pack and watch every file in it around each step: these run
     # from an empty folder of cigo's instead, and the commands that work

