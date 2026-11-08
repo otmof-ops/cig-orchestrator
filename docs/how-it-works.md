@@ -121,6 +121,35 @@ cig run --no-rollback tests/run.cig     # keep .test-work/ to look around after 
 cigo run ci                             # cig check, shellcheck, then the suite
 ```
 
+## Where a start goes (#90)
+
+Every cigo command is `cig run orchestrate.cig`, so each one pays the same
+floor before it does anything. Measured on Linux (cig 1.16.1, median of 9),
+`cigo --version` takes about 44 ms:
+
+| part | ms |
+|---|---|
+| cig itself starting | about 4 |
+| parsing orchestrate.cig's 12,700 lines | about 32 |
+| `cig check` of it | about 5 |
+| the top level and the command's dispatch | 2 to 3 |
+
+A command the guard reads costs more: its first read compiles the rules'
+regular expressions, 11 ms for the 33 rules on the static Linux release (5 ms
+where cig links glibc, whose allocator is quicker), and a read of a short
+command is about 15 ms in all.
+
+The agent hook runs twice for each command an agent runs: once as
+`cigo agent hook` and once as the `cigo agent run` it wraps the command in.
+Both are written with `--no-check`. orchestrate.cig is checked in CI, so
+the check at every start buys nothing, and skipping it saves its 5 ms each
+time (an error in the script is still an error: it is still parsed). Lazy
+tables would save about 3 ms. A verdict cache would save the read's 15 ms
+on a repeated command, but each new command would cost a write, and in
+CigScript a write is a burn: a journal entry for every command an agent
+types. What moves the floor itself is parsing less: a small separate hook
+program, or a compiled cigo (cig-compile's stage B).
+
 ## When the language is the problem
 
 Building cigo turns up things about CigScript itself. Those go in
