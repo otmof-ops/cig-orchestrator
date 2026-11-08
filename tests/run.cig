@@ -4106,7 +4106,7 @@ test("agent: the Claude Code hook wraps a Bash call in cigo agent run, keeps the
   stick out = json.parse(a.out).hookSpecificOutput
   assert(out.hookEventName == "PreToolUse", a.out)
   assert(not out.has("permissionDecision"), "the hook decided a permission it should leave to Claude Code: " + a.out)
-  says(out.updatedInput.command, " agent run --agent=claude-code --session=abc -- 'npm test'")
+  says(out.updatedInput.command, " --no-check agent run --agent=claude-code --session=abc -- 'npm test'")
   assert(out.updatedInput.description == "Run tests" and out.updatedInput.timeout == 120000 and out.updatedInput.run_in_background == false, a.out)
   stick d = hook({session_id: "abc", cwd: dir, tool_name: "Bash", tool_input: {command: "rm -rf ~/"}})
   exits(d, 0)
@@ -4141,7 +4141,7 @@ test("agent: scope agents --agents=claude-code adds the hook to Claude Code's se
   stick st = json.parse(read(h, ".claude/settings.json"))
   assert(st.model == "keep-me" and st.hooks.Stop.len() == 1, json.stringify(st))
   assert(st.hooks.PreToolUse.len() == 1 and st.hooks.PreToolUse[0].matcher == "Bash|Write|Edit|MultiEdit|NotebookEdit", json.stringify(st))
-  says(st.hooks.PreToolUse[0].hooks[0].command, " agent hook claude-code")
+  says(st.hooks.PreToolUse[0].hooks[0].command, " --no-check agent hook claude-code")
   exits(agent_cmd(dir, ["guard", "uninstall", "--yes"], {}), 0)
   stick after = json.parse(read(h, ".claude/settings.json"))
   assert(after.model == "keep-me" and after.hooks.Stop.len() == 1 and not after.hooks.has("PreToolUse"), json.stringify(after))

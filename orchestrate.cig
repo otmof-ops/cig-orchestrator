@@ -10997,7 +10997,7 @@ pull scope_plan(level) {
       plan.push({act: "update", kind: "agent-hook", path: cs, what: "Claude Code's PreToolUse hook, brought up to date (the file tools too)"})
     } else if not has_claude_hook(cs) {
       if is_link(cs) {
-        plan.push({act: "by hand", kind: "agent-hook", path: cs, what: "a link (into a repository?), so cigo does not rewrite it: add a PreToolUse hook for " + CLAUDE_MATCHER + " running " + sh_quote(cigo_launcher()) + " agent hook claude-code"})
+        plan.push({act: "by hand", kind: "agent-hook", path: cs, what: "a link (into a repository?), so cigo does not rewrite it: add a PreToolUse hook for " + CLAUDE_MATCHER + " running " + cigo_quick() + " agent hook claude-code"})
       } else {
         plan.push({act: "add", kind: "agent-hook", path: cs, what: "Claude Code's PreToolUse hook: every Bash command through cigo agent run, and the file tools' writes judged"})
       }
@@ -12267,6 +12267,14 @@ pull hook_deny(reason) {
   exhale json.stringify({hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason}})
 }
 
+# cigo as an agent's hook calls it, once per command the agent runs:
+# without `cig check` of orchestrate.cig, which CI has checked and which
+# costs about 5 ms at every start (#90). It is still parsed, and an error
+# in it is still an error.
+pull cigo_quick() {
+  snuff sh_quote(cigo_launcher()) + " --no-check"
+}
+
 pull do_agent_hook(which_agent) {
   if which_agent != "claude-code" {
     fail("cigo agent hook claude-code (the agents cigo has a hook for)")
@@ -12290,7 +12298,7 @@ pull do_agent_hook(which_agent) {
   stick input = call.tool_input
   stick line = str(input.get("command", ""))
   stick me = cigo_launcher()
-  if line.trim() == "" or line.starts_with(sh_quote(me) + " agent run") {
+  if line.trim() == "" or line.starts_with(sh_quote(me) + " agent run") or line.starts_with(cigo_quick() + " agent run") {
     snuff
   }
   stick cwd = str(call.get("cwd", fs.cwd()))
@@ -12314,7 +12322,7 @@ pull do_agent_hook(which_agent) {
     hook_deny("E894 a human has to say yes: this command is rated high (" + top_finding(findings).code + " " + top_finding(findings).says + "). Nothing ran. Ask your user to approve it on their own terminal with `cigo approve " + id + "` (it asks the system for their password), then run the same command again.")
     snuff
   }
-  stick wrapped = sh_quote(me) + " agent run --agent=claude-code --session=" + sh_quote(session) + " -- " + sh_quote(line)
+  stick wrapped = cigo_quick() + " agent run --agent=claude-code --session=" + sh_quote(session) + " -- " + sh_quote(line)
   exhale json.stringify({hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: input.merge({command: wrapped})}})
 }
 
@@ -12420,7 +12428,7 @@ pull claude_settings() {
 }
 
 pull claude_hook_entry() {
-  snuff {matcher: CLAUDE_MATCHER, hooks: [{type: "command", command: sh_quote(cigo_launcher()) + " agent hook claude-code"}]}
+  snuff {matcher: CLAUDE_MATCHER, hooks: [{type: "command", command: cigo_quick() + " agent hook claude-code"}]}
 }
 
 # Is cigo's hook in a Claude Code settings file?
