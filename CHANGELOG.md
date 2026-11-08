@@ -7,6 +7,27 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **The tier matrix as data, and remembered answers** (#66 step 2). The
+  guard reads the tier at which a finding reaches the user (silent,
+  notice, ask, gate) from one table of risk × confidence, replacing the
+  hard-coded conditionals at the E580 (blacklist) and E894 (agent command,
+  file tool) paths with one lookup. Confidence is exact for a blacklist
+  hit (the user named it, the two-warnings gate flow), high for a heavy
+  pattern or an OSV known-bad package, medium or low for lighter
+  patterns; the default matrix keeps today's behaviour
+  everywhere (blacklist critical goes through the two-warnings flow when
+  `blacklist_unboxed = ask`, a pattern critical refuses outright, high
+  asks, medium notices, low is silent). `cigo guard tier` prints the whole
+  table; `cigo guard tier <risk> [<confidence>]` prints one row or one
+  cell as a bare word, so paths that decide whether to ask read the cell
+  rather than branch on the risk alone. Alongside the matrix, a
+  remembered-answers store keeps a yes to an ask keyed by the sha256 of
+  the bytes the question was about, signed with the tin's key under its
+  own label (`cigo-remembered`): a later ask for the same bytes reads
+  here first and does not prompt. One byte of a difference is a different
+  key, so a changed command is asked again; a record that does not verify
+  under this machine's key is said (`E889`) and ignored. `cigo approve`
+  stays one-shot; the remembered store is for scopes wider than one run.
 - **Overrides, bundles and the two warnings** (#62 steps 1 and 3). The
   blacklist takes a per-user override on top of the lists: `cigo blacklist
   allow <entry> --reason=...` asks for OS authentication so a script cannot
