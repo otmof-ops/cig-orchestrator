@@ -286,6 +286,43 @@ fetch. The database is as fresh as its last update; run it again to catch
 what was reported since. `osv` is floored, and `offline` is the tightest:
 a project cannot send its packages to OSV when you chose not to.
 
+### Typosquats and registry metadata
+
+Next to the OSV read, four more cheap signals come from the packages a task's
+lockfiles name:
+
+- `E881` **a typosquat**, medium: the package's name is within a letter or
+  two of a popular one in its ecosystem. The popular one is named in the
+  finding (`reqeusts` is reported as one letter from `requests`). The list
+  of top names is bundled per ecosystem, composed from each registry's
+  public download-count rankings, and covers npm, PyPI and crates.io.
+- `E882` **brand new, or a new publisher**, medium: this version was
+  published in the last `metadata_young_days` days (default 7). `0`
+  turns the window off without turning the other two checks off.
+- `E883` **a new install script**, high: the previous version ran nothing
+  at install, this one runs a `preinstall`/`install`/`postinstall`
+  (npm). Most real supply-chain attacks are a bad update to a good
+  package, which is the question that catches them. PyPI and crates.io
+  do not expose install-script changes in the registry JSON, so `E883`
+  is asserted for npm only here; the rehearsal observes it when run.
+- `E884` **no label on the pack**, low: no source repository is linked
+  on the registry.
+
+```
+registry_meta = off       (default) not checked: no request is made
+registry_meta = online    the ecosystem's own registry asked once per
+                          package a task's lockfiles name, kept a day
+                          under ~/.cig-orchestrator/registry (the
+                          paranoid preset turns it on)
+metadata_young_days = 7   the E882 window, in days (0 turns E882 off)
+```
+
+Each name is asked once: only the name, never a path or the project's own.
+A test points `CIGO_REGISTRY_NPM`, `CIGO_REGISTRY_PYPI` and
+`CIGO_REGISTRY_CRATES` at a `file://` directory of fixture responses, the
+way the OSV online test does with `CIGO_OSV_API`. `registry_meta` is
+floored: a project cannot ask the registry when you chose not to.
+
 ### Your blacklist: `cigo blacklist`
 
 What you never want installed, fetched or run again, refused wherever the
