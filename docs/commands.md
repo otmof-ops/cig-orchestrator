@@ -336,8 +336,8 @@ the guard. Each level adds to the one below it:
 |---|---|---|
 | 1 | `project` | `cigo run`, as above (the default) |
 | 2 | `dev` | also every package manager and its scripts, in any folder: `npm install`, `npx`, `pip install`, `uvx`, `cargo build`, `go install`, `gem install`, `composer require` and the rest |
-| 3 | `downloads` | not built yet: the first run of a file you downloaded |
-| 4 | `agents` | every shell command your AI agents run (level 3's part is not built yet) |
+| 3 | `downloads` | also the first shell run of a file the browser marked as downloaded (the `user.xdg.origin.url` attribute) or a file under `~/Downloads`, rehearsed first (`E893`); shims for `tar`, `unzip` and `7z` carry the mark onto what they extract |
+| 4 | `agents` | every shell command your AI agents run |
 | 5 | `system` | not built yet: everything the machine runs |
 
 ```

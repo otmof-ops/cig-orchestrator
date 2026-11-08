@@ -3973,10 +3973,10 @@ test("guard: scope dev shows what it would change and writes nothing without --y
   exits(st, 0)
   stick j = json.parse(st.out)
   assert(j.level == 2 and j.scope == "dev" and j.shims.len() == 19, st.out)
-  # Levels not built yet say so, and change nothing.
-  stick three = guard_cmd(dir, ["guard", "scope", "3", "--yes"], {})
-  exits(three, 2)
-  says(three.err, "not built yet")
+  # Level 5 (system) is not built yet: it says so, and changes nothing.
+  stick five = guard_cmd(dir, ["guard", "scope", "5", "--yes"], {})
+  exits(five, 2)
+  says(five.err, "not built yet")
   # A generated shim is plain, clean sh.
   if which_here("shellcheck") {
     stick sc = hop(dir, "shellcheck", ["-s", "sh", path.join(shims_of(dir), "npm"), path.join(shims_of(dir), "uv"), path.join(shims_of(dir), "deno")])
@@ -4330,6 +4330,236 @@ test("guard allow <file|sha256>: run-url runs those bytes without a rehearsal; a
   stop(srv)
   if failed_with != null {
     cough failed_with
+  }
+})
+
+# ----- level 3: the download mark (#57 step 3) ----------------------------------------
+#
+# E893 through the shell hook when the line names a file the operating
+# system marked as downloaded (user.xdg.origin.url, which browsers set)
+# or a file under ~/Downloads (the recommendation in #57: no watcher).
+
+# setfattr is not on every machine; with python3 and ext4, this works.
+pull set_origin(file, url) {
+  stick r = hop(root, "python3", ["-I", "-c", "import os, sys; os.setxattr(sys.argv[1], 'user.xdg.origin.url', sys.argv[2].encode())", file, url])
+  snuff r.code == 0
+}
+
+pull get_mark(file) {
+  stick r = hop(root, "python3", ["-I", "-c", "import os, sys\ntry:\n    sys.stdout.write(os.getxattr(sys.argv[1], 'user.cig.downloaded').decode())\nexcept OSError:\n    sys.exit(1)", file])
+  if r.code == 0 {
+    snuff r.out
+  }
+  snuff ""
+}
+
+pull xattr_here(dir) {
+  # A probe file in the test dir: if setxattr errors, the filesystem does
+  # not carry xattrs, and the level-3 tests step aside.
+  stick probe = path.join(dir, ".xattr-probe")
+  burn {
+    fs.write_text(probe, "")
+  }
+  snuff set_origin(probe, "x")
+}
+
+test("guard level 3: the Enter-key hook flags a file marked as downloaded (user.xdg.origin.url) and a file under ~/Downloads, in the voice of E893", pack() {
+  if on_windows or not which_here("python3") {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  if not xattr_here(dir) {
+    snuff
+  }
+  exits(guard_cmd(dir, ["guard", "scope", "downloads", "--yes"], {}), 0)
+  # The level 3 marker and xattr helper landed.
+  assert(fs.is_file(path.join(h, ".cig-orchestrator", "guard", "level3")), "no level3 marker")
+  assert(fs.is_file(path.join(h, ".cig-orchestrator", "guard", "xattr.py")), "no xattr helper")
+  # A file with the xattr origin set, and a file under the scratch Downloads.
+  stick xfile = path.join(dir, "marked.sh")
+  burn { fs.write_text(xfile, "#!/bin/sh\necho pwned\n") }
+  assert(set_origin(xfile, "https://example.com/marked.sh"), "setxattr did not take")
+  stick dloads = path.join(h, "Downloads")
+  stick dfile = path.join(dloads, "under-dl.sh")
+  burn { fs.mkdir(dloads); fs.write_text(dfile, "#!/bin/sh\necho pwned\n") }
+  # The bash hook runs each line through __cigo_guard_rl with READLINE_LINE set.
+  stick hook = path.join(h, ".cig-orchestrator", "guard", "hook.bash")
+  pull rl_case(line) {
+    stick script = ". " + sh_quote_t(hook) + "\n" + 'READLINE_LINE=' + sh_quote_t(line) + '; READLINE_POINT=${#READLINE_LINE}' + "\n" + '__cigo_guard_rl' + "\n" + 'printf "AFTER=[%s]\n" "$READLINE_LINE"'
+    snuff hop_env(dir, "bash", ["-i", "-c", script], guard_env(dir, {}))
+  }
+  stick a = rl_case("bash " + xfile)
+  says(a.err, "E893")
+  says(a.err, xfile)
+  says(a.out, "AFTER=[]")
+  stick b = rl_case("bash " + dfile)
+  says(b.err, "E893")
+  says(b.err, dfile)
+  says(b.out, "AFTER=[]")
+  stick c = rl_case("ls -la")
+  never_says(c.err, "E893")
+  says(c.out, "AFTER=[ls -la]")
+})
+
+test("guard level 3: the unzip shim carries user.xdg.origin.url onto what it extracted; a benign archive is left alone", pack() {
+  if on_windows or not which_here("python3") or not which_here("unzip") or not which_here("zip") {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  if not xattr_here(dir) {
+    snuff
+  }
+  exits(guard_cmd(dir, ["guard", "scope", "downloads", "--yes"], {}), 0)
+  # A zip with the origin xattr.
+  stick src = path.join(dir, "payload.sh")
+  burn { fs.write_text(src, "#!/bin/sh\necho pwned\n") }
+  stick zpath = path.join(dir, "it.zip")
+  exits(hop(dir, "zip", ["-q", zpath, "payload.sh"]), 0)
+  assert(set_origin(zpath, "https://example.com/it.zip"), "setxattr did not take on the archive")
+  # Extract through the shim; it finds the real unzip after itself on PATH.
+  stick out = path.join(dir, "out")
+  burn { fs.mkdir(out) }
+  stick shims = path.join(h, ".cig-orchestrator", "shims")
+  stick pth = shims + ":" + env.get("PATH", "")
+  stick r = hop_env(dir, "sh", [path.join(shims, "unzip"), zpath, "-d", out], guard_env(dir, {PATH: pth}))
+  exits(r, 0)
+  stick marked = path.join(out, "payload.sh")
+  assert(fs.is_file(marked), "unzip did not land payload.sh")
+  stick mark = get_mark(marked)
+  assert(mark.contains("example.com/it.zip"), "the extracted file lost the mark: [" + mark + "]")
+  # An unmarked archive: the extracted file carries no mark.
+  stick out2 = path.join(dir, "out2")
+  burn { fs.mkdir(out2) }
+  stick zplain = path.join(dir, "plain.zip")
+  exits(hop(dir, "zip", ["-q", zplain, "payload.sh"]), 0)
+  exits(hop_env(dir, "sh", [path.join(shims, "unzip"), zplain, "-d", out2], guard_env(dir, {PATH: pth})), 0)
+  assert(get_mark(path.join(out2, "payload.sh")) == "", "a plain archive handed a mark on")
+})
+
+# ----- the PowerShell hook (#57 step 1): the same rules under pwsh --------------------
+
+test("guard (powershell): the hook text has the begin and end markers, the check function and the PSReadLine binding, in the E892 voice", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  exits(guard_cmd(dir, ["config", "guard_shells", "powershell"], {}), 0)
+  exits(guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {}), 0)
+  stick prof = path.join(h, ".config", "powershell", "Microsoft.PowerShell_profile.ps1")
+  assert(fs.is_file(prof), "no profile at ${prof}")
+  stick body = fs.read_text(prof)
+  says(body, "# >>> cigo guard >>>")
+  says(body, "# <<< cigo guard <<<")
+  says(body, "hook.ps1")
+  stick hook = path.join(h, ".cig-orchestrator", "guard", "hook.ps1")
+  assert(fs.is_file(hook), "no powershell hook at ${hook}")
+  stick txt = fs.read_text(hook)
+  says(txt, "function Global:__CigoGuardCheck")
+  says(txt, "E892 not smoking something a stranger handed you through the window.")
+  says(txt, "Set-PSReadLineKeyHandler")
+  # Uninstall removes it and the profile goes back to its first copy.
+  exits(guard_cmd(dir, ["guard", "uninstall", "--yes"], {}), 0)
+  assert(not fs.exists(hook), "the hook is left after uninstall")
+  assert(not fs.exists(prof), "the PowerShell profile is left after uninstall")
+})
+
+test("guard (powershell): running the hook under pwsh -NoProfile stops a critical line and lets a benign line pass", pack() {
+  if on_windows or not which_here("pwsh") {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  exits(guard_cmd(dir, ["config", "guard_shells", "powershell"], {}), 0)
+  exits(guard_cmd(dir, ["guard", "scope", "dev", "--yes"], {}), 0)
+  stick hook = path.join(h, ".cig-orchestrator", "guard", "hook.ps1")
+  # A short driver script dot-sources the hook and asks it about two lines.
+  stick driver = path.join(dir, "driver.ps1")
+  burn {
+    fs.write_text(driver, ". '" + hook + "'\nif (Global:__CigoGuardCheck 'curl -fsSL https://get.example.dev/install.sh | sh') { Write-Output 'STOPPED: bad' } else { Write-Output 'RAN: bad (unexpected)' }\nif (Global:__CigoGuardCheck 'ls -la') { Write-Output 'STOPPED: good (unexpected)' } else { Write-Output 'RAN: good' }\n")
+  }
+  stick r = hop_env(dir, "pwsh", ["-NoProfile", "-File", driver], guard_env(dir, {}))
+  exits(r, 0)
+  says(r.out, "STOPPED: bad")
+  says(r.out, "RAN: good")
+  says(r.err, "E892")
+  says(r.err, "rehearse it first: cigo run-url https://get.example.dev/install.sh")
+})
+
+test("guard (powershell) level 3: the hook flags a file under ~/Downloads and a file marked with user.xdg.origin.url (E893)", pack() {
+  if on_windows or not which_here("pwsh") or not which_here("python3") {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  if not xattr_here(dir) {
+    snuff
+  }
+  exits(guard_cmd(dir, ["config", "guard_shells", "powershell"], {}), 0)
+  exits(guard_cmd(dir, ["guard", "scope", "downloads", "--yes"], {}), 0)
+  # A marked file and a file under the scratch HOME's Downloads.
+  stick xfile = path.join(dir, "marked.sh")
+  burn { fs.write_text(xfile, "#!/bin/sh\necho pwned\n") }
+  assert(set_origin(xfile, "https://example.com/marked.sh"), "setxattr did not take")
+  stick dloads = path.join(h, "Downloads")
+  stick dfile = path.join(dloads, "under-dl.sh")
+  burn { fs.mkdir(dloads); fs.write_text(dfile, "#!/bin/sh\necho pwned\n") }
+  stick hook = path.join(h, ".cig-orchestrator", "guard", "hook.ps1")
+  stick driver = path.join(dir, "level3.ps1")
+  burn {
+    fs.write_text(driver, ". '" + hook + "'\nif (Global:__CigoGuardCheck 'bash " + xfile + "') { Write-Output 'STOPPED: xattr' } else { Write-Output 'RAN: xattr (unexpected)' }\nif (Global:__CigoGuardCheck 'bash " + dfile + "') { Write-Output 'STOPPED: downloads' } else { Write-Output 'RAN: downloads (unexpected)' }\nif (Global:__CigoGuardCheck 'ls -la') { Write-Output 'STOPPED: ls (unexpected)' } else { Write-Output 'RAN: ls' }\n")
+  }
+  stick r = hop_env(dir, "pwsh", ["-NoProfile", "-File", driver], guard_env(dir, {}))
+  exits(r, 0)
+  says(r.out, "STOPPED: xattr")
+  says(r.out, "STOPPED: downloads")
+  says(r.out, "RAN: ls")
+  says(r.err, "E893")
+})
+
+# ----- the fish hook (#57 step 2): generated text, and a syntax check where fish is here -
+
+test("guard (fish): the hook text defines the check function, binds Enter, and carries the E892 and E893 lines; where fish is here, it parses clean", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  exits(guard_cmd(dir, ["config", "guard_shells", "fish"], {}), 0)
+  exits(guard_cmd(dir, ["guard", "scope", "downloads", "--yes"], {}), 0)
+  stick confd = path.join(h, ".config", "fish", "conf.d", "cigo-guard.fish")
+  assert(fs.is_file(confd), "no fish conf.d file at ${confd}")
+  stick body = fs.read_text(confd)
+  says(body, "# >>> cigo guard >>>")
+  says(body, "# <<< cigo guard <<<")
+  says(body, "source " + path.join(h, ".cig-orchestrator", "guard", "hook.fish"))
+  stick hook = path.join(h, ".cig-orchestrator", "guard", "hook.fish")
+  assert(fs.is_file(hook), "no fish hook at ${hook}")
+  stick txt = fs.read_text(hook)
+  says(txt, "function __cigo_guard_check")
+  says(txt, "function __cigo_guard_dl")
+  says(txt, "bind \\r __cigo_guard_check")
+  says(txt, "E892 not smoking something a stranger handed you through the window.")
+  says(txt, "E893 fresh off the internet.")
+  says(txt, "commandline -f execute")
+  # Every `function` line has a matching `end` at the top level (fish `if`,
+  # `for`, `switch` and `begin` also close with `end`, so there are more
+  # `end` than `function`): count them and insist there are at least three
+  # `function` and at least as many `end`.
+  roll fns = 0
+  roll ends = 0
+  for line in txt.lines() {
+    if line.starts_with("function ") { fns += 1 }
+    if line == "end" { ends += 1 }
+  }
+  assert(fns >= 3, "fewer than three `function` lines: ${fns}")
+  assert(ends >= fns, "fewer `end` than `function` lines: ${ends} < ${fns}")
+  # Where fish is here (CI, a dev's own machine), parse it for real.
+  if which_here("fish") {
+    stick syn = hop(dir, "fish", ["-n", hook])
+    exits(syn, 0)
   }
 })
 

@@ -61,11 +61,11 @@ stick SETTINGS = {
   osv: {values: ["off", "online", "offline"], default: "online", floor: true, presets: {},
     doc: "known-bad packages: the lockfiles' packages checked against OSV (malicious packages refused, known vulnerabilities reported); online sends name@version alone, offline reads the database cigo audit --update-db builds, off does not look"},
   guard_scope: {values: ["project", "dev", "downloads", "agents", "system"], default: "project", floor: false, machine: true, presets: {},
-    doc: "how much of this machine the guard covers (cigo guard setup asks, cigo guard scope changes it): project (just cigo runs), dev (also every package manager and its scripts, anywhere, through shims first on PATH), agents (also every shell command your AI agents run); downloads and system are not built yet. A project cannot set it"},
+    doc: "how much of this machine the guard covers (cigo guard setup asks, cigo guard scope changes it): project (just cigo runs), dev (also every package manager and its scripts, anywhere, through shims first on PATH), downloads (also the first shell run of a file the browser marked as downloaded, or any file under ~/Downloads; shims for tar, unzip and 7z carry the mark onto what they extract), agents (also every shell command your AI agents run); system is not built yet. A project cannot set it"},
   guard_commands: {values: null, default: "npm,npx,pnpm,yarn,bun,bunx,pip,pip3,pipx,uv,uvx,poetry,cargo,go,gem,bundle,composer,dotnet,deno", floor: false, machine: true, presets: {},
     doc: "the programs that get a shim at guard_scope dev, comma-separated; which of their calls the guard reads is cigo's data (cigo guard allow <program> takes one out)"},
   guard_shells: {values: null, default: "", floor: false, machine: true, presets: {},
-    doc: "the shells whose startup files get the guard's block at guard_scope dev and up, comma-separated: bash, zsh, sh (~/.profile) and fish; empty is every shell found"},
+    doc: "the shells whose startup files get the guard's block at guard_scope dev and up, comma-separated: bash, zsh, sh (~/.profile), fish and powershell; empty is every shell found"},
   guard_agents: {values: null, default: "", floor: false, machine: true, presets: {},
     doc: "the AI agents whose shell commands go through cigo agent run at guard_scope agents (claude-code); cigo guard scope agents --agents=claude-code --yes sets it"},
   agent_approval: {values: ["tty", "os-auth", "never"], default: "os-auth", floor: true, presets: {ci: "never"},
@@ -10767,7 +10767,7 @@ stick HOOK_LABEL = "cigo-hook"
 # the setting's).
 roll AGENT_WANT = null
 # The levels this cigo can put in place.
-stick GUARD_BUILT = ["project", "dev", "agents"]
+stick GUARD_BUILT = ["project", "dev", "downloads", "agents"]
 stick GUARD_DIR = path.join(CIGO_HOME, "guard")
 stick SHIMS_DIR = path.join(CIGO_HOME, "shims")
 stick GUARD_STATE_FILE = path.join(GUARD_DIR, "state.json")
@@ -10776,6 +10776,11 @@ stick GUARD_OFF = path.join(GUARD_DIR, "off")
 stick GUARD_PAUSED = path.join(GUARD_DIR, "paused-until")
 stick GUARD_ALLOW = path.join(GUARD_DIR, "allow.json")
 stick GUARD_ALLOW_LABEL = "cigo-guard-allow"
+stick GUARD_LEVEL3_MARK = path.join(GUARD_DIR, "level3")
+stick GUARD_SHELLS_ALL = ["bash", "zsh", "sh", "fish", "powershell"]
+stick ARCHIVE_SHIMS = ["tar", "unzip", "7z"]
+stick XATTR_ORIGIN = "user.xdg.origin.url"
+stick XATTR_MARK = "user.cig.downloaded"
 stick PROFILE_BEGIN = "# >>> cigo guard >>>"
 stick PROFILE_END = "# <<< cigo guard <<<"
 # The manifests a guarded call may change beside its lockfile: kept in the
@@ -10998,6 +11003,9 @@ pull first_words(two) {
 # it at once unless the call is one the guard reads, and say so while the
 # guard is paused or off.
 pull shim_text(tool) {
+  if ARCHIVE_SHIMS.contains(tool) {
+    snuff archive_shim_text(tool)
+  }
   stick spec = GUARD_COMMANDS[tool]
   roll cases = []
   if spec.get("all", false) {
@@ -11071,8 +11079,209 @@ pull shim_text(tool) {
   ].join("\n")
 }
 
+# An archive-tool shim for tar, unzip or 7z (#57 level 3): run the real
+# program, and if the archive had the download mark (user.xdg.origin.url
+# or user.cig.downloaded, or lives under ~/Downloads) carry the mark onto
+# what came out. getfattr and setfattr do it when they are here; python3
+# and the xattr.py helper otherwise. The real program's exit code is kept.
+pull archive_shim_text(tool) {
+  snuff [
+    '#!/bin/sh',
+    '# cigo guard: the shim for ' + tool + ' (guard_scope downloads, cig-orchestrator #57).',
+    '# The mark the OS put on the archive (user.xdg.origin.url) is carried onto',
+    '# the extracted files; cigo guard uninstall removes it.',
+    'shims=' + sh_quote(SHIMS_DIR),
+    'guard=' + sh_quote(GUARD_DIR),
+    'real=',
+    'saved_ifs=$IFS',
+    'IFS=:',
+    'set -f',
+    'for d in $PATH; do',
+    '  case "$d" in "$shims"|"$shims/") continue ;; /*) ;; *) continue ;; esac',
+    '  if [ -f "$d/' + tool + '" ] && [ -x "$d/' + tool + '" ]; then real="$d/' + tool + '"; break; fi',
+    'done',
+    'set +f',
+    'IFS=$saved_ifs',
+    'if [ -z "$real" ]; then',
+    '  echo "' + tool + ': command not found (cigo guard: no ' + tool + ' on PATH after $shims)" >&2',
+    '  exit 127',
+    'fi',
+    'if [ -n "${CIGO_GUARDED:-}" ]; then exec "$real" "$@"; fi',
+    archive_shim_parse(tool),
+    '# Read the mark on the archive (or treat a file under ~/Downloads as marked).',
+    'url=',
+    'if [ -n "$archive" ] && [ -f "$archive" ]; then',
+    '  if command -v getfattr >/dev/null 2>&1; then',
+    '    url=$(getfattr --only-values -n user.xdg.origin.url --absolute-names "$archive" 2>/dev/null || true)',
+    '    [ -z "$url" ] && url=$(getfattr --only-values -n user.cig.downloaded --absolute-names "$archive" 2>/dev/null || true)',
+    '  elif [ -f "$guard/xattr.py" ] && command -v python3 >/dev/null 2>&1; then',
+    '    url=$(python3 -I "$guard/xattr.py" get "$archive" 2>/dev/null || true)',
+    '  fi',
+    '  if [ -z "$url" ]; then',
+    '    case "$archive" in "$HOME"/Downloads/*) url="file:$archive" ;; esac',
+    '  fi',
+    'fi',
+    '# A stamp file that is newer than everything already in dest; -cnewer',
+    '# then matches only the files the real program creates or replaces.',
+    'stamp=',
+    'if [ -n "$url" ] && [ -d "$dest" ] && command -v mktemp >/dev/null 2>&1; then',
+    '  stamp=$(mktemp 2>/dev/null) || stamp=',
+    '  [ -n "$stamp" ] && touch "$stamp" 2>/dev/null',
+    'fi',
+    '# Run the real program; keep its exit code.',
+    '"$real" "$@"',
+    'code=$?',
+    '# On success, carry the mark onto the files the real program just wrote.',
+    'if [ "$code" = 0 ] && [ -n "$url" ] && [ -d "$dest" ]; then',
+    '  if command -v setfattr >/dev/null 2>&1 && command -v find >/dev/null 2>&1 && [ -n "$stamp" ]; then',
+    '    # POSIX: /bin/sh is dash on Debian and Ubuntu, which has no read -d.',
+    '    find "$dest" -type f \( -cnewer "$stamp" -o -newer "$stamp" \) -exec setfattr -n user.cig.downloaded -v "$url" {} + 2>/dev/null || true',
+    '  elif [ -f "$guard/xattr.py" ] && command -v python3 >/dev/null 2>&1; then',
+    '    python3 -I "$guard/xattr.py" mark-tree "$dest" "$url" "$stamp" 2>/dev/null || true',
+    '  fi',
+    'fi',
+    '[ -n "$stamp" ] && rm -f "$stamp" 2>/dev/null',
+    'exit $code',
+    '',
+  ].join("\n")
+}
+
+# How each archive tool spells "which archive" and "extract where":
+# - unzip <archive> [-d <dest>]
+# - tar -xf <archive> [-C <dest>] (and the stacked xf, xvf, xzf forms)
+# - 7z x <archive> [-o<dest>]
+pull archive_shim_parse(tool) {
+  if tool == "unzip" {
+    snuff [
+      '# For unzip: a positional archive, and -d <dest>.',
+      'archive=',
+      'dest=',
+      'want=',
+      'for a in "$@"; do',
+      '  if [ "$want" = d ]; then dest=$a; want=; continue; fi',
+      '  case "$a" in',
+      '    -d) want=d ;;',
+      '    -*) : ;;',
+      '    *) [ -z "$archive" ] && archive=$a ;;',
+      '  esac',
+      'done',
+      '[ -z "$dest" ] && dest=$PWD',
+    ].join("\n")
+  }
+  if tool == "tar" {
+    snuff [
+      '# For tar: -f <archive>, -C <dest>, the stacked -xzf forms, and the',
+      '# old-style first word with no dash (tar xzf file.tgz).',
+      'archive=',
+      'dest=',
+      'want=',
+      'first=1',
+      'for a in "$@"; do',
+      '  if [ "$first" = 1 ]; then',
+      '    first=',
+      '    case "$a" in -*) ;; *f*) want=f; continue ;; esac',
+      '  fi',
+      '  if [ "$want" = f ]; then archive=$a; want=; continue; fi',
+      '  if [ "$want" = C ]; then dest=$a; want=; continue; fi',
+      '  case "$a" in',
+      '    --file=*) archive=${a#--file=} ;;',
+      '    --directory=*) dest=${a#--directory=} ;;',
+      '    -f) want=f ;;',
+      '    -C) want=C ;;',
+      '    -*) case "$a" in *f*) want=f ;; esac ;;',
+      '    *) : ;;',
+      '  esac',
+      'done',
+      '[ -z "$dest" ] && dest=$PWD',
+    ].join("\n")
+  }
+  # 7z x archive -o<dest>
+  snuff [
+    '# For 7z: a command word (x, e, l, ...), a positional archive, and -o<dest>.',
+    'archive=',
+    'dest=',
+    'cmd_seen=',
+    'for a in "$@"; do',
+    '  case "$a" in',
+    '    -o*) dest=${a#-o} ;;',
+    '    -*) : ;;',
+    '    *)',
+    '      if [ -z "$cmd_seen" ]; then',
+    '        case "$a" in x|e|l|a|u|d|t|b|rn) cmd_seen=1; continue ;; esac',
+    '        cmd_seen=1',
+    '      fi',
+    '      [ -z "$archive" ] && archive=$a ;;',
+    '  esac',
+    'done',
+    '[ -z "$dest" ] && dest=$PWD',
+  ].join("\n")
+}
+
+# The xattr helper the level-3 bits call when the machine has no getfattr
+# and no setfattr. Reads and writes user.xdg.origin.url and
+# user.cig.downloaded through Python\x27s os.getxattr and os.setxattr, and
+# walks a directory with mark-tree. Refuses gracefully where xattrs are
+# not supported (any OSError is swallowed by a non-zero exit).
+pull xattr_py_text() {
+  snuff [
+    '#!/usr/bin/env python3',
+    '# cigo guard: the xattr helper for level 3 (cig-orchestrator #57).',
+    '# Usage: xattr.py has <file> | get <file> | set <file> <url> | mark-tree <dir> <url> [<ref>]',
+    'import os, sys',
+    'NAMES = ("user.xdg.origin.url", "user.cig.downloaded")',
+    'def _has(path):',
+    '    for n in NAMES:',
+    '        try:',
+    '            os.getxattr(path, n); return 0',
+    '        except OSError: pass',
+    '    return 1',
+    'def _get(path):',
+    '    for n in NAMES:',
+    '        try:',
+    '            v = os.getxattr(path, n)',
+    '            sys.stdout.write(v.decode("utf-8", "replace"))',
+    '            return 0',
+    '        except OSError: pass',
+    '    return 1',
+    'def _set(path, url):',
+    '    try:',
+    '        os.setxattr(path, "user.cig.downloaded", url.encode("utf-8"))',
+    '        return 0',
+    '    except OSError:',
+    '        return 1',
+    'def _mark(dest, url, ref):',
+    '    try:',
+    '        st = os.stat(ref) if ref else None',
+    '        cutoff = min(st.st_mtime, st.st_ctime) if st else 0.0',
+    '    except OSError: cutoff = 0.0',
+    '    url_b = url.encode("utf-8")',
+    '    for root, _, names in os.walk(dest):',
+    '        for n in names:',
+    '            p = os.path.join(root, n)',
+    '            try:',
+    '                fs = os.stat(p)',
+    '                if fs.st_ctime >= cutoff or fs.st_mtime >= cutoff:',
+    '                    os.setxattr(p, "user.cig.downloaded", url_b)',
+    '            except OSError: pass',
+    '    return 0',
+    'def main(argv):',
+    '    if len(argv) < 3: return 2',
+    '    op, arg = argv[1], argv[2]',
+    '    if op == "has": return _has(arg)',
+    '    if op == "get": return _get(arg)',
+    '    if op == "set" and len(argv) >= 4: return _set(arg, argv[3])',
+    '    if op == "mark-tree" and len(argv) >= 4:',
+    '        return _mark(arg, argv[3], argv[4] if len(argv) > 4 else None)',
+    '    return 2',
+    'if __name__ == "__main__":',
+    '    sys.exit(main(sys.argv))',
+    '',
+  ].join("\n")
+}
+
 # The startup files that get the PATH block: the ones this machine has (a
-# shell's own, and the login profile), and fish's conf.d when fish is here.
+# shell's own, and the login profile), fish's conf.d when fish is here, and
+# PowerShell's CurrentUserAllHosts profile when pwsh or powershell is here.
 pull profile_targets() {
   stick h = fs.home()
   roll out = []
@@ -11086,10 +11295,27 @@ pull profile_targets() {
   if fs.is_dir(fish) or which("fish") != null {
     out.push({file: path.join(fish, "conf.d", "cigo-guard.fish"), shell: "fish", name: "fish", own: true})
   }
+  if which("pwsh") != null or which("powershell") != null or fs.is_dir(pwsh_profile_dir(h)) {
+    out.push({file: pwsh_profile_path(h), shell: "powershell", name: "powershell"})
+  }
   if out.is_empty() {
     out.push({file: path.join(h, ".profile"), shell: "sh", name: "sh"})
   }
   snuff out
+}
+
+# PowerShell's CurrentUserAllHosts profile: on Linux and macOS, under
+# ~/.config/powershell; on Windows, under Documents/PowerShell. pwsh and the
+# older powershell look at the same path on each OS.
+pull pwsh_profile_dir(h) {
+  if cig.os() == "windows" {
+    snuff path.join(h, "Documents", "PowerShell")
+  }
+  snuff path.join(h, ".config", "powershell")
+}
+
+pull pwsh_profile_path(h) {
+  snuff path.join(pwsh_profile_dir(h), "Microsoft.PowerShell_profile.ps1")
 }
 
 # The startup files the guard's block goes in (#57): every shell's that is
@@ -11101,8 +11327,8 @@ pull hook_targets() {
     snuff profile_targets()
   }
   for s in want {
-    if not ["bash", "zsh", "sh", "fish"].contains(s) {
-      fail("guard_shells names `${s}`: it takes bash, zsh, sh (for ~/.profile) and fish, comma-separated")
+    if not GUARD_SHELLS_ALL.contains(s) {
+      fail("guard_shells names `${s}`: it takes bash, zsh, sh (for ~/.profile), fish and powershell, comma-separated")
     }
   }
   stick h = fs.home()
@@ -11117,6 +11343,8 @@ pull hook_targets() {
     if not out.any(pack(p) => p.name == s) {
       if s == "fish" {
         out.push({file: path.join(h, ".config", "fish", "conf.d", "cigo-guard.fish"), shell: "fish", name: "fish", own: true})
+      } else if s == "powershell" {
+        out.push({file: pwsh_profile_path(h), shell: "powershell", name: "powershell"})
       } else {
         out.push({file: path.join(h, usual[s]), shell: "sh", name: s})
       }
@@ -11127,11 +11355,36 @@ pull hook_targets() {
 
 pull profile_block(shell) {
   if shell == "fish" {
-    snuff [PROFILE_BEGIN + " (written by cigo; cigo guard uninstall removes this file)", "if not contains -- " + sh_quote(SHIMS_DIR) + " $PATH", "    set -gx PATH " + sh_quote(SHIMS_DIR) + " $PATH", "end", PROFILE_END, ""].join("\n")
+    stick hf = sh_quote(hook_file("fish"))
+    snuff [PROFILE_BEGIN + " (written by cigo; cigo guard uninstall removes this file)",
+      "if not contains -- " + sh_quote(SHIMS_DIR) + " $PATH",
+      "    set -gx PATH " + sh_quote(SHIMS_DIR) + " $PATH",
+      "end",
+      "if test -f " + hf,
+      "    source " + hf,
+      "end",
+      PROFILE_END, ""].join("\n")
+  }
+  if shell == "powershell" {
+    stick hp = ps_quote(hook_file("powershell"))
+    stick sp = ps_quote(SHIMS_DIR)
+    snuff [PROFILE_BEGIN + " (written by cigo; cigo guard uninstall removes this)",
+      "$__CigoShims = " + sp,
+      "if (($env:PATH -split [IO.Path]::PathSeparator) -notcontains $__CigoShims) {",
+      "    $env:PATH = $__CigoShims + [IO.Path]::PathSeparator + $env:PATH",
+      "}",
+      "if (Test-Path -LiteralPath " + hp + ") { . " + hp + " }",
+      PROFILE_END, ""].join("\n")
   }
   stick hb = sh_quote(hook_file("bash"))
   stick hz = sh_quote(hook_file("zsh"))
   snuff [PROFILE_BEGIN + " (written by cigo; cigo guard uninstall removes this)", "case \":$PATH:\" in *" + sh_quote(":" + SHIMS_DIR + ":") + "*) ;; *) PATH=" + sh_quote(SHIMS_DIR) + "\":$PATH\"; export PATH ;; esac", 'case "$-" in *i*) if [ -n "${BASH_VERSION:-}" ] && [ -f ' + hb + ' ]; then . ' + hb + '; elif [ -n "${ZSH_VERSION:-}" ] && [ -f ' + hz + ' ]; then . ' + hz + '; fi ;; esac', PROFILE_END, ""].join("\n")
+}
+
+# PowerShell's single-quoted string, with its own escape for a literal
+# single quote (double it).
+pull ps_quote(word) {
+  snuff "'" + str(word).replace("'", "''") + "'"
 }
 
 # A startup file's text without cigo's block.
@@ -11189,10 +11442,19 @@ pull scope_plan(level) {
   roll plan = []
   stick st = guard_state()
   stick want_shims = guard_level_number(level) >= 2
+  stick want_dl = guard_level_number(level) >= 3
   stick tools = guard_tools()
+  roll wanted = tools.filter(pack(x) => true)
+  if want_dl {
+    for t in ARCHIVE_SHIMS {
+      if not wanted.contains(t) {
+        wanted.push(t)
+      }
+    }
+  }
   roll had = as_list(st.get("shims", []))
   if want_shims {
-    for t in tools {
+    for t in wanted {
       stick f = path.join(SHIMS_DIR, t)
       stick text_now = pick(fs.is_file(f), pack() => fs.read_text(f), pack() => "")()
       if text_now != shim_text(t) {
@@ -11201,22 +11463,45 @@ pull scope_plan(level) {
     }
   }
   for t in had {
-    if not want_shims or not tools.contains(t) {
+    if not want_shims or not wanted.contains(t) {
       stick f = path.join(SHIMS_DIR, t)
       if fs.is_file(f) {
         plan.push({act: "remove", kind: "shim", path: f, what: "the shim for " + t})
       }
     }
   }
-  for shell in ["bash", "zsh"] {
+  stick want_hooks_for = hook_shell_names()
+  for shell in ["bash", "zsh", "fish", "powershell"] {
     stick f = hook_file(shell)
-    if want_shims {
+    stick wanted_here = want_shims and want_hooks_for.contains(shell)
+    if wanted_here {
       stick now_text = pick(fs.is_file(f), pack() => fs.read_text(f), pack() => "")()
       if now_text != hook_text(shell) {
         plan.push({act: pick(fs.is_file(f), "update", "add"), kind: "hook", path: f, shell: shell, what: "the Enter-key hook for " + shell + ": a download piped into a shell is cancelled"})
       }
     } else if fs.is_file(f) {
       plan.push({act: "remove", kind: "hook", path: f, shell: shell, what: "the Enter-key hook for " + shell})
+    }
+  }
+  # Level 3's marker and xattr.py helper: the shell hooks read the marker
+  # (it says level 3 is active), and the archive shims call xattr.py when
+  # getfattr and setfattr are not on the machine.
+  stick xattr_py = path.join(GUARD_DIR, "xattr.py")
+  if want_dl {
+    stick now_mark = fs.is_file(GUARD_LEVEL3_MARK)
+    if not now_mark {
+      plan.push({act: "add", kind: "level3", path: GUARD_LEVEL3_MARK, what: "the level 3 marker: the Enter-key hook also catches a file marked as downloaded"})
+    }
+    stick now_text = pick(fs.is_file(xattr_py), pack() => fs.read_text(xattr_py), pack() => "")()
+    if now_text != xattr_py_text() {
+      plan.push({act: pick(fs.is_file(xattr_py), "update", "add"), kind: "xattr-helper", path: xattr_py, what: "the xattr helper the hook and the archive shims call when getfattr and setfattr are not here"})
+    }
+  } else {
+    if fs.is_file(GUARD_LEVEL3_MARK) {
+      plan.push({act: "remove", kind: "level3", path: GUARD_LEVEL3_MARK, what: "the level 3 marker"})
+    }
+    if fs.is_file(xattr_py) {
+      plan.push({act: "remove", kind: "xattr-helper", path: xattr_py, what: "the xattr helper"})
     }
   }
   stick agents_now = AGENT_WANT ?? str(config().guard_agents).split(",").map(pack(a) => a.trim()).filter(pack(a) => a != "")
@@ -11310,12 +11595,30 @@ pull apply_plan(plan, level) {
       } else if not write_outside(p.path, hook_text(p.shell)) {
         fail("could not write ${p.path}")
       }
+    } else if p.kind == "level3" {
+      if p.act == "remove" {
+        remove_outside(p.path)
+      } else if not write_outside(p.path, "") {
+        fail("could not write ${p.path}")
+      }
+    } else if p.kind == "xattr-helper" {
+      if p.act == "remove" {
+        remove_outside(p.path)
+      } else if not write_program_outside(p.path, xattr_py_text()) {
+        fail("could not write ${p.path}")
+      }
     } else if p.kind == "profile" {
       if p.act == "remove" {
         if p.path.ends_with("cigo-guard.fish") {
           remove_outside(p.path)
         } else if fs.is_file(p.path) {
-          if not write_outside(p.path, without_block(fs.read_text(p.path))) {
+          stick left = without_block(fs.read_text(p.path))
+          # A PowerShell profile cigo wrote into an empty file reads as
+          # cigo's only, so uninstall takes the whole file; everywhere else
+          # the block is cut out and the rest is left as it was.
+          if left.trim() == "" and p.path.ends_with("Microsoft.PowerShell_profile.ps1") {
+            remove_outside(p.path)
+          } else if not write_outside(p.path, left) {
             fail("could not write ${p.path}")
           }
         }
@@ -11355,11 +11658,11 @@ stick GUARD_QUESTION = [
   "",
   "  [1] just cigo runs                    what it does today",
   "  [2] + package managers and scripts    npm, pip, cargo, go, gem, npx, uvx ... go through the guard anywhere   (recommended)",
-  "  [3] + anything you download           not built yet",
+  "  [3] + anything you download           the first shell run of a file the browser marked, or under ~/Downloads, is rehearsed first (E893)",
   "  [4] + your AI agents                  every command an agent runs is read, boxed and undoable (Claude Code)",
   "  [5] everything the PC runs            not built yet",
   "",
-  "  each level includes the ones above it (level 3 is skipped until it is built). answer with: cigo guard scope <1-5>",
+  "  each level includes the ones above it. answer with: cigo guard scope <1-5>",
   "  (it shows what it would change first; --yes makes the change)",
 ]
 
@@ -11515,14 +11818,14 @@ pull do_guard_scope(word) {
     fail("cigo guard scope <1-5|project|dev|downloads|agents|system>")
   }
   if not GUARD_BUILT.contains(level) {
-    fail("level ${guard_level_number(level)} (${level}) is not built yet; levels 1 (project), 2 (dev) and 4 (agents) are. cigo guard scope dev puts every package manager behind the guard")
+    fail("level ${guard_level_number(level)} (${level}) is not built yet; levels 1 (project), 2 (dev), 3 (downloads) and 4 (agents) are. cigo guard scope dev puts every package manager behind the guard")
   }
   if level == "agents" and AGENT_WANT == null and str(config().guard_agents) == "" {
     exhale "level 4 (agents): say which agents, each by name; the one cigo has a hook for is claude-code:"
     exhale "  cigo guard scope agents --agents=claude-code        shows what it would change"
     exhale "Claude Code then checks its permission rules against the wrapped command: allow and deny rules"
     exhale "written for plain commands (Bash(npm test)) no longer match it, so it asks you instead, unless the"
-    exhale "session's mode allows the call. Level 3 (downloads) is not built yet; level 4 adds the agents to level 2."
+    exhale "session's mode allows the call. Level 4 adds the agents to levels 2 and 3."
     snuff
   }
   if level != "project" and cig.os() == "windows" {
@@ -11688,10 +11991,79 @@ pull do_guard_uninstall() {
 stick HOOK_FETCH_RE = '(^|[;&|({[:space:]])(curl|wget|fetch)[[:space:]][^|]*[|][[:space:]]*(sudo([[:space:]]+-[A-Za-z]+)*[[:space:]]+)?(env[[:space:]]+([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*)?((ba|z|da|k|c|tc|fi)?sh|python[0-9.]*|node|perl|ruby|php)([[:space:]]|$|[;&)])'
 stick HOOK_SUBST_RE = '((ba|z|da|k)?sh|source|[.]|eval)[[:space:]]+(-c[[:space:]]+)?["' + "'" + ']?[<$][(][[:space:]]*(curl|wget|fetch)[[:space:]]'
 stick HOOK_URL_RE = '(https?://[^][:space:]"' + "'" + '|)]+)'
+# .NET regex does not take [[:space:]] inside a character class the way
+# POSIX ERE and PCRE2 do: for PowerShell the same intent is written with \s.
+stick HOOK_FETCH_RE_NET = '(^|[;&|({\s])(curl|wget|fetch)\s[^|]*[|]\s*(sudo(\s+-[A-Za-z]+)*\s+)?(env\s+([A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)?((ba|z|da|k|c|tc|fi)?sh|python[0-9.]*|node|perl|ruby|php)(\s|$|[;&)])'
+stick HOOK_SUBST_RE_NET = '((ba|z|da|k)?sh|source|[.]|eval)\s+(-c\s+)?["' + "'" + ']?[<$][(]\s*(curl|wget|fetch)\s'
+stick HOOK_URL_RE_NET = '(https?://[^\s"' + "'" + '|)\]]+)'
 stick HOOK_SAYS = "E892 not smoking something a stranger handed you through the window."
+# E893 (#57 level 3): a shell asked to run a file the browser marked as
+# downloaded, or a file under ~/Downloads, that has never been rehearsed.
+stick HOOK_DL_SAYS = "E893 fresh off the internet. a shell asked to run something that was just downloaded."
 
 pull hook_file(shell) {
+  if shell == "powershell" {
+    snuff path.join(GUARD_DIR, "hook.ps1")
+  }
   snuff path.join(GUARD_DIR, "hook." + shell)
+}
+
+# The shells whose hook files are installed at level 2 and up. bash and zsh
+# share the sh-profile block (its case loads the right one at a terminal),
+# so every sh-profile target wants both of them. fish and powershell each
+# bring their own.
+pull hook_shell_names() {
+  roll out = []
+  for t in hook_targets() {
+    if t.shell == "sh" {
+      if not out.contains("bash") { out.push("bash") }
+      if not out.contains("zsh") { out.push("zsh") }
+    } else if not out.contains(t.name) {
+      out.push(t.name)
+    }
+  }
+  snuff out
+}
+
+# A small snippet reused by the bash and zsh hooks: the shell function that
+# looks for a file in the command line that the operating system has marked
+# as downloaded (the user.xdg.origin.url attribute, which browsers set, or
+# any file under ~/Downloads, per the recommendation in #57). Called from
+# the Enter-key hook only when $__cigo_guard_dir/level3 exists.
+pull hook_dl_shell_fn() {
+  snuff [
+    '__cigo_guard_dl() {',
+    '  local line=$1 w f abs prev= dl= saved=$-',
+    '  case "$line" in',
+    '    *./*|*/*|*~/*) ;;',
+    '    *) return 1 ;;',
+    '  esac',
+    '  set -f',
+    '  for w in $line; do',
+    '    f=',
+    '    case "$w" in',
+    '      ./*|/*|../*) f=$w ;;',
+    '      "~/"*) f="$HOME/${w#"~/"}" ;;',
+    '      *) case "$prev" in bash|sh|zsh|dash|python|python2|python3|node|perl|ruby) f=$w ;; esac ;;',
+    '    esac',
+    '    prev=$w',
+    '    [ -z "$f" ] && continue',
+    '    case "$f" in "~/"*) f="$HOME/${f#"~/"}" ;; esac',
+    '    [ -f "$f" ] || continue',
+    '    case "$f" in /*) abs=$f ;; *) abs="$PWD/$f" ;; esac',
+    '    case "$abs" in "$HOME"/Downloads/*) dl=$abs; break ;; esac',
+    '    if command -v getfattr >/dev/null 2>&1; then',
+    '      getfattr --only-values -n user.xdg.origin.url --absolute-names "$f" >/dev/null 2>&1 && { dl=$abs; break; }',
+    '      getfattr --only-values -n user.cig.downloaded --absolute-names "$f" >/dev/null 2>&1 && { dl=$abs; break; }',
+    '    elif [ -f "$__cigo_guard_dir/xattr.py" ] && command -v python3 >/dev/null 2>&1; then',
+    '      python3 -I "$__cigo_guard_dir/xattr.py" has "$f" >/dev/null 2>&1 && { dl=$abs; break; }',
+    '    fi',
+    '  done',
+    '  case $saved in *f*) ;; *) set +f ;; esac',
+    "  [ -n \"$dl\" ] && printf '%s' \"$dl\"",
+    '  [ -n "$dl" ]',
+    '}',
+  ].join("\n")
 }
 
 pull hook_text(shell) {
@@ -11708,29 +12080,256 @@ pull hook_text(shell) {
       "typeset -g __cigo_guard_re=" + sh_quote(HOOK_FETCH_RE),
       "typeset -g __cigo_guard_re2=" + sh_quote(HOOK_SUBST_RE),
       "typeset -g __cigo_guard_url=" + sh_quote(HOOK_URL_RE),
-      "__cigo_guard_accept() {",
-      "  local line=$BUFFER until=",
-      '  if [[ ${CIGO_GUARD_HOOK:-1} != 0 && ! -f $__cigo_guard_dir/off ]] && { [[ $line =~ $__cigo_guard_re ]] || [[ $line =~ $__cigo_guard_re2 ]]; }; then',
-      "    if [[ -f $__cigo_guard_dir/paused-until ]]; then",
-      '      until=${$(<$__cigo_guard_dir/paused-until)%%$' + "'\\n'" + '*}',
-      '      if (( $(date +%s) < ${until:-0} )); then zle __cigo_guard_orig_accept_line; return; fi',
-      "    fi",
-      "    print -s -r -- \"$line\"",
-      "    zle -I",
-      "    print -u2 -r -- " + sh_quote(HOOK_SAYS),
-      "    print -u2 -r -- \"  $line\"",
-      "    print -u2 -r -- '  runs whatever that server sends today; nothing ran (it is in your history to edit).'",
-      "    if [[ $line =~ $__cigo_guard_url ]]; then print -u2 -r -- \"  rehearse it first: $__cigo_guard_name run-url $match[1]\"; fi",
-      "    BUFFER=",
-      "  fi",
-      "  zle __cigo_guard_orig_accept_line",
-      "}",
+      "typeset -g __cigo_guard_dl_says=" + sh_quote(HOOK_DL_SAYS),
+      hook_dl_shell_fn(),
+      '__cigo_guard_paused() {',
+      '  local until=',
+      '  if [[ -f $__cigo_guard_dir/paused-until ]]; then',
+      '    { IFS= read -r until; } < $__cigo_guard_dir/paused-until',
+      '    (( $(date +%s) < ${until:-0} )) 2>/dev/null && return 0',
+      '  fi',
+      '  return 1',
+      '}',
+      '__cigo_guard_accept() {',
+      '  local line=$BUFFER dl=',
+      '  if [[ ${CIGO_GUARD_HOOK:-1} != 0 && ! -f $__cigo_guard_dir/off ]] && ! __cigo_guard_paused; then',
+      '    if { [[ $line =~ $__cigo_guard_re ]] || [[ $line =~ $__cigo_guard_re2 ]]; }; then',
+      '      print -s -r -- "$line"',
+      '      zle -I',
+      "      print -u2 -r -- " + sh_quote(HOOK_SAYS),
+      '      print -u2 -r -- "  $line"',
+      "      print -u2 -r -- '  runs whatever that server sends today; nothing ran (it is in your history to edit).'",
+      '      if [[ $line =~ $__cigo_guard_url ]]; then print -u2 -r -- "  rehearse it first: $__cigo_guard_name run-url $match[1]"; fi',
+      '      BUFFER=',
+      '    elif [[ -f $__cigo_guard_dir/level3 ]]; then',
+      '      if dl=$(__cigo_guard_dl "$line"); then',
+      '        print -s -r -- "$line"',
+      '        zle -I',
+      '        print -u2 -r -- "$__cigo_guard_dl_says"',
+      '        print -u2 -r -- "  $dl"',
+      "        print -u2 -r -- '  nothing ran (it is in your history to edit).'",
+      '        print -u2 -r -- "  rehearse it first: $__cigo_guard_name rehearse $dl"',
+      '        BUFFER=',
+      '      fi',
+      '    fi',
+      '  fi',
+      '  zle __cigo_guard_orig_accept_line',
+      '}',
       'if [[ ${widgets[accept-line]:-} == user:* ]]; then',
       "  zle -A accept-line __cigo_guard_orig_accept_line",
       "else",
       "  zle -A .accept-line __cigo_guard_orig_accept_line",
       "fi",
       "zle -N accept-line __cigo_guard_accept",
+      "",
+    ].join("\n")
+  }
+  if shell == "fish" {
+    snuff [
+      "# cigo guard: the Enter-key hook for fish (guard_scope dev), written by cig-orchestrator.",
+      "# A line that pipes a download into a shell is cancelled; cigo guard uninstall removes it.",
+      "if set -q __cigo_guard_loaded",
+      "    exit 0",
+      "end",
+      "set -g __cigo_guard_loaded 1",
+      "set -g __cigo_guard_dir " + sh_quote(GUARD_DIR),
+      "set -g __cigo_guard_name " + sh_quote(name),
+      "set -g __cigo_guard_re " + sh_quote(HOOK_FETCH_RE),
+      "set -g __cigo_guard_re2 " + sh_quote(HOOK_SUBST_RE),
+      "set -g __cigo_guard_url " + sh_quote(HOOK_URL_RE),
+      "set -g __cigo_guard_says " + sh_quote(HOOK_SAYS),
+      "set -g __cigo_guard_dl_says " + sh_quote(HOOK_DL_SAYS),
+      "",
+      "function __cigo_guard_paused",
+      "    if test -f \"$__cigo_guard_dir/paused-until\"",
+      "        set -l until (head -n1 \"$__cigo_guard_dir/paused-until\" 2>/dev/null)",
+      "        if test -n \"$until\"; and test (date +%s) -lt $until 2>/dev/null",
+      "            return 0",
+      "        end",
+      "    end",
+      "    return 1",
+      "end",
+      "",
+      "function __cigo_guard_dl",
+      "    set -l line $argv[1]",
+      "    if not string match -q -- '*/*' $line; and not string match -q -- '*~/*' $line",
+      "        return 1",
+      "    end",
+      "    set -l prev ''",
+      "    for w in (string split -- ' ' $line)",
+      "        set -l f ''",
+      "        if string match -qr -- '^(\\./|/|\\.\\./)' $w",
+      "            set f $w",
+      "        else if string match -q -- '~/*' $w",
+      "            set f \"$HOME/\"(string sub -s 3 -- $w)",
+      "        else if contains -- $prev bash sh zsh dash python python2 python3 node perl ruby",
+      "            set f $w",
+      "        end",
+      "        set prev $w",
+      "        test -z \"$f\"; and continue",
+      "        if string match -q -- '~/*' $f",
+      "            set f \"$HOME/\"(string sub -s 3 -- $f)",
+      "        end",
+      "        test -f \"$f\"; or continue",
+      "        if string match -q -- \"$HOME/Downloads/*\" $f",
+      "            echo $f",
+      "            return 0",
+      "        end",
+      "        if type -q getfattr",
+      "            if getfattr --only-values -n user.xdg.origin.url --absolute-names \"$f\" >/dev/null 2>&1",
+      "                echo $f; return 0",
+      "            end",
+      "            if getfattr --only-values -n user.cig.downloaded --absolute-names \"$f\" >/dev/null 2>&1",
+      "                echo $f; return 0",
+      "            end",
+      "        else if test -f \"$__cigo_guard_dir/xattr.py\"; and type -q python3",
+      "            if python3 -I \"$__cigo_guard_dir/xattr.py\" has \"$f\" >/dev/null 2>&1",
+      "                echo $f; return 0",
+      "            end",
+      "        end",
+      "    end",
+      "    return 1",
+      "end",
+      "",
+      "function __cigo_guard_check",
+      "    set -l line (commandline -b)",
+      "    if test \"$CIGO_GUARD_HOOK\" = 0; or test -f \"$__cigo_guard_dir/off\"; or __cigo_guard_paused",
+      "        commandline -f execute",
+      "        return",
+      "    end",
+      "    if string match -qr -- $__cigo_guard_re $line; or string match -qr -- $__cigo_guard_re2 $line",
+      "        echo >&2",
+      "        echo $__cigo_guard_says >&2",
+      "        echo \"  $line\" >&2",
+      "        echo \"  runs whatever that server sends today; nothing ran (it is in your history to edit).\" >&2",
+      "        set -l m (string match -r -- $__cigo_guard_url $line)",
+      "        if test -n \"$m[1]\"",
+      "            echo \"  rehearse it first: $__cigo_guard_name run-url $m[1]\" >&2",
+      "        end",
+      "        commandline ''",
+      "        commandline -f repaint",
+      "        return",
+      "    end",
+      "    if test -f \"$__cigo_guard_dir/level3\"",
+      "        set -l dl (__cigo_guard_dl $line)",
+      "        if test -n \"$dl\"",
+      "            echo >&2",
+      "            echo $__cigo_guard_dl_says >&2",
+      "            echo \"  $dl\" >&2",
+      "            echo \"  nothing ran (it is in your history to edit).\" >&2",
+      "            echo \"  rehearse it first: $__cigo_guard_name rehearse $dl\" >&2",
+      "            commandline ''",
+      "            commandline -f repaint",
+      "            return",
+      "        end",
+      "    end",
+      "    commandline -f execute",
+      "end",
+      "",
+      "if status is-interactive",
+      "    bind \\r __cigo_guard_check 2>/dev/null",
+      "    bind \\n __cigo_guard_check 2>/dev/null",
+      "end",
+      "",
+    ].join("\n")
+  }
+  if shell == "powershell" {
+    snuff [
+      "# cigo guard: the Enter-key hook for PowerShell (guard_scope dev), written by cig-orchestrator.",
+      "# A line that pipes a download into a shell is cancelled; cigo guard uninstall removes it.",
+      "if ($Global:__CigoGuardLoaded) { return }",
+      "$Global:__CigoGuardLoaded = $true",
+      "$Global:__CigoGuardDir = " + ps_quote(GUARD_DIR),
+      "$Global:__CigoGuardName = " + ps_quote(name),
+      "$Global:__CigoGuardFetch = " + ps_quote(HOOK_FETCH_RE_NET),
+      "$Global:__CigoGuardSubst = " + ps_quote(HOOK_SUBST_RE_NET),
+      "$Global:__CigoGuardUrl = " + ps_quote(HOOK_URL_RE_NET),
+      "$Global:__CigoGuardSays = " + ps_quote(HOOK_SAYS),
+      "$Global:__CigoGuardDlSays = " + ps_quote(HOOK_DL_SAYS),
+      "",
+      "function Global:__CigoGuardPaused {",
+      "    $p = Join-Path $Global:__CigoGuardDir 'paused-until'",
+      "    if (-not (Test-Path -LiteralPath $p)) { return $false }",
+      "    try {",
+      "        $line = (Get-Content -LiteralPath $p -TotalCount 1 -ErrorAction Stop)",
+      "        if (-not $line) { return $false }",
+      "        $until = [int64]$line",
+      "        $now = [int64]([DateTimeOffset](Get-Date)).ToUnixTimeSeconds()",
+      "        return ($now -lt $until)",
+      "    } catch { return $false }",
+      "}",
+      "",
+      "function Global:__CigoGuardDl {",
+      "    param([string]$Line)",
+      "    if ($Line -notmatch '[~/]') { return $null }",
+      "    $prev = ''",
+      "    foreach ($w in ($Line -split '\\s+')) {",
+      "        if (-not $w) { continue }",
+      "        $f = ''",
+      "        if ($w -match '^(\\./|/|\\.\\./)') { $f = $w }",
+      "        elseif ($w.StartsWith('~/')) { $f = [IO.Path]::Combine($HOME, $w.Substring(2)) }",
+      "        elseif ('bash','sh','zsh','dash','python','python2','python3','node','perl','ruby' -contains $prev) { $f = $w }",
+      "        $prev = $w",
+      "        if (-not $f) { continue }",
+      "        if ($f.StartsWith('~/')) { $f = [IO.Path]::Combine($HOME, $f.Substring(2)) }",
+      "        if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { continue }",
+      "        $dl = Join-Path $HOME 'Downloads'",
+      "        if ($f.StartsWith($dl + [IO.Path]::DirectorySeparatorChar) -or $f.StartsWith($dl + '/')) { return $f }",
+      "        $px = Join-Path $Global:__CigoGuardDir 'xattr.py'",
+      "        if ((Test-Path -LiteralPath $px) -and (Get-Command python3 -ErrorAction SilentlyContinue)) {",
+      "            & python3 -I $px has $f 2>$null",
+      "            if ($LASTEXITCODE -eq 0) { return $f }",
+      "        }",
+      "    }",
+      "    return $null",
+      "}",
+      "",
+      "function Global:__CigoGuardCheck {",
+      "    param([string]$Line)",
+      "    if ($env:CIGO_GUARD_HOOK -eq '0') { return $false }",
+      "    if (Test-Path -LiteralPath (Join-Path $Global:__CigoGuardDir 'off')) { return $false }",
+      "    if (Global:__CigoGuardPaused) { return $false }",
+      "    if ($Line -match $Global:__CigoGuardFetch -or $Line -match $Global:__CigoGuardSubst) {",
+      "        [Console]::Error.WriteLine('')",
+      "        [Console]::Error.WriteLine($Global:__CigoGuardSays)",
+      "        [Console]::Error.WriteLine('  ' + $Line)",
+      "        [Console]::Error.WriteLine('  runs whatever that server sends today; nothing ran (it is in your history to edit).')",
+      "        if ($Line -match $Global:__CigoGuardUrl) {",
+      "            [Console]::Error.WriteLine('  rehearse it first: ' + $Global:__CigoGuardName + ' run-url ' + $matches[1])",
+      "        }",
+      "        return $true",
+      "    }",
+      "    if (Test-Path -LiteralPath (Join-Path $Global:__CigoGuardDir 'level3')) {",
+      "        $dl = Global:__CigoGuardDl $Line",
+      "        if ($dl) {",
+      "            [Console]::Error.WriteLine('')",
+      "            [Console]::Error.WriteLine($Global:__CigoGuardDlSays)",
+      "            [Console]::Error.WriteLine('  ' + $dl)",
+      "            [Console]::Error.WriteLine('  nothing ran (it is in your history to edit).')",
+      "            [Console]::Error.WriteLine('  rehearse it first: ' + $Global:__CigoGuardName + ' rehearse ' + $dl)",
+      "            return $true",
+      "        }",
+      "    }",
+      "    return $false",
+      "}",
+      "",
+      "if ((Get-Module -ListAvailable PSReadLine -ErrorAction SilentlyContinue) -and $Host.Name -eq 'ConsoleHost') {",
+      "    Import-Module PSReadLine -ErrorAction SilentlyContinue",
+      "    try {",
+      "        Set-PSReadLineKeyHandler -Chord Enter -ScriptBlock {",
+      "            param($key, $arg)",
+      "            $line = $null; $cursor = $null",
+      "            [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)",
+      "            if (Global:__CigoGuardCheck $line) {",
+      "                [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($line)",
+      "                [Microsoft.PowerShell.PSConsoleReadLine]::RevertLine()",
+      "                [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt()",
+      "                return",
+      "            }",
+      "            [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()",
+      "        } -ErrorAction SilentlyContinue",
+      "    } catch {}",
+      "}",
       "",
     ].join("\n")
   }
@@ -11746,15 +12345,17 @@ pull hook_text(shell) {
     "__cigo_guard_re=" + sh_quote(HOOK_FETCH_RE),
     "__cigo_guard_re2=" + sh_quote(HOOK_SUBST_RE),
     "__cigo_guard_url=" + sh_quote(HOOK_URL_RE),
+    "__cigo_guard_dl_says=" + sh_quote(HOOK_DL_SAYS),
+    hook_dl_shell_fn(),
     "__cigo_guard_rl() {",
-    "  local line=$READLINE_LINE until=",
+    "  local line=$READLINE_LINE until= dl=",
     '  [ "${CIGO_GUARD_HOOK:-1}" = 0 ] && return 0',
     "  [ -f \"$__cigo_guard_dir/off\" ] && return 0",
+    "  if [ -f \"$__cigo_guard_dir/paused-until\" ]; then",
+    "    { IFS= read -r until; } < \"$__cigo_guard_dir/paused-until\"",
+    '    [ "$(date +%s)" -lt "${until:-0}" ] 2>/dev/null && return 0',
+    "  fi",
     "  if [[ $line =~ $__cigo_guard_re ]] || [[ $line =~ $__cigo_guard_re2 ]]; then",
-    "    if [ -f \"$__cigo_guard_dir/paused-until\" ]; then",
-    "      { IFS= read -r until; } < \"$__cigo_guard_dir/paused-until\"",
-    '      [ "$(date +%s)" -lt "${until:-0}" ] 2>/dev/null && return 0',
-    "    fi",
     "    builtin history -s -- \"$line\"",
     "    printf '\\n%s\\n  %s\\n  %s\\n' " + sh_quote(HOOK_SAYS) + " \"$line\" 'runs whatever that server sends today; nothing ran (it is in your history to edit).' >&2",
     "    if [[ $line =~ $__cigo_guard_url ]]; then",
@@ -11762,6 +12363,16 @@ pull hook_text(shell) {
     "    fi",
     "    READLINE_LINE=",
     "    READLINE_POINT=0",
+    "    return 0",
+    "  fi",
+    "  if [ -f \"$__cigo_guard_dir/level3\" ]; then",
+    "    if dl=$(__cigo_guard_dl \"$line\"); then",
+    "      builtin history -s -- \"$line\"",
+    "      printf '\\n%s\\n  %s\\n  %s\\n  rehearse it first: %s rehearse %s\\n' \"$__cigo_guard_dl_says\" \"$dl\" 'nothing ran (it is in your history to edit).' \"$__cigo_guard_name\" \"$dl\" >&2",
+    "      READLINE_LINE=",
+    "      READLINE_POINT=0",
+    "      return 0",
+    "    fi",
     "  fi",
     "}",
     "for __cigo_guard_map in emacs vi-insert vi-command; do",
