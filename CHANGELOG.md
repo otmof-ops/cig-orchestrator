@@ -5,6 +5,28 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.15.0 — 2026-11-08
+
+What run-url kept, and what an update adds.
+
+- **`cigo quarantine`** (#56). run-url keeps each download under its
+  sha256, as before, and now writes the URL it came from beside it.
+  `cigo quarantine` lists them newest first: the sha256, size, when, and
+  where from. `cigo quarantine show <sha256>` (a prefix is enough) reads
+  one again against the rules and your blacklist and runs nothing: the
+  verdict, each finding, and the command that rehearses it first.
+  `cigo quarantine clear` removes what is older than the new
+  `quarantine_keep_days` setting (30; 0 keeps everything), and `--all`
+  removes everything. Each takes `--json`.
+- **`cigo rehearse <spec> --against=<version>`** (#56) rehearses the same
+  package at that version too (npm and crates by `@`, PyPI by `==`), or a
+  script against another script, and shows and rates only what is new: a
+  finding the baseline did not have, and in `--json` the new writes
+  outside the footprint and the new hosts refused. The exit code is the
+  new behavior's risk, by `--fail-on`, so a CI line can fail on only what
+  an update adds. Kept verdicts serve either side, and a baseline that
+  could not be judged makes everything count as new, which it says.
+
 ## 1.14.0 — 2026-11-08
 
 The guard reads three more tricks, a rehearsal uses what it installs, and
