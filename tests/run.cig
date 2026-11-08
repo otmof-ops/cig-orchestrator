@@ -3055,6 +3055,41 @@ test("the rehearsal holds what a stage did beyond its footprint; --accept-risk=<
   assert(there(dir, "made.txt"), "--accept-risk did not apply the rehearsal")
 })
 
+test("rehearse --against shows only what is new: a script against a clean one, against itself, and a version per registry (#56)", pack() {
+  if not rehearsal_here() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick r = guard_tool(dir, ["rehearse", "./outside.sh", "--against=./clean.sh", "--fail-on=never"], {})
+  if no_box_here(r) {
+    snuff
+  }
+  says(r.out, "./outside.sh against ./clean.sh: new in what it does")
+  says(r.out, "E880")
+  stick same = guard_tool(dir, ["rehearse", "./outside.sh", "--against=./outside.sh", "--json"], {})
+  stick j = json.parse(same.out)
+  assert(j.risk == "none" and j.findings.is_empty() and j.risk_target != "none", json.stringify(j))
+  stick bad = guard_tool(dir, ["rehearse", "./outside.sh", "--against=1.2.3"], {})
+  exits(bad, 2)
+  says(bad.err, "--against takes a version for a package")
+  # A version against a package: the same package at that version, per
+  # registry (a dry run plans both rehearsals and installs nothing).
+  pull planned(words) {
+    roll args = ["run", "--dry-run", tool, "--"] + words
+    if tool_binary != "" {
+      args = ["--dry-run"] + words
+    }
+    stick p = hop_env(dir, tool_prog("cig"), args, stubbed(dir))
+    snuff p.out + p.err
+  }
+  stick npm = planned(["rehearse", "npm:left-pad@1.3.0", "--against=1.1.0"])
+  says(npm, "left-pad@1.3.0")
+  says(npm, "left-pad@1.1.0")
+  stick crate = planned(["rehearse", "crates:itoa@1.0.11", "--against=1.0.9"])
+  says(crate, "'1.0.11'")
+  says(crate, "'1.0.9'")
+})
+
 test("a rehearsal names a write outside the footprint, and keeps it in the box (E880)", pack() {
   if not rehearsal_here() {
     snuff

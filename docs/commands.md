@@ -632,8 +632,18 @@ cigo rehearse --changed [--base=<rev>] every package the lockfiles add or change
               [--sarif | --markdown]   for code scanning or a pull request comment
               [--fresh]                rehearse even what was rehearsed before
               [--no-use]               install only: no require, import or run
+              [--against=<v | ./old.sh>] only what is new against that version, or that script
               [--fail-on=<level>]      the lowest verdict that fails (auto: high under CI, critical at a terminal)
 ```
+
+**What changed in this version.** `cigo rehearse npm:ua-parser-js@0.7.29
+--against=0.7.28` rehearses both (or uses their kept verdicts) and shows,
+and rates, only what the first does that the second did not: a new write
+outside the footprint, a new host it tried, a new finding. Most real
+supply-chain attacks are a bad update to a good package, and this is the
+question that catches them. A script takes another script
+(`cigo rehearse ./install.sh --against=./install-old.sh`). The exit code is
+the new behaviour's risk, by `--fail-on` as ever.
 
 **Never the same bytes twice.** A verdict is kept under what was rehearsed:
 an npm or crates.io package at an exact version (a registry never serves

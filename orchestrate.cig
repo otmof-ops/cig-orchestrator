@@ -8998,8 +8998,69 @@ pull box_watches() {
   snuff false
 }
 
+# `cigo rehearse <spec> --against <version | ./script>` (#56): what this
+# version (or script) does that the other did not. Most supply-chain attacks
+# are a bad update to a good package, and this is the question that catches
+# them: both are rehearsed (or their kept verdicts used), and only what is
+# new is shown and rated.
+
+# The spec to compare against: the same package at another version, or
+# another script.
+pull against_spec(spec, against) {
+  if against.starts_with("./") or against.starts_with("/") or against.starts_with("../") {
+    snuff against
+  }
+  for prefix in ["npm:", "crates:"] {
+    if spec.starts_with(prefix) {
+      stick rest = spec.slice(prefix.len())
+      stick at = rest.slice(1).find("@")
+      stick name = pick(at >= 0, rest.slice(0, at + 1), rest)
+      snuff prefix + name + "@" + against
+    }
+  }
+  if spec.starts_with("pypi:") {
+    snuff "pypi:" + text.split(spec.slice(5), '[\[=<>!~;]').first() + "==" + against
+  }
+  fail("--against takes a version for a package (npm:, pypi:, crates:) and another script for a script")
+}
+
+pull finding_key(f) {
+  snuff f.code + "|" + f.rule + "|" + str(f.get("text", ""))
+}
+
+pull rehearse_against(spec, r, against, human) {
+  stick other = against_spec(spec, against)
+  stick job = rehearse_spec(other)
+  if human and kept_verdict(verdict_key(job, null)) == null {
+    exhale "rehearsing ${job.label} too, to compare against"
+  }
+  stick base = rehearse_or_kept(job, null, false)
+  stick seen = base.findings.map(finding_key)
+  # What the box saw either way, and could not see either way, is not news.
+  stick fresh = r.findings.filter(pack(f) => f.code != "E898" and not seen.contains(finding_key(f)))
+  stick risk = pick(fresh.is_empty(), "none", risk_of(fresh))
+  stick out_new = as_list(r.outside).filter(pack(p) => not as_list(base.outside).contains(p))
+  stick refused_new = as_list(r.refused).filter(pack(x) => not as_list(base.refused).contains(x))
+  if flags.contains("--json") {
+    exhale json.stringify({target: r.target, against: base.target, risk: risk, findings: fresh, outside_new: out_new, refused_new: refused_new, risk_target: r.risk, risk_against: base.risk}, 2)
+  } else {
+    exhale "${r.target} against ${base.target}: " + pick(fresh.is_empty(), "nothing new in what it does", "new in what it does")
+    report_verdict(r.target, {risk: risk, findings: fresh})
+    for f in fresh {
+      exhale "  ${f.code} ${f.says}: ${f.where}"
+    }
+    if not base.judged {
+      exhale "  note: ${base.target} could not be judged (" + str(base.error ?? base.last_line) + "); everything ${r.target} does counts as new"
+    }
+  }
+  stick code = rehearse_exit(risk)
+  if code != 0 {
+    exit(code)
+  }
+}
+
 pull do_rehearse() {
-  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh", "--fail-on", "--no-use"])
+  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh", "--fail-on", "--no-use", "--against"])
   fail_on()
   if flags.contains("--changed") {
     do_rehearse_changed()
@@ -9040,6 +9101,11 @@ pull do_rehearse() {
     exhale "rehearsing ${job.label} (${job.eco}) in the box: nothing it does is applied"
   }
   stick r = rehearse_or_kept(job, null, flags.contains("--keep"))
+  stick against = flag_value("--against", "")
+  if against != "" {
+    rehearse_against(spec, r, against, human)
+    snuff
+  }
   stick items = r.findings.map(pack(f) => {finding: f, subject: spec, place: null, risk: r.risk})
   if flags.contains("--sarif") {
     exhale json.stringify(sarif_log(items), 2)
