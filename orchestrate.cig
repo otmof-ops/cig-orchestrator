@@ -5742,6 +5742,129 @@ stick TRUST_LABEL = "cigo-trust"
 # Bytes a person allowed (cigo guard allow <file|sha256>, #57).
 stick ALLOW_DIR = path.join(CIGO_HOME, "allowed")
 stick ALLOW_LABEL = "cigo-allow"
+# Answers to ask-tier questions, kept by the sha256 of the bytes the
+# question was about (a command line, a file's new text). A later ask for
+# the same bytes reads here first and does not ask again. Each record is
+# signed with the tin's key under its own label, so a task cannot write
+# its own permission slip (the key folder is empty in the box).
+stick REMEMBER_DIR = path.join(CIGO_HOME, "remembered")
+stick REMEMBER_LABEL = "cigo-remembered"
+
+# ----- the tier matrix: risk × confidence → silent / notice / ask / refuse / gate
+#
+# One table, read at every place the guard would ask or refuse. The tier
+# is what reaches the user: silent (nothing, in the log), notice (one line,
+# no question, the work carries on), ask (a question with a safe default),
+# refuse (refused, said in one line: #66's "act + notice"), gate (the
+# question plus OS authentication: today, running something on your own
+# blacklist). The caller applies the tier; the agent hook has no terminal,
+# so a gate is refused there. These defaults are what cigo did before the
+# table existed, cell for cell: #66's own table asks or gates some critical
+# findings it is less sure of, and makes a confident high or medium one a
+# refusal, which changes what the guard lets through, so it waits for the
+# operator's word (otmof-ops/cig-script#153).
+
+stick TIER_MATRIX = {
+  critical: {exact: "gate",   high: "refuse", medium: "refuse", low: "refuse"},
+  high:     {exact: "ask",    high: "ask",    medium: "ask",    low: "ask"},
+  medium:   {exact: "notice", high: "notice", medium: "notice", low: "notice"},
+  low:      {exact: "silent", high: "silent", medium: "silent", low: "silent"},
+  none:     {exact: "silent", high: "silent", medium: "silent", low: "silent"},
+}
+stick TIER_CONFIDENCES = ["exact", "high", "medium", "low"]
+stick TIER_RISKS = ["none", "low", "medium", "high", "critical"]
+
+# The confidence in a set of findings: exact (a blacklist hit: the user
+# named it, no inference), high (a heavy pattern or a known-bad package
+# at weight 1.0), medium (weight at least 0.5), low (a lighter pattern).
+# The top finding sets it. A known-bad package (E870) is not "exact":
+# exact carries the two-warnings gate flow, which is for the user's own
+# blacklist; an OSV malicious-package finding refuses outright.
+pull confidence_of(findings) {
+  if findings.is_empty() {
+    snuff "low"
+  }
+  for f in findings {
+    stick c = str(f.get("code", ""))
+    if c == "E580" {
+      snuff "exact"
+    }
+  }
+  roll top = 0.0
+  for f in findings {
+    stick w = f.get("w", 0.0)
+    if w > top {
+      top = w
+    }
+  }
+  if top >= 0.8 {
+    snuff "high"
+  }
+  if top >= 0.5 {
+    snuff "medium"
+  }
+  snuff "low"
+}
+
+# The tier for a verdict: TIER_MATRIX[risk][confidence], silent for an
+# unknown risk (so nothing is prompted on a signal that cannot be read).
+pull tier_for(risk, findings) {
+  stick row = TIER_MATRIX.get(str(risk), null)
+  if row == null {
+    snuff "silent"
+  }
+  snuff row.get(confidence_of(findings), "silent")
+}
+
+# The key a remembered answer is kept under: the sha256 of the bytes the
+# question was about. One byte of a difference is a different key, so a
+# changed command or a changed file is asked again.
+pull remember_key(content) {
+  snuff hash.sha256(str(content))
+}
+
+pull remember_files(key) {
+  snuff {json: path.join(REMEMBER_DIR, key + ".json"), mac: path.join(REMEMBER_DIR, key + ".mac")}
+}
+
+# Is this content remembered? The record is read only when its signature
+# verifies under the tin's key, so one written from outside the machine
+# (and never signed) does not count, and one from a label other than this
+# one (the trust store's, an agent approval's) does not count either.
+pull remembered(content) {
+  stick key = remember_key(content)
+  stick f = remember_files(key)
+  if not fs.is_file(f.json) or not fs.is_file(f.mac) {
+    snuff false
+  }
+  stick r = tin_mac_as(f.json, fs.read_text(f.mac).trim(), REMEMBER_LABEL)
+  if r.code == 1 {
+    log.warn("E889 a remembered answer is not signed by your key (${tilde(f.json)}); ignored")
+    snuff false
+  }
+  snuff r.code == 0
+}
+
+# Write a remembered yes, signed. False when it could not be signed (an
+# older cig, or no key here): the caller falls through to its own flow.
+pull remember_yes(content, scope, by, reason) {
+  stick key = remember_key(content)
+  stick f = remember_files(key)
+  stick rec = {key: key, scope: scope, by: by, reason: reason, at: time.now_iso(), size: str(content).len()}
+  if not write_outside(f.json, json.stringify(rec, 2) + "\n") {
+    snuff false
+  }
+  stick r = tin_mac_as(f.json, null, REMEMBER_LABEL)
+  if r.code != 0 {
+    remove_outside(f.json)
+    snuff false
+  }
+  if not write_outside(f.mac, r.out.trim() + "\n") {
+    remove_outside(f.json)
+    snuff false
+  }
+  snuff true
+}
 stick SCRIPT_EXTS = [".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".ps1", ".cig"]
 # The scripts whose text the static read looks into: a CigScript file is
 # left to cig (its effects run under cig's own journal), and a rule table
@@ -10095,9 +10218,10 @@ pull guard_run(tasks, names, defaults) {
           } else if v.risk == "low" or mode == "report" {
             exhale "  it runs (" + pick(mode == "report", "security = report", "rated low") + ")"
           } else if v.risk == "critical" {
-            if not blacklist_criticals(v.findings).is_empty() {
-              # A blacklist-critical goes through the two-warnings flow: it
-              # ends in "refused" for every path the user has not escalated.
+            if tier_for(v.risk, v.findings) == "gate" {
+              # A blacklist-critical (critical × exact in the matrix) goes
+              # through the two-warnings flow; ends in "refused" for every
+              # path the user has not escalated.
               stick decision = blacklist_light_it(n, v.findings)
               if decision == "refused" {
                 refuse("`${n}` is refused: on your blacklist (cigo audit ${n} shows the entries)")
@@ -13051,9 +13175,42 @@ pull do_guard() {
     # footprint, so nothing has to run in the box.
     expect_flags(["--outside", "--refused"])
     do_guard_check_footprint()
+  } else if sub == "tier" {
+    # The tier matrix (risk × confidence → silent/notice/ask/gate) on its
+    # own, as data. With no arguments: the whole table as JSON. With a
+    # risk: that row. With risk and confidence: the one cell as a bare
+    # word.
+    expect_flags(["--json"])
+    do_guard_tier(targets.get(1, ""), targets.get(2, ""))
   } else {
-    fail("cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes]]")
+    fail("cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes] | tier [<risk> [<confidence>]]]")
   }
+}
+
+pull do_guard_tier(risk, confidence) {
+  if risk == "" {
+    exhale json.stringify(TIER_MATRIX, 2)
+    snuff
+  }
+  stick row = TIER_MATRIX.get(risk, null)
+  if row == null {
+    fail("cigo guard tier <risk>: " + TIER_RISKS.join(", "))
+  }
+  if confidence == "" {
+    if flags.contains("--json") {
+      exhale json.stringify(row, 2)
+      snuff
+    }
+    for c in TIER_CONFIDENCES {
+      exhale "  " + c.pad_right(8) + "  " + str(row.get(c, "silent"))
+    }
+    snuff
+  }
+  stick cell = row.get(confidence, null)
+  if cell == null {
+    fail("cigo guard tier " + risk + " <confidence>: " + TIER_CONFIDENCES.join(", "))
+  }
+  exhale cell
 }
 
 pull do_guard_check_footprint() {
@@ -13774,23 +13931,29 @@ pull do_agent_run() {
     findings = scan_text("the command", line, true, false, 0, {left: DECODE_BUDGET}) + line_blacklist(line)
   }
   stick risk = risk_of(findings)
+  stick tier = tier_for(risk, findings)
   stick id = approval_id(line, cwd)
   stick base = {kind: "agent", agent: agent, session: session, command: shown, cwd: tilde(cwd), risk: risk}
-  if risk == "critical" {
+  # An agent has no terminal of its own: a gate is refused in the agent's
+  # session, since nothing a task runs can answer an OS authentication.
+  # Refuse = refused with one line; notice = runs in the box with the note
+  # below; silent = runs.
+  if tier == "gate" or tier == "refuse" {
     guard_say_verdict(shown, {risk: risk, findings: findings})
     guard_note(base.merge({outcome: "refused"}))
     log.error("cigo: refused, and nothing ran: this command is rated critical. Tell your user what you were trying to do; do not try another way around it.")
     exit(3)
   }
   roll outcome = "ran"
-  if risk == "high" {
+  if tier == "ask" {
     if config().agent_approval == "never" {
       guard_say_verdict(shown, {risk: risk, findings: findings})
       guard_note(base.merge({outcome: "refused (agent_approval = never)"}))
       log.error("cigo: refused: this command is rated high, and agent_approval = never refuses those. Nothing ran.")
       exit(2)
     }
-    if not approved(id) {
+    stick was_approved = approved(id)
+    if not was_approved and not remembered(line) {
       stick f = approval_files(id)
       write_outside(f.pending, json.stringify({id: id, agent: agent, session: session, command: line, cwd: cwd, risk: risk, findings: findings, at: time.now_iso()}, 2) + "\n")
       guard_say_verdict(shown, {risk: risk, findings: findings})
@@ -13800,11 +13963,12 @@ pull do_agent_run() {
       log.error("  your user approves it on their own terminal with: cigo approve ${id}   (or says no). Nothing ran; ask them, then run the same command again.")
       exit(2)
     }
-    if not agent_contained() {
-      # The contained run uses the approval once, after it ran.
+    if was_approved and not agent_contained() {
+      # The contained run uses the approval once, after it ran; a remembered
+      # yes has no single-use counter to consume.
       consume_grant(id)
     }
-    outcome = "ran, approved by a person"
+    outcome = pick(was_approved, "ran, approved by a person", "ran, remembered")
   }
   stick shell_prog = pick(which("bash") != null, "bash", "sh")
   stick env_for = {CIGO_AGENT: agent, CIGO_AGENT_SESSION: session}
@@ -13963,7 +14127,13 @@ pull agent_hosts(cwd, approved_hosts) {
 # applied by name after its output; its network is the registries and the
 # project's own remotes.
 pull agent_run_contained(line, shown, cwd, id, base, risk0, findings0, outcome0, shell_prog, env_for) {
-  stick grant = approval_grant(id)
+  roll grant = approval_grant(id)
+  # A remembered yes for these bytes stands in for a person's approval of
+  # the command itself; the box's post-flight (writes to persist paths,
+  # hosts it tried to reach) still asks on its own terms.
+  if not grant.get("ok", false) and remembered(line) {
+    grant = {ok: true, hosts: []}
+  }
   roll r = null
   burn {
     try {
@@ -14317,17 +14487,20 @@ pull do_agent_hook(which_agent) {
   stick session = str(call.get("session_id", ""))
   stick findings = scan_text("the command", line, true, false, 0, {left: DECODE_BUDGET}) + line_blacklist(line)
   stick risk = risk_of(findings)
-  if risk == "critical" {
+  stick tier = tier_for(risk, findings)
+  # In an agent's session a gate has no one to answer it, so it is refused,
+  # as refuse is; ask waits for a person.
+  if tier == "gate" or tier == "refuse" {
     guard_note({kind: "agent", agent: "claude-code", session: session, command: clip(redact(line), 200), cwd: tilde(cwd), risk: risk, outcome: "refused"})
     hook_deny("cigo refused this command, and nothing ran: it is rated critical (" + top_finding(findings).code + " " + top_finding(findings).says + "). Tell your user what you were trying to do; do not try another way around it.")
     snuff
   }
-  if risk == "high" and config().agent_approval == "never" {
+  if tier == "ask" and config().agent_approval == "never" {
     hook_deny("cigo refused this command: it is rated high (" + top_finding(findings).says + "), and agent_approval = never refuses those.")
     snuff
   }
   stick id = approval_id(line, cwd)
-  if risk == "high" and not approved(id) {
+  if tier == "ask" and not approved(id) and not remembered(line) {
     stick f = approval_files(id)
     write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: line, cwd: cwd, risk: risk, findings: findings, at: time.now_iso()}, 2) + "\n")
     guard_note({kind: "agent", agent: "claude-code", session: session, command: clip(redact(line), 200), cwd: tilde(cwd), risk: risk, outcome: "waiting for a person", thing: id})
@@ -14401,18 +14574,27 @@ pull hook_file_tool(call) {
   stick on_path = env.get("PATH", "").split(":").any(pack(d) => d != "" and path.normalize(d) == path.dir(at))
   stick persists = PERSIST_PATHS.any(pack(re) => text.matches(home_rel, re))
   stick shellish = SCAN_EXTS.any(pack(e) => at.ends_with(e)) or persists or not path.base(at).contains(".")
-  stick findings = scan_text(tilde(at), file_tool_text(name, input), shellish, true, 0, {left: DECODE_BUDGET})
+  stick new_text = file_tool_text(name, input)
+  stick findings = scan_text(tilde(at), new_text, shellish, true, 0, {left: DECODE_BUDGET})
   stick risk = risk_of(findings)
-  if risk == "critical" {
+  stick tier = tier_for(risk, findings)
+  if tier == "gate" or tier == "refuse" {
     guard_note(base.merge({risk: risk, outcome: "refused"}))
     hook_deny("cigo refused this write, and nothing was written: the new text of " + tilde(at) + " is rated critical (" + top_finding(findings).code + " " + top_finding(findings).says + ").")
     snuff
   }
-  if persists or on_path or risk == "high" {
+  # The destination's shape sets its own ask (a persist path or a folder
+  # on PATH), on top of the tier the matrix read from the findings.
+  stick remember_body = name + ":" + at + "\n" + new_text
+  if persists or on_path or tier == "ask" {
     stick id = approval_id(name + ":" + at, cwd)
     if approved(id) {
       consume_grant(id)
       guard_note(base.merge({risk: risk, outcome: "written, approved by a person"}))
+      snuff
+    }
+    if remembered(remember_body) {
+      guard_note(base.merge({risk: risk, outcome: "written, remembered"}))
       snuff
     }
     # Not pick(): it evaluates every arm, and a text with no findings has no

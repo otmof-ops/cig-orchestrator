@@ -4909,6 +4909,92 @@ test("agent: critical is refused outright, and output that speaks to agents is f
   says(f.out, "Ignore all previous instructions")
 })
 
+test("tier matrix: every risk × confidence cell reads back as one of silent, notice, ask, refuse, gate", pack() {
+  stick full = json.parse(hop(root, tool_prog("cig"), tool_args(["guard", "tier"])).out)
+  stick want = ["silent", "notice", "ask", "refuse", "gate"]
+  for risk in ["none", "low", "medium", "high", "critical"] {
+    stick row = full.get(risk, null)
+    assert(row != null, "the tier matrix has no row for " + risk)
+    for conf in ["low", "medium", "high", "exact"] {
+      stick cell = str(row.get(conf, ""))
+      assert(want.contains(cell), "tier(" + risk + ", " + conf + ") = `" + cell + "` is not one of silent/notice/ask/gate")
+      stick one = hop(root, tool_prog("cig"), tool_args(["guard", "tier", risk, conf]))
+      exits(one, 0)
+      assert(one.out.trim() == cell, "cigo guard tier " + risk + " " + conf + " said `" + one.out.trim() + "`, not `" + cell + "`")
+    }
+  }
+  # Today's defaults keep the old shape: critical with exact-match evidence
+  # is gate (the blacklist two-warnings flow when blacklist_unboxed = ask);
+  # a critical pattern finding is refused outright; high asks;
+  # medium at high or medium confidence is a notice, at low silent; low
+  # and none are silent across the row.
+  assert(str(full.critical.exact) == "gate", "critical × exact: " + str(full.critical.exact))
+  # Every other critical is refused, whatever the confidence, as before.
+  for c in ["high", "medium", "low"] {
+    assert(str(full.critical[c]) == "refuse", "critical × " + c + ": " + str(full.critical[c]))
+  }
+  assert(str(full.high.high) == "ask", "high × high: " + str(full.high.high))
+  assert(str(full.medium.high) == "notice", "medium × high: " + str(full.medium.high))
+  assert(str(full.medium.low) == "notice", "medium × low: " + str(full.medium.low))
+  assert(str(full.low.high) == "silent", "low × high: " + str(full.low.high))
+})
+
+test("agent: a remembered yes for the same bytes is not asked again; a changed byte asks again", pack() {
+  if on_windows or not has_tin_mac() {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick h = guard_home(dir)
+  stick line = "echo 'export REMEMBERED_WAS_HERE=1' >> ~/.bashrc"
+  # Without a remembered yes, the command is rated high and waits.
+  stick waited = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=rm1", "--", line], {})
+  exits(waited, 2)
+  says(waited.err, "E894")
+  assert(not read(h, ".bashrc").contains("REMEMBERED_WAS_HERE"), "a high command ran before it was remembered")
+  # Write the remembered record for these bytes and sign it under the
+  # remembered store's own label, the way the trust store signs its own.
+  stick remember_dir = path.join(h, ".cig-orchestrator", "remembered")
+  stick key = hash.sha256(line)
+  stick rec = path.join(remember_dir, key + ".json")
+  burn {
+    fs.mkdir(remember_dir)
+    fs.write_text(rec, "{\"key\":\"" + key + "\",\"scope\":\"always\",\"by\":\"tester\",\"reason\":\"test\"}\n")
+  }
+  stick signed = cig(root, ["tin", "mac", rec, "--label", "cigo-remembered"])
+  if signed.code != 0 {
+    exhale "      (skipped: cig tin mac could not sign; " + signed.err.trim() + ")"
+    snuff
+  }
+  burn {
+    fs.write_text(path.join(remember_dir, key + ".mac"), signed.out.trim() + "\n")
+  }
+  # The same bytes run without a prompt.
+  stick ran = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=rm2", "--", line], {})
+  exits(ran, 0)
+  says(read(h, ".bashrc"), "REMEMBERED_WAS_HERE")
+  # Changing a byte changes the key: the next run is asked again.
+  burn {
+    fs.write_text(path.join(h, ".bashrc"), GUARD_BASHRC)
+  }
+  stick changed = "echo 'export REMEMBERED_WAS_HERE=2' >> ~/.bashrc"
+  stick again = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=rm3", "--", changed], {})
+  exits(again, 2)
+  says(again.err, "E894")
+  assert(not read(h, ".bashrc").contains("REMEMBERED_WAS_HERE"), "a changed command ran under the old remembered yes")
+  # An unsigned record is ignored: the remembered store rejects it and the
+  # command waits as it did the first time.
+  stick other = "echo 'export REMEMBERED_WAS_HERE=3' >> ~/.bashrc"
+  stick other_key = hash.sha256(other)
+  burn {
+    fs.write_text(path.join(remember_dir, other_key + ".json"), "{\"key\":\"" + other_key + "\",\"scope\":\"always\"}\n")
+    fs.write_text(path.join(remember_dir, other_key + ".mac"), "0000000000000000000000000000000000000000000000000000000000000000\n")
+  }
+  stick forged = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=rm4", "--", other], {})
+  exits(forged, 2)
+  says(forged.err, "E894")
+  says(forged.err, "E889")
+})
+
 test("agent: the Claude Code hook wraps a Bash call in cigo agent run, keeps the rest of the call, denies critical, and leaves other tools alone", pack() {
   if on_windows {
     snuff

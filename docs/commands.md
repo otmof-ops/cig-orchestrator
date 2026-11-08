@@ -424,6 +424,7 @@ cigo guard off | on           unguarded until you turn it back on
 cigo guard allow <program>    that program is not read any more (its shim goes)
 cigo guard allow <file|sha256> those bytes are not rehearsed again (run-url, the hook): a script you have read
 cigo guard log [--all|--json] what was guarded, and what came of it
+cigo guard tier [<risk> [<c>]] the tier matrix (risk × confidence → silent/notice/ask/gate), the whole table, one row or one cell
 cigo guard uninstall          every shim and startup-file block it wrote, removed; --yes does it
 cigo undo last                the newest guarded call, taken back (cig unburn of its run)
 cigo run-url <url> [--trust]  the safe way to curl | sh (below)
@@ -569,7 +570,32 @@ At `guard_scope agents`, every shell command an agent runs goes through
    and lockfiles are kept in the tin first on every OS.
 3. It is recorded as a run tagged with the agent and its session.
 
-The verdict decides who answers:
+The verdict decides who answers: the guard reads the risk of the command
+(none, low, medium, high, critical) and the confidence it has in that
+reading (exact for a blacklist hit the user named, high for a heavy
+pattern or a known-bad package, medium or low for lighter ones), and
+reads the tier the user sees from one table:
+
+| | exact | high | medium | low |
+|---|---|---|---|---|
+| critical | gate | refuse | refuse | refuse |
+| high | ask | ask | ask | ask |
+| medium | notice | notice | notice | notice |
+| low | silent | silent | silent | silent |
+| none | silent | silent | silent | silent |
+
+Silent runs in the log; notice is one line, no question, and the work
+carries on; ask waits for a person with a safe default (`E894`); refuse
+stops it and says so in one line; gate takes OS authentication (the
+blacklist two-warnings flow, `blacklist_unboxed = ask`). In an agent's
+session there is no terminal to answer on, so a gate is refused there.
+These defaults are what cigo did before the table, cell for cell. #66's
+own table differs: it would ask or gate a critical finding it is less
+sure of, and refuse a confident high or medium one. That changes what the
+guard lets through, so it waits for your word (otmof-ops/cig-script#153). `cigo guard tier` prints the whole table, `cigo guard tier
+<risk>` prints one row, and `cigo guard tier <risk> <confidence>` prints
+one cell as a bare word: paths that decide whether to prompt read the
+cell, rather than branching on the risk alone.
 
 | verdict | what happens |
 |---|---|
@@ -598,6 +624,16 @@ E895 nice try. agents can't sign their own permission slip.
 `agent_approval = tty` approves at a terminal of yours instead, which is
 weaker: a determined agent can open a terminal of its own. `never` refuses
 high like critical.
+
+**Remembered answers.** A yes to an ask-tier question can be kept keyed
+by the sha256 of the bytes the question was about (the command line, or
+the file tool's path with its new text): the next ask for the same bytes
+is skipped. Records live under `~/.cig-orchestrator/remembered/`, signed
+with the tin's key under their own label so a task cannot write its own
+permission slip; one byte of a difference is a different key, so a
+changed command is asked again. A record that does not verify is said
+(`E889`) and ignored. Approvals from `cigo approve` stay one-shot: the
+remembered store is for scopes wider than one run.
 
 What a command prints is passed on as it was, stdout and stderr each on its
 own stream. When the output holds text addressed to AI agents, or invisible
