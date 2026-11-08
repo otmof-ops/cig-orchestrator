@@ -5826,6 +5826,7 @@ stick HEADLINES = {
   E873: ["trying to move in", "left a lit one where it will be found again"],
   E874: ["rolling unknown leaf", "lighting whatever the server sends"],
   E875: ["can't read the label", "the wrapper hides the contents"],
+  E876: ["these were your files once"],
   E877: ["torching the place"],
   E878: ["asking for the good stuff", "wants the keys to the cabinet"],
   E879: ["eyeing the tin", "going for the stash"],
@@ -5834,7 +5835,7 @@ stick HEADLINES = {
   E888: ["checking for cops before it lights up"],
   E580: ["this one's on the bad batch list", "you said never again to this one"],
 }
-stick PLAIN = {E580: "on the blacklist", E871: "credential file named", E872: "exfiltration pattern", E873: "persistence", E874: "downloads and executes remote code", E875: "obfuscated code", E877: "destructive command", E878: "privilege escalation", E879: "references cig's or cigo's own state", E886: "text addressed to AI agents", E887: "invisible or look-alike text", E888: "probes for a sandbox"}
+stick PLAIN = {E580: "on the blacklist", E871: "credential file named", E872: "exfiltration pattern", E873: "persistence", E874: "downloads and executes remote code", E875: "obfuscated code", E876: "ransomware shape", E877: "destructive command", E878: "privilege escalation", E879: "references cig's or cigo's own state", E886: "text addressed to AI agents", E887: "invisible or look-alike text", E888: "probes for a sandbox"}
 roll SAID = {}
 roll TRUST_NOTED = false
 
@@ -6055,6 +6056,72 @@ pull install_hooks(t) {
   snuff hooks
 }
 
+# The docs each installed npm package carries, read for prompt injection:
+# the README and the package.json's description. More and more installs are
+# run by AI agents, and attackers have started hiding instructions aimed at
+# the agent inside the package's own documentation. Only the prompt-injection
+# rules read these; a README that quotes `curl | sh` is not a fetch-and-run.
+# A doc file over READ_DOC_CAP bytes is read truncated: a long one would
+# bury the few lines that matter.
+stick READ_DOC_CAP = 65536
+stick PACKAGE_README_NAMES = ["README", "readme", "README.md", "readme.md", "README.markdown", "README.rst", "README.txt", "Readme.md"]
+
+pull package_docs(t) {
+  roll docs = []
+  stick cwd = task_cwd(t)
+  for rel in glob_under(cwd, "node_modules/*/package.json") + glob_under(cwd, "node_modules/@*/*/package.json") {
+    stick pj_file = path.join(ROOT, rel)
+    stick pkg_dir = path.dir(pj_file)
+    roll pj = null
+    try {
+      pj = json.parse(unbom(fs.read_text(pj_file)))
+    } ashtray e {
+      continue
+    }
+    stick name = str(pj.get("name", rel))
+    stick desc = str(pj.get("description", ""))
+    if desc != "" {
+      docs.push({where: name + " description", text: desc, file: pj_file})
+    }
+    for n in PACKAGE_README_NAMES {
+      stick rp = path.join(pkg_dir, n)
+      if fs.is_file(rp) {
+        try {
+          roll body = fs.read_text(rp)
+          if body.len() > READ_DOC_CAP {
+            body = body.slice(0, READ_DOC_CAP)
+          }
+          docs.push({where: name + " " + n, text: body, file: rp})
+        } ashtray e {
+        }
+        break
+      }
+    }
+  }
+  snuff docs
+}
+
+# A doc file's prompt-injection findings: only the pi-* rules, each over the
+# whole body (not line by line, so a note spread across several lines reads
+# as one). Comments and shell handling are left out: a README is not a shell
+# script.
+pull scan_docs(where, body) {
+  roll out = []
+  roll seen = []
+  for rule in RULES {
+    if rule.cat != "prompt-injection" {
+      continue
+    }
+    if text.matches(body, rule.re) {
+      if not seen.contains(rule.id) {
+        seen.push(rule.id)
+        out.push({code: rule.code, cat: rule.cat, w: rule.w, rule: rule.id, where: where, text: clip(body.trim(), 120), says: rule.says})
+      }
+    }
+  }
+  snuff out
+}
+
 # Where OSV is asked and its database kept (see "known-bad packages" below).
 stick OSV_DIR = path.join(CIGO_HOME, "osv")
 stick OSV_API = env.get("CIGO_OSV_API", "https://api.osv.dev")
@@ -6142,11 +6209,13 @@ pull static_read(t, name) {
     }
   }
   roll hooks = []
+  roll docs = []
   if str(t.get("stage", "")) == "setup" {
     hooks = install_hooks(t)
     for h in hooks {
       sources.push({where: h.where, text: h.text, hook: h.get("hook", ""), file: h.get("file", null)})
     }
+    docs = package_docs(t)
   }
   roll findings = []
   stick budget = {left: DECODE_BUDGET}
@@ -6160,6 +6229,11 @@ pull static_read(t, name) {
     if not shellish {
       findings = findings + taint_findings(s.where, s.text).map(pack(x) => x.merge({file: file}))
     }
+  }
+  # A package's own README and its package.json's description, read only for
+  # prompt injection (E886, E887): hidden instructions aimed at AI agents.
+  for d in docs {
+    findings = findings + scan_docs(d.where, d.text).map(pack(x) => x.merge({file: d.get("file", null)}))
   }
   snuff {risk: risk_of(findings), findings: findings, hooks: hooks}
 }
@@ -8175,7 +8249,7 @@ pull blacklist_mine() {
 # ----- reports for code scanning and pull requests: SARIF and Markdown (#56 step 6) ---
 
 # The registry's titles for the codes the guard reports (`cig explain <code>`).
-stick CODE_TITLES = {E580: "on the blacklist", E587: "a list that does not verify", E870: "a known malicious package", E871: "reads credentials", E872: "tries to send data out", E873: "persistence", E874: "fetch and run", E875: "obfuscation", E877: "wiper shape", E878: "asks for privilege", E879: "eyes cigo or the tin", E880: "outside the footprint", E885: "a known vulnerability", E886: "prompt injection", E887: "invisible instructions", E888: "probes for a sandbox", E889: "a forged approval"}
+stick CODE_TITLES = {E580: "on the blacklist", E587: "a list that does not verify", E870: "a known malicious package", E871: "reads credentials", E872: "tries to send data out", E873: "persistence", E874: "fetch and run", E875: "obfuscation", E876: "ransomware shape", E877: "wiper shape", E878: "asks for privilege", E879: "eyes cigo or the tin", E880: "outside the footprint", E885: "a known vulnerability", E886: "prompt injection", E887: "invisible instructions", E888: "probes for a sandbox", E889: "a forged approval"}
 
 # A path as the project names it (forward slashes, from its root), or null
 # when it is not in the project.
@@ -8365,7 +8439,7 @@ pull risk_of(findings) {
   # A fetch-and-run from a raw address is critical wherever it is read: a
   # task, a shim's package, run-url's script, an agent's command (#80).
   stick raw_fetch = findings.any(pack(f) => f.cat == "fetch-and-run" and raw_address(f.get("text", "")))
-  if raw_fetch or cats.contains("self-defense") or cats.contains("remote-control") or cats.contains("backdoor") or (cats.contains("credentials") and cats.contains("exfiltration")) or findings.any(pack(f) => f.code == "E870" or f.code == "E580") {
+  if raw_fetch or cats.contains("self-defense") or cats.contains("remote-control") or cats.contains("backdoor") or (cats.contains("credentials") and cats.contains("exfiltration")) or findings.any(pack(f) => f.code == "E870" or f.code == "E580" or f.code == "E876") {
     snuff "critical"
   }
   roll top = 0.0
@@ -8600,9 +8674,63 @@ pull should_rehearse(t, v, defaults) {
   snuff true
 }
 
+# Ransomware's shape (E876): extensions real families rename files to, and
+# the names they drop beside them. Read from the box's footprint, so a
+# rehearsed task that does this is seen without touching your files.
+stick RANSOM_EXTS = ["locked", "encrypted", "enc", "crypt", "crypted", "cry", "lockbit", "wncry", "ryk", "wallet", "djvu", "cerber", "crypto", "cryp1", "pay"]
+stick RANSOM_NOTE_RE = '(?i)(how[_ -]*to[_ -]*(decrypt|restore)|decrypt[_ -]*(me|instructions?)|restore[_ -]*(my[_ -]*)?files?|recover[_ -]*(my[_ -]*)?files?|readme[_ -]*(to[_ -]*)?(decrypt|ransom|restore)|^_?ransom[_ -]*note|your[_ -]*files[_ -]*are[_ -]*encrypted|pay[_ -]*to[_ -]*decrypt)'
+# Many writes to one known ransomware-tagged extension: enough to tell a
+# rename sweep from one odd file, well under what a real attack writes.
+stick RANSOM_EXT_FLOOR = 10
+# Distinct parent directories a ransom-note basename lands in: a note dropped
+# throughout the project is what a reader finds first after the files go.
+stick RANSOM_NOTE_DIRS_FLOOR = 3
+
+# The ransomware shape in an outside list, or null. Returns the first finding
+# it sees (one is enough): a rename sweep to one new extension, or a note
+# basename in several directories.
+pull ransomware_shape(outside) {
+  roll by_ext = {}
+  roll note_dirs = []
+  for u in as_list(outside) {
+    stick p = str(u.get("path", ""))
+    stick k = str(u.get("kind", ""))
+    if p == "" or k == "delete" or k == "setuid" or k == "link-out" or k == "unreadable" {
+      continue
+    }
+    stick base = path.base(p).lower()
+    stick dot = base.find(".")
+    if dot > 0 {
+      stick last = base.slice(dot + 1).split(".").last()
+      if RANSOM_EXTS.contains(last) {
+        if not by_ext.has(last) {
+          by_ext[last] = 0
+        }
+        by_ext[last] = by_ext[last] + 1
+      }
+    }
+    if text.matches(base, RANSOM_NOTE_RE) {
+      stick parent = path.dir(p)
+      if not note_dirs.contains(parent) {
+        note_dirs.push(parent)
+      }
+    }
+  }
+  for ext in by_ext {
+    if by_ext[ext] >= RANSOM_EXT_FLOOR {
+      snuff {code: "E876", cat: "destructive", w: 1.0, rule: "rehearsal", where: "${by_ext[ext]} paths .${ext}", text: "in the rehearsal", says: "rewrote many files and renamed them to one new extension (.${ext}), a ransomware's shape"}
+    }
+  }
+  if note_dirs.len() >= RANSOM_NOTE_DIRS_FLOOR {
+    snuff {code: "E876", cat: "destructive", w: 1.0, rule: "rehearsal", where: "${note_dirs.len()} directories", text: "in the rehearsal", says: "dropped a ransom-note-shaped file in many directories, a ransomware's shape"}
+  }
+  snuff null
+}
+
 # What a rehearsal did beyond its footprint, as findings: where it would run
 # again later, credential files it changed, set-id files, links into your
-# home, folders it hid, what it removed, and the hosts the box refused.
+# home, folders it hid, what it removed, the ransomware shape, and the hosts
+# the box refused.
 pull behaviour_findings(outside, refused) {
   roll out = []
   roll removed = 0
@@ -8631,6 +8759,10 @@ pull behaviour_findings(outside, refused) {
   }
   if removed >= 20 {
     out.push({code: "E877", cat: "destructive", w: 0.9, rule: "rehearsal", where: "${removed} paths", text: "in the rehearsal", says: "removed many paths outside its footprint, a wiper's shape"})
+  }
+  stick shape = ransomware_shape(outside)
+  if shape != null {
+    out.push(shape)
   }
   for h in as_list(refused) {
     stick raw = text.matches(str(h), '^(\d{1,3}\.){3}\d{1,3}(:\d+)?$') or str(h).starts_with("[")
@@ -10593,6 +10725,16 @@ pull do_update() {
   if inst.code != 0 {
     fail("the release's installer failed: ${(inst.out + inst.err).trim()}")
   }
+  # An agent reading the output of a `cigo update` it ran reads the release's
+  # installer output with it: if what the installer printed holds text
+  # addressed to AI agents or invisible Unicode, fence it the way `cigo
+  # agent run` fences a command's output.
+  if in_agent() {
+    stick note = fence_note(inst.out + inst.err)
+    if note != null {
+      log.warn(note)
+    }
+  }
   for line in inst.out.trim_end().lines() {
     exhale "  " + line
   }
@@ -11267,9 +11409,33 @@ pull do_guard() {
   } else if sub == "exec" {
     expect_flags(["--real"])
     do_guard_exec()
+  } else if sub == "check-footprint" {
+    # The footprint reader on its own: --outside and --refused each a JSON
+    # list, prints the findings behaviour_findings gives for them. Used by
+    # the suite to test rehearsal-only rules (E876, E877) with a synthetic
+    # footprint, so nothing has to run in the box.
+    expect_flags(["--outside", "--refused"])
+    do_guard_check_footprint()
   } else {
     fail("cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes]]")
   }
+}
+
+pull do_guard_check_footprint() {
+  roll outside = []
+  roll refused = []
+  try {
+    outside = as_list(json.parse(flag_value("--outside", "[]")))
+  } ashtray e {
+    fail("--outside: not JSON (${e.message})")
+  }
+  try {
+    refused = as_list(json.parse(flag_value("--refused", "[]")))
+  } ashtray e {
+    fail("--refused: not JSON (${e.message})")
+  }
+  stick findings = behaviour_findings(outside, refused)
+  exhale json.stringify({risk: risk_of(findings), findings: findings}, 2)
 }
 
 pull do_guard_status() {
@@ -12951,13 +13117,25 @@ pull do_guard_exec() {
       }
     }
     log.info("cigo: `${cmdline}` is rehearsed in the box first: its writes judged against the ${spec.tc} footprint, its network the registries")
+    # A shim's run streams its output as the real program does, unless an
+    # agent is reading it: then the output is captured first, its prompt
+    # injection fenced the way `cigo agent run` fences a command's output,
+    # and the rest printed as it was.
+    stick stream_rehearse = not in_agent()
     roll r = null
     burn {
       try {
-        r = proc.run(real, words, {box: {network: pick(allow.is_empty(), "off", "registry"), allow_hosts: allow, contain: true, apply: "never", quiet: true, expect: expect}, cwd: CALLER_DIR, timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}})
+        r = proc.run(real, words, {box: {network: pick(allow.is_empty(), "off", "registry"), allow_hosts: allow, contain: true, apply: "never", quiet: true, expect: expect}, cwd: CALLER_DIR, timeout_ms: 3600000, encoding: "lossy", stream: stream_rehearse, env: {CIGO_GUARDED: "1"}})
       } ashtray e {
         r = e
       }
+    }
+    if not stream_rehearse and r != null {
+      stick note = fence_note(str(r.get("out", "")) + str(r.get("err", "")))
+      if note != null {
+        log.warn(note)
+      }
+      print_raw(str(r.get("out", "")), str(r.get("err", "")))
     }
     stick layer = r.get("layer", null)
     stick refused_hosts = as_list(r.get("refused", []))
@@ -13013,7 +13191,10 @@ pull do_guard_exec() {
     # The manifests and lockfiles it may change are kept in the tin first,
     # so undo puts them back wherever it ran: in the box on Linux, or on
     # the tin where the box cannot be had (root, no user namespaces).
-    roll opts = {timeout_ms: 3600000, encoding: "lossy", stream: true, env: {CIGO_GUARDED: "1"}}
+    # An agent reading the output: capture first, fence prompt injection,
+    # then print (as `cigo agent run` does).
+    stick stream_real = not in_agent()
+    roll opts = {timeout_ms: 3600000, encoding: "lossy", stream: stream_real, env: {CIGO_GUARDED: "1"}}
     if CALLER_OUTSIDE {
       opts.cwd = CALLER_DIR
     } else {
@@ -13030,6 +13211,13 @@ pull do_guard_exec() {
         log.error(e.message)
         r = {code: 1}
       }
+    }
+    if not stream_real and r != null {
+      stick note = fence_note(str(r.get("out", "")) + str(r.get("err", "")))
+      if note != null {
+        log.warn(note)
+      }
+      print_raw(str(r.get("out", "")), str(r.get("err", "")))
     }
     code = int(r.get("code", 1))
     if code == 0 and checking and approvable and not tr.trusted and not rehearse and (risk == "none" or risk == "low") {

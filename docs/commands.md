@@ -198,11 +198,12 @@ disagreement into a stop; `CIGO_VERSIONS=0` keeps the warnings quiet.
 ### The guard: `cigo audit`, `cigo trust`, and what `cigo run` does first
 
 Before a task runs, the guard reads what it is about to run: the command as
-written, the scripts it names, and for a setup stage the install hooks of
-the packages installed here, against patterns real attacks use. Each hit
-is a finding with a code (`cig explain E873`), the place and the matching
-text, scored per category into a risk: `none`, `low`, `medium`, `high`,
-`critical`.
+written, the scripts it names, for a setup stage the install hooks of the
+packages installed here, and each of those packages' README and
+`description` for text aimed at an AI agent (`E886`, `E887`). Against the
+patterns real attacks use. Each hit is a finding with a code (`cig explain
+E873`), the place and the matching text, scored per category into a risk:
+`none`, `low`, `medium`, `high`, `critical`.
 
 Shell text is read twice: as written, and as the shell would join it, with
 the simple assignments made earlier in the same text folded in and the
@@ -526,7 +527,11 @@ high like critical.
 What a command prints is passed on as it was, stdout and stderr each on its
 own stream. When the output holds text addressed to AI agents, or invisible
 Unicode (`E886`, `E887`), a warning comes first: it is data from the
-command, not instructions from the user.
+command, not instructions from the user. The shim's pass-through
+(`cigo guard exec`) and `cigo update`'s installer output are fenced the
+same way when they are read by an agent (an agent variable is set), so
+anything the real `npm install` or the release's `install.sh` printed that
+reads as instructions is marked before it is shown.
 
 ```
 cigo agent log [--agent=<name>] [--session=<id>] [--json]     what an agent ran, with verdicts and run ids
@@ -590,8 +595,10 @@ against that footprint:
 - what it did beyond it is the verdict's evidence, with the same friction:
   a write to a shell's startup file, a git hook or an autostart entry is
   `E873` (high), a changed credential file `E871`, a set-id file `E878`, a
-  link into your home or a folder it hid `E880`, many removals `E877`, a host
-  the box refused `E872` (high for a raw address);
+  link into your home or a folder it hid `E880`, many removals `E877`, a
+  rename sweep to one ransomware-tagged extension or a ransom-note-shaped
+  file dropped across directories `E876` (critical), a host the box refused
+  `E872` (high for a raw address);
 - a rehearsal that stayed within its footprint approves the task as it is,
   so the next run pays one lookup.
 
