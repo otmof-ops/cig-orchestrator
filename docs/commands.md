@@ -91,8 +91,13 @@ project keeps (`.nvmrc`, `.python-version`, `.tool-versions`, `mise.toml`,
 `rust-toolchain.toml`, `global.json`, and the minimums in `go.mod` and
 `build.zig.zon`, among others), naming the version manager that would run
 tasks on a pinned version; then the cig this runs under against the range
-cigo supports and every cig pin the project carries. It exits 1 when a tool
-is missing, and with `--strict` when a version disagrees.
+cigo supports and every cig pin the project carries; then the guard; then
+what `cigo rehearse` can use here: whether cig's contained box is there (the
+rehearsal's isolation), whether Docker or Podman is (their backends are not
+built yet), the tool each registry's rehearsal installs with (`npm`; `uv`,
+`pip3` or `pip`; `cargo`) or where to get it, and how many verdicts and
+quarantined rehearsals are kept. It exits 1 when a tool is missing, and with
+`--strict` when a version disagrees.
 
 **`cigo versions`** lists each language's pin against this machine: the
 pinned version and where it is pinned, the installed one, and the version
