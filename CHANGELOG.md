@@ -5,6 +5,43 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## 1.14.0 — 2026-11-08
+
+The guard reads three more tricks, a rehearsal uses what it installs, and
+the agent hook starts quicker.
+
+- **Commands spelled in escapes** (#89, m21). `$(printf '\x63\x75\x72\x6c')`,
+  `$(echo -e '…')` and `$'…'` are decoded where they stand, and the line is
+  read as shell: a command written in escapes reads as what it spells.
+- **Commands a script hands to a shell** (#89, m10). The command a
+  JavaScript or Python script passes to `child_process`'s `exec` and
+  `spawn`, `subprocess` or `os.system` is built the way the program builds
+  it (pieces joined; templates, f-strings and string constants filled in)
+  and read as shell.
+- **A secret on its way out** (#89, m19). A secret from the environment
+  (`process.env.NPM_TOKEN`, `os.environ[…]`, `os.getenv(…)`) or a
+  credentials file (`~/.npmrc`, `~/.pypirc`, `~/.netrc`) that reaches a
+  network call is critical, unless it goes only to its own service
+  (`GITHUB_TOKEN` to github.com).
+- **The detection corpus** (#88). 52 labelled samples from #88, two attack
+  variants and five benign twins, each rated in CI exactly as its label
+  says: a lost detection fails, and so does an improvement until its label
+  is raised. No benign task may be flagged, and every address an attack
+  names is a documentation range or `.invalid`. Today: 22 of 26 attacks
+  critical, 25 at high or above, 0 of 29 benign flagged.
+- **A rehearsal uses what it installs** (#56). PyPI imports the package's
+  top-level modules after installing it, and a crate is linked into a
+  scratch program that runs, as npm's was required: much malware waits for
+  the first import. `--no-use` installs only, and its verdict is kept apart.
+- **`cigo doctor` says what a rehearsal can use here** (#56): the box, Docker
+  or Podman, each registry's tool or where to get it, and what is kept.
+- **The agent hook starts without the check** (#90). The hook and the
+  `cigo agent run` it wraps each command in run with `--no-check`, saving
+  about 5 ms at each of the two starts per command an agent runs. A hook
+  installed by an earlier cigo keeps working; `cigo guard scope agents
+  --agents=claude-code` writes the new one. `docs/how-it-works.md` says
+  where a start goes.
+
 ## 1.13.1 — 2026-11-07
 
 - **cig 1.16.1 or newer.** Its box makes the forwarder's listener before
