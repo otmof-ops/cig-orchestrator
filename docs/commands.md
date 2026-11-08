@@ -305,6 +305,12 @@ cigo blacklist list [--json]                 every entry, its reason, and whethe
 cigo blacklist why <package|file|url|host>   which entry matched and why (exits 1 when one did)
 cigo blacklist remove <entry>                as list shows it
 cigo blacklist reload                        sign a list you edited by hand, at a terminal
+cigo blacklist allow <entry> --reason=...    override a false positive (OS-authenticated)
+cigo blacklist unallow <entry>               take the override back (OS-authenticated)
+cigo blacklist allows [--json]               every override, who, when and why
+cigo blacklist export <file>                 one signed bundle (your entries and overrides)
+cigo blacklist import <file>                 merge a signed bundle (OS-authenticated)
+cigo blacklist exceptions [--json]           the one-off runs in force (blacklist_exception_ttl)
 ```
 
 The entries live one per line in `~/.config/cigscript/blacklist.d/mine.list`
@@ -322,10 +328,42 @@ full from the tin, said on every guarded call (`E588`) until `cigo blacklist
 reload` puts the file back. A missing or emptied list never takes entries
 out; only `remove` and `reload` do. Inside
 cig's box the key folder is empty, so a task cannot sign a list. An expired
-entry stays listed and no longer refuses anything. Running something
-blacklisted anyway, and the built-in list cigo will ship, come with #62's
-later steps; until then `cigo run <task> --run-untrusted=<task>`, at a
-terminal only, is the way through, as for any critical verdict.
+entry stays listed and no longer refuses anything.
+
+Overriding a false positive is `cigo blacklist allow <entry> --reason=...`,
+OS-authenticated so a script cannot whitelist its own payload. The override
+lives in `~/.config/cigscript/blacklist.d/allows.jsonl`, signed with the
+tin's key under a separate label, and records who allowed it and when; the
+entry stays on the list and `cigo blacklist why <thing>` names the override
+next to the entry it nullifies. `cigo blacklist unallow <entry>` takes it
+back (also OS-authenticated).
+
+`cigo blacklist export <file>` writes your own entries and overrides as one
+signed JSON bundle (`<file>` and `<file>.mac`, signed under its own tin
+label). `cigo blacklist import <file>` is OS-authenticated and refuses any
+bundle that does not verify (`E587`), including an unsigned one; it merges
+what the bundle names into the local lists, skipping anything already there.
+Imported entries keep their source, so a bundle signed on another machine
+that shares the tin's key imports here cleanly.
+
+Running something blacklisted anyway goes through two warnings and OS
+authentication:
+
+```
+cigo run <task>                                    warning one (E580): what it is
+cigo run <task> --run-untrusted=<task>             warning two (E581): what it could cost
+cigo run <task> --run-untrusted=<task> --light-it  OS authentication, honours blacklist_unboxed
+```
+
+With `blacklist_unboxed = refuse` (the default) the flow ends in a refuse
+that points to the setting: the box itself is CigScript#106 and is not
+built yet. With `blacklist_unboxed = ask`, add `--no-box` for a second OS
+authentication and run outside the box (`E583`); the approval is recorded
+in `~/.cig-orchestrator/blacklist-exceptions.jsonl` and lasts
+`blacklist_exception_ttl` (default 24h), so a re-run in that window does
+not ask again (`E582`). Agents and CI never approve a blacklisted run
+(`E895`), whatever the setting says. The built-in signed bundle cigo will
+ship, program starts, connections and DNS come with #62's later steps.
 
 ### The guard's reach: `cigo guard`
 
