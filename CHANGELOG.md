@@ -5,7 +5,23 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
-## Unreleased
+## 1.16.0 — 2026-11-08
+
+The guard reads more and asks better: ransomware's shape, typosquats,
+what you downloaded, PowerShell and fish, the tier matrix, the blacklist
+you can override; rehearsals of local packages; OS authentication that
+only the system can answer.
+
+- **OS authentication only the system can answer** (#62). `os_auth` runs
+  `pkexec` (`/usr/bin/pkexec`, then `/bin/pkexec`) and, on macOS,
+  `/usr/bin/osascript` by their full paths, never through PATH, and hands
+  pkexec `/usr/bin/true` (else `/bin/true`) to run: pkexec finds a bare
+  name through PATH and runs it as root once you approve. A fake `pkexec`
+  or `true` earlier on PATH can no longer stand in for your password. No
+  environment variable, file or flag stands in for it either.
+- **`scripts/bench.cig`** (#88, #90) times cigo's commands here, through
+  `bin/cigo` with a scratch home, beside #90's targets: a dev script, which
+  reports and never gates.
 
 - **The tier matrix as data, and remembered answers** (#66 step 2). The
   guard reads the tier at which a finding reaches the user (silent,
