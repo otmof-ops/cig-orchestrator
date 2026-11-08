@@ -598,14 +598,19 @@ run the project's own code and have no footprint of their own; a container
 build happens in the container daemon, which the box cannot see.
 
 **`cigo rehearse <package>`** checks a package before it touches anything:
-it installs it (and, for npm, requires it once) in a scratch project inside
-the box, applies none of it, and says what it did beyond the ecosystem's
-footprint. No project needed.
+it installs it and uses it once in a scratch project inside the box, applies
+none of it, and says what it did beyond the ecosystem's footprint. Using it
+once matters: much malware waits for the first `require` or `import`, and a
+wheel runs no code at install at all. npm requires the package, PyPI imports
+each of its top-level modules (from `top_level.txt`, or the `.py` files it
+installed), and a crate is linked into a scratch program that runs, so what
+runs before `main` runs in the box too. `--no-use` installs only, and its
+verdict is kept apart from a used one. No project needed.
 
 ```
 cigo rehearse npm:name[@version]       npm install, then require it once
-cigo rehearse pypi:name[==version]     pip install in a scratch venv
-cigo rehearse crates:name[@version]    cargo build of a scratch crate
+cigo rehearse pypi:name[==version]     pip install in a scratch venv, then import it
+cigo rehearse crates:name[@version]    a scratch program that links the crate, built and run
 cigo rehearse ./install.sh             a script you were told to run
 cigo rehearse name[@version]           in the registry this project's toolchains use (two: it asks which)
               [--json] [--keep]        the full evidence; keep the layer to read (cig box list)
@@ -613,6 +618,7 @@ cigo rehearse --changed [--base=<rev>] every package the lockfiles add or change
               [--list] [--max=N]       name them and rehearse nothing; at most N (50)
               [--sarif | --markdown]   for code scanning or a pull request comment
               [--fresh]                rehearse even what was rehearsed before
+              [--no-use]               install only: no require, import or run
               [--fail-on=<level>]      the lowest verdict that fails (auto: high under CI, critical at a terminal)
 ```
 
