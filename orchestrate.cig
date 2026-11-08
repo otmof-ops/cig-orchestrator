@@ -8792,6 +8792,11 @@ pull infer_registry(spec) {
   fail("cigo rehearse ${spec}: say which registry: npm:${spec}, pypi:${spec} or crates:${spec}")
 }
 
+# A PyPI package used once: each of its top-level modules imported (from
+# top_level.txt, or the .py files it installed), each import's failure
+# shrugged off. What matters is what the box sees it do.
+stick PYPI_USE = "import sys, importlib, importlib.metadata as m\nd = m.distribution(sys.argv[1])\ntops = (d.read_text('top_level.txt') or '').split()\nif not tops:\n    tops = sorted({str(f).split('/')[0].removesuffix('.py') for f in (d.files or []) if str(f).endswith('.py') and '.dist-info' not in str(f) and not str(f).startswith('..')})\nfor t in tops:\n    try:\n        importlib.import_module(t)\n    except Exception:\n        pass\n"
+
 pull rehearse_spec(spec) {
   snuff rehearse_job(spec).merge({spec: spec})
 }
@@ -8819,6 +8824,9 @@ pull rehearse_job(spec) {
     fail("cigo rehearse ${spec}: not a package name this rehearses (letters, digits and @/._~^=<>*+!- only)")
   }
   stick d = REHEARSE_DIR
+  # Use it once (#56): much malware waits for the first require or import,
+  # and a wheel runs no code at install. `--no-use` installs only.
+  stick use = not flags.contains("--no-use")
   if eco == "npm" {
     roll name = rest
     stick at = rest.slice(1).find("@")
@@ -8827,12 +8835,15 @@ pull rehearse_job(spec) {
     }
     stick fp = FOOTPRINTS["node-npm"].setup
     snuff {eco: "npm", label: rest, tool: "npm", fp: fp,
-      script: "mkdir -p ${d} && cd ${d} && printf '%s' '{\"name\":\"cigo-rehearse\",\"version\":\"0.0.0\",\"private\":true}' > package.json && npm install --no-audit --no-fund --loglevel=error '${rest}' && node -e 'require(process.argv[1])' '${name}'"}
+      script: "mkdir -p ${d} && cd ${d} && printf '%s' '{\"name\":\"cigo-rehearse\",\"version\":\"0.0.0\",\"private\":true}' > package.json && npm install --no-audit --no-fund --loglevel=error '${rest}'" + pick(use, " && node -e 'require(process.argv[1])' '${name}'", "")}
   }
   if eco == "pypi" {
     stick fp = FOOTPRINTS["python-pip"].setup
+    # The distribution's name, without a version or extras: what
+    # importlib.metadata looks it up by.
+    stick dist = text.split(rest, '[\[=<>!~;]').first()
     snuff {eco: "pypi", label: rest, tool: "python3", fp: fp,
-      script: "mkdir -p ${d} && cd ${d} && python3 -m venv .venv && .venv/bin/python -m pip install --disable-pip-version-check --no-input --no-cache-dir '${rest}'"}
+      script: "mkdir -p ${d} && cd ${d} && python3 -m venv .venv && .venv/bin/python -m pip install --disable-pip-version-check --no-input --no-cache-dir '${rest}'" + pick(use, " && .venv/bin/python -c " + sh_quote(PYPI_USE) + " '${dist}'", "")}
   }
   roll crate = rest
   roll version = "*"
@@ -8842,9 +8853,14 @@ pull rehearse_job(spec) {
     version = rest.slice(at + 1)
   }
   stick fp = FOOTPRINTS["rust-cargo"].build
+  # Used once: a scratch program that links the crate and runs, so what
+  # runs before main (a constructor in .init_array) runs in the box too.
+  stick ident = crate.replace("-", "_")
+  stick run = pick(use, "cargo init --bin --vcs none --name cigo_rehearse -q && printf '%s\n' '#[allow(unused_extern_crates)]' 'extern crate ${ident};' 'fn main() {}' > src/main.rs", "cargo init --lib --vcs none --name cigo_rehearse -q")
   snuff {eco: "crates", label: rest, tool: "cargo", fp: fp.merge({network: FOOTPRINTS["rust-cargo"].setup.network}),
-    script: "mkdir -p ${d} && cd ${d} && cargo init --lib --vcs none --name cigo_rehearse -q && printf '\n[dependencies]\n%s = \"%s\"\n' '${crate}' '${version}' >> Cargo.toml && cargo build -q"}
+    script: "mkdir -p ${d} && cd ${d} && ${run} && printf '\n[dependencies]\n%s = \"%s\"\n' '${crate}' '${version}' >> Cargo.toml && " + pick(use, "cargo run -q", "cargo build -q")}
 }
+
 
 # ----- the verdict cache: never the same bytes twice (#56 step 4) ----------------------
 #
@@ -8877,7 +8893,8 @@ pull verdict_key(job, integrity) {
     }
     what = want.eco + "|" + want.name + "@" + want.version + "|" + sum
   }
-  snuff hash.sha256(["cigo-verdict-1", what, VERSION].join("\n"))
+  # A rehearsal that never used the package is not the same verdict.
+  snuff hash.sha256(["cigo-verdict-1", what, VERSION].join("\n") + pick(flags.contains("--no-use"), "\nno-use", ""))
 }
 
 pull verdict_files(key) {
@@ -8979,7 +8996,7 @@ pull box_watches() {
 }
 
 pull do_rehearse() {
-  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh", "--fail-on"])
+  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh", "--fail-on", "--no-use"])
   fail_on()
   if flags.contains("--changed") {
     do_rehearse_changed()
