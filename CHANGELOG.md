@@ -98,6 +98,46 @@ Four more codes the guard reads before a lockfile is touched.
   with `CIGO_OSV_API`.
 - **`metadata_young_days`** (default `7`). The E882 window in days; `0`
   turns it off without touching the other two.
+The guard reaches fish and PowerShell; level 3 catches the first run of a
+downloaded file.
+
+- **The Enter-key hook for PowerShell** (#57). At `guard_scope dev` the
+  `CurrentUserAllHosts` profile (`~/.config/powershell/Microsoft.PowerShell_profile.ps1`
+  on Linux and macOS, `Documents/PowerShell/` on Windows) gets a cigo
+  block between `# >>> cigo guard >>>` and `# <<< cigo guard <<<`. The
+  block puts `~/.cig-orchestrator/shims` first on `$env:PATH` and
+  dot-sources `~/.cig-orchestrator/guard/hook.ps1`, which binds Enter
+  through PSReadLine: a line that pipes a download into a shell is
+  cancelled with `E892` and the rehearsed way is said. `cigo guard
+  uninstall` removes it, and an empty profile cigo wrote into goes with
+  it. `guard_shells` takes `powershell`.
+- **The Enter-key hook for fish** (#57). Where fish 3 is here (or its
+  `~/.config/fish` is), a `conf.d/cigo-guard.fish` block does the same,
+  sourcing `~/.cig-orchestrator/guard/hook.fish`. The hook binds `\r`
+  and `\n` to a `commandline`-driven check that cancels a `curl | sh`
+  line before it executes. `guard_shells` takes `fish`.
+- **Level 3: anything you downloaded, on Linux** (#57 step 3, `E893`).
+  A file the browser marked with `user.xdg.origin.url`, or any file
+  under `~/Downloads`, is rehearsed first when a shell is about to run
+  it. The bash, zsh, fish and PowerShell hooks all check this at Enter,
+  behind a `~/.cig-orchestrator/guard/level3` marker. `getfattr` reads
+  the mark when it is here; otherwise a small Python helper at
+  `~/.cig-orchestrator/guard/xattr.py` does. Where the filesystem does
+  not carry xattrs, the check steps aside without a sound.
+- **Shims for `tar`, `unzip` and `7z`** (#57 step 3). Each is a plain
+  `sh` script beside the package-manager shims at level 3 and up. On a
+  clean extraction, if the archive had the mark (or lives under
+  `~/Downloads`), the shim walks the destination and sets
+  `user.cig.downloaded` on every file the real program created or
+  replaced; `setfattr` is used when it is here, Python otherwise. The
+  real program's exit code is kept, and the shim exits at once inside
+  a guarded call (`CIGO_GUARDED=1`).
+- **`cigo guard scope downloads`** is built. It pulls in the level-2
+  package-manager shims, the shell hooks for every `guard_shells` the
+  machine has, the archive shims and the xattr helper; `cigo guard
+  uninstall` removes them all. Level 5 remains the one "not built yet".
+- Needs cig 1.14.0.
+
 
 
 ## 1.15.0 — 2026-11-08
