@@ -99,8 +99,8 @@ as `name args @directory` in `$STUB_LOG`, prints a version when asked, and
 fails on the argument `fail-please`. That's how the suite checks what every
 language would run, and where, without installing any of them.
 
-`tests/fixtures/detection` is the guard's detection corpus (#88): 24 inert
-attacks, 24 benign tasks people really run and 4 grey ones (an official
+`tests/fixtures/detection` is the guard's detection corpus (#88): 26 inert
+attacks, 29 benign tasks people really run and 4 grey ones (an official
 installer piped to `sh`, `sudo apt-get install`), each a task that exits
 before its first line and is only ever read. Every sample's header carries
 its label, its ATT&CK technique and the rating it gets today
@@ -109,8 +109,9 @@ The suite holds each rating exactly, so a lost detection fails, and so does
 an improvement until its label is raised in the same change. No benign task
 may be flagged at medium or above, and every address an attack names,
 decoded or not, is in a documentation range (RFC 5737) or under `.invalid`
-(RFC 2606). Today: every benign task `none`, 22 of 24 attacks at medium or
-above, 21 at high or above.
+(RFC 2606). Today: every benign task `none`, and 25 of 26 attacks at high
+or above, 22 of them critical; m15 (wiping shell history) waits on its
+error code.
 
 ```sh
 cig run tests/run.cig                   # every test
