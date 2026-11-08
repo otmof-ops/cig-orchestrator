@@ -8652,6 +8652,13 @@ pull settle_rehearsal(name, t, result, rh) {
     exhale "    rehearsed: nothing outside its footprint"
     if result.ok and risk != "medium" and risk != "high" and risk != "critical" {
       approve(t, name, {risk: risk, findings: all})
+      # The setup rehearsed clean: every package the project's lockfiles
+      # name now has evidence from this rehearsal. Keep a verdict for each
+      # one under the same key `cigo rehearse` reads, so neither side
+      # rehearses the same bytes again (#56).
+      if str(t.get("stage", "")) == "setup" {
+        keep_setup_verdicts_for_project(name)
+      }
     }
     snuff
   }
@@ -8815,9 +8822,20 @@ pull rehearse_job(spec) {
     }
   }
   if eco == "" {
+    if spec.starts_with("git+") {
+      snuff rehearse_job_for_git(spec)
+    }
     if spec.starts_with("./") or spec.starts_with("/") or spec.starts_with("../") {
-      if not fs.is_file(spec) {
-        fail("cigo rehearse ${spec}: no such file")
+      stick abs_spec = pick(path.is_abs(spec), spec, path.join(ROOT, spec))
+      if fs.is_dir(abs_spec) {
+        snuff rehearse_job_for_local(spec)
+      }
+      if not fs.is_file(abs_spec) {
+        fail("cigo rehearse ${spec}: no such file or folder")
+      }
+      stick lower = spec.lower()
+      if lower.ends_with(".tgz") or lower.ends_with(".tar.gz") or lower.ends_with(".whl") or lower.ends_with(".crate") {
+        snuff rehearse_job_for_local(spec)
       }
       snuff {eco: "script", label: spec, tool: "sh", script: "sh " + sh_quote(spec), fp: {writes: [], network: [], registry_env: []}}
     }
@@ -8865,6 +8883,294 @@ pull rehearse_job(spec) {
 }
 
 
+# ----- local inputs: a .tgz, .whl, .crate, folder, or git+URL (#56) -----------------
+#
+# A local tarball (.tgz, .tar.gz), wheel (.whl), crate (.crate) or a folder
+# with a package.json, pyproject.toml/setup.py or Cargo.toml is rehearsed
+# like the registry form of its ecosystem: installed with the ecosystem's
+# own tool against the local path, used once (or not, with --no-use), and
+# the verdict kept against the content hash of what was asked. A git+URL is
+# cloned into the scratch (never the user's tree) and rehearsed as a folder;
+# its verdict is kept against the commit the clone landed on. None of it is
+# applied; the clone goes once the rehearsal does.
+
+stick REHEARSE_CLONE_DIR = ".cigo-rehearse-clone"
+
+# What the install step wants a .whl, .tgz, .crate or folder path to look
+# like: a path that survives as a shell word (no newlines, no single quotes)
+# so the job's script can hand it to the ecosystem's own tool without
+# rebuilding the command. Called before any work.
+pull check_local_path(spec) {
+  if spec.contains("\n") or spec.contains("'") {
+    fail("cigo rehearse ${spec}: a path with a newline or a single quote is not rehearsed")
+  }
+}
+
+# The distribution name a .whl's filename carries: `{dist}-{ver}-...whl`,
+# with dots and hyphens in the dist name written as underscores (PEP 427).
+# This maps underscores back to hyphens, which importlib.metadata reads
+# either way, so the use step imports what pip just installed.
+pull wheel_dist(file) {
+  stick base = path.stem(path.base(file))
+  stick part = text.split(base, "-").first()
+  snuff part.replace("_", "-")
+}
+
+# The package name a package.json names, or null when there is no readable
+# one. Used to know what npm installed from a local tarball or folder, so
+# the use step requires the right name.
+pull npm_name_of(file) {
+  roll body = ""
+  try {
+    body = unbom(fs.read_text(file))
+  } ashtray e {
+    snuff null
+  }
+  try {
+    stick j = json.parse(body)
+    stick n = str(j.get("name", ""))
+    if n != "" {
+      snuff n
+    }
+  } ashtray e {
+  }
+  snuff null
+}
+
+# The project name a pyproject.toml or setup.py names. Lightweight reading:
+# `name = "..."` or `name='...'` is what every PyPI tool writes; a more
+# exotic spelling returns null and the use step is skipped for that case.
+pull py_name_of(file) {
+  roll body = ""
+  try {
+    body = fs.read_text(file)
+  } ashtray e {
+    snuff null
+  }
+  stick c = text.captures(body, '(?m)^\s*name\s*=\s*["' + "'" + ']([A-Za-z0-9._-]+)["' + "'" + ']')
+  if c != null {
+    snuff c[1]
+  }
+  snuff null
+}
+
+# The crate name a Cargo.toml names (the `[package] name = "..."` line).
+pull cargo_name_of(file) {
+  roll body = ""
+  try {
+    body = fs.read_text(file)
+  } ashtray e {
+    snuff null
+  }
+  stick c = text.captures(body, '(?s)\[package\].*?\bname\s*=\s*"([A-Za-z0-9_-]+)"')
+  if c != null {
+    snuff c[1]
+  }
+  snuff null
+}
+
+# A folder's content hash: the sorted list of file paths and the sha256 of
+# each, rolled into one sha256. Stable across runs on the same bytes, so a
+# folder rehearsed clean once is not rehearsed again. Hidden folders and
+# common build output (`.git`, `.venv`, `node_modules`, `target`, `dist`,
+# `build`) are left out so an incidental cache does not change the key.
+stick FOLDER_SKIP = [".git", ".hg", ".svn", ".venv", "venv", "node_modules", "target", "dist", "build", ".cigo-rehearse", ".cigo-rehearse-clone"]
+
+pull folder_hash(root) {
+  roll parts = []
+  pull walk(dir, prefix) {
+    roll kids = []
+    try {
+      kids = fs.list(dir)
+    } ashtray e {
+      snuff
+    }
+    kids.sort()
+    for p in kids {
+      stick name = path.base(p)
+      if FOLDER_SKIP.contains(name) or name.starts_with(".") {
+        continue
+      }
+      stick rel = pick(prefix == "", name, prefix + "/" + name)
+      if fs.is_dir(p) {
+        walk(p, rel)
+      } else if fs.is_file(p) {
+        parts.push(rel + ":" + hash.sha256_file(p))
+      }
+    }
+  }
+  walk(root, "")
+  snuff hash.sha256(parts.join("\n"))
+}
+
+# A git+URL's parts: URL and (optional) ref.
+pull git_url_parts(spec) {
+  stick rest = spec.slice(4)
+  stick hash_at = rest.find("#")
+  roll url = rest
+  roll ref = ""
+  if hash_at >= 0 {
+    url = rest.slice(0, hash_at)
+    ref = rest.slice(hash_at + 1)
+  }
+  if not (url.starts_with("https://") or url.starts_with("http://")) {
+    fail("cigo rehearse ${spec}: only git+http(s) URLs are rehearsed (git+ssh and git@ are not)")
+  }
+  # The ref is handed to git checkout: one that starts with `-` would be
+  # read as an option, so only a plain branch, tag or commit is taken.
+  if ref.starts_with("-") or text.matches(ref, '\s') {
+    fail("cigo rehearse ${spec}: not a ref this checks out (a branch, tag or commit; no leading `-`, no spaces)")
+  }
+  snuff {url: url, ref: ref}
+}
+
+# Clone a git URL into the scratch and return its path and HEAD commit. The
+# clone goes under REHEARSE_CLONE_DIR, never into the user's tree.
+pull git_clone_to(url, ref) {
+  check_local_path(url)
+  check_local_path(ref)
+  stick dest = path.join(ROOT, REHEARSE_CLONE_DIR, "src")
+  burn {
+    try {
+      fs.rm(path.dir(dest))
+    } ashtray e {
+    }
+    fs.mkdir(path.dir(dest))
+  }
+  if proc.which("git") == null {
+    fail("cigo rehearse ${url}: git is not on this machine")
+  }
+  roll argv = ["clone", "--depth=1", "--quiet", "--", url, dest]
+  if ref != "" {
+    argv = ["clone", "--quiet", "--", url, dest]
+  }
+  roll r = null
+  burn {
+    r = proc.run("git", argv, {timeout_ms: 300000, encoding: "lossy"})
+  }
+  if r == null or r.code != 0 {
+    fail("cigo rehearse ${url}: git clone failed (" + clip(str(r.get("err", "")).trim(), 200) + ")")
+  }
+  if ref != "" {
+    roll co = null
+    burn {
+      co = proc.run("git", ["-C", dest, "checkout", "--quiet", ref], {timeout_ms: 60000, encoding: "lossy"})
+    }
+    if co == null or co.code != 0 {
+      fail("cigo rehearse ${url}: the ref `${ref}` is not in the clone (" + clip(str(co.get("err", "")).trim(), 200) + ")")
+    }
+  }
+  roll head = null
+  burn {
+    head = proc.run("git", ["-C", dest, "rev-parse", "HEAD"], {timeout_ms: 10000, encoding: "lossy"})
+  }
+  stick commit = pick(head != null and head.code == 0, str(head.get("out", "")).trim(), "")
+  snuff {path: dest, commit: commit}
+}
+
+# A git+ input's clone is cigo's scratch, not the project's: it goes once
+# the rehearsal has read it.
+pull drop_rehearse_clone() {
+  stick d = path.join(ROOT, REHEARSE_CLONE_DIR)
+  if fs.exists(d) {
+    burn {
+      fs.rm(d)
+    }
+  }
+}
+
+# A local .tgz/.tar.gz, .whl, .crate file, or a folder, as a rehearse job.
+# The install step uses the ecosystem's own tool against the local path, and
+# the use step runs the same way as the registry form (`--no-use` skips it).
+pull rehearse_job_for_local(spec) {
+  check_local_path(spec)
+  stick d = REHEARSE_DIR
+  stick use = not flags.contains("--no-use")
+  stick abs_spec = pick(path.is_abs(spec), spec, path.join(ROOT, spec))
+  if fs.is_dir(abs_spec) {
+    snuff rehearse_job_for_folder(spec, abs_spec, use, d)
+  }
+  if not fs.is_file(abs_spec) {
+    fail("cigo rehearse ${spec}: no such file or folder")
+  }
+  stick lower = spec.lower()
+  if lower.ends_with(".tgz") or lower.ends_with(".tar.gz") {
+    stick fp = FOOTPRINTS["node-npm"].setup
+    stick use_cmd = " && node -e 'for (const n of Object.keys(require(\"./package.json\").dependencies || {})) require(n)'"
+    snuff {eco: "local-npm", label: spec, path: abs_spec, tool: "npm", fp: fp,
+      script: "mkdir -p ${d} && cd ${d} && printf '%s' '{\"name\":\"cigo-rehearse\",\"version\":\"0.0.0\",\"private\":true}' > package.json && npm install --no-audit --no-fund --loglevel=error " + sh_quote(abs_spec) + pick(use, use_cmd, "")}
+  }
+  if lower.ends_with(".whl") {
+    stick fp = FOOTPRINTS["python-pip"].setup
+    stick dist = wheel_dist(abs_spec)
+    snuff {eco: "local-pypi", label: spec, path: abs_spec, tool: "python3", fp: fp,
+      script: "mkdir -p ${d} && cd ${d} && python3 -m venv .venv && .venv/bin/python -m pip install --disable-pip-version-check --no-input --no-cache-dir " + sh_quote(abs_spec) + pick(use and dist != "", " && .venv/bin/python -c " + sh_quote(PYPI_USE) + " " + sh_quote(dist), "")}
+  }
+  if lower.ends_with(".crate") {
+    stick fp = FOOTPRINTS["rust-cargo"].build.merge({network: FOOTPRINTS["rust-cargo"].setup.network})
+    # A .crate is a gzipped tarball named `{name}-{version}.crate`; it is
+    # extracted into a scratch folder and taken as a path dependency, so the
+    # ecosystem's own tool exercises its build.rs the way a registered crate
+    # would. Crate names may contain hyphens, so the name is what comes
+    # before the semver suffix, not the first hyphen.
+    stick base = path.stem(path.base(spec))
+    stick c = text.captures(base, '^(.+)-([0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*)$')
+    roll name = base
+    if c != null {
+      name = c[1]
+    }
+    stick ident = name.replace("-", "_")
+    stick run = pick(use, "cargo init --bin --vcs none --name cigo_rehearse -q && printf '%s\n' '#[allow(unused_extern_crates)]' 'extern crate ${ident};' 'fn main() {}' > src/main.rs", "cargo init --lib --vcs none --name cigo_rehearse -q")
+    stick cmd = pick(use, "cargo run -q", "cargo build -q")
+    snuff {eco: "local-crates", label: spec, path: abs_spec, tool: "cargo", fp: fp,
+      script: "mkdir -p ${d} && cd ${d} && mkdir -p crate && tar -xzf " + sh_quote(abs_spec) + " -C crate && CRATE_DIR=$(ls -1 crate | head -n1) && ${run} && printf '\n[dependencies]\n%s = { path = \"crate/%s\" }\n' '${name}' \"$CRATE_DIR\" >> Cargo.toml && ${cmd}"}
+  }
+  fail("cigo rehearse ${spec}: not a shape this rehearses (.tgz, .tar.gz, .whl, .crate, a folder, or a .sh script)")
+}
+
+pull rehearse_job_for_folder(spec, abs_spec, use, d) {
+  stick pkg_json = path.join(abs_spec, "package.json")
+  stick cargo = path.join(abs_spec, "Cargo.toml")
+  stick pyproject = path.join(abs_spec, "pyproject.toml")
+  stick setup_py = path.join(abs_spec, "setup.py")
+  if fs.is_file(pkg_json) {
+    stick fp = FOOTPRINTS["node-npm"].setup
+    stick name = npm_name_of(pkg_json)
+    stick use_cmd = pick(name == null, "", " && node -e 'require(process.argv[1])' " + sh_quote(name))
+    snuff {eco: "local-npm", label: spec, path: abs_spec, tool: "npm", fp: fp,
+      script: "mkdir -p ${d} && cd ${d} && printf '%s' '{\"name\":\"cigo-rehearse\",\"version\":\"0.0.0\",\"private\":true}' > package.json && npm install --no-audit --no-fund --loglevel=error " + sh_quote(abs_spec) + pick(use, use_cmd, "")}
+  }
+  if fs.is_file(pyproject) or fs.is_file(setup_py) {
+    stick fp = FOOTPRINTS["python-pip"].setup
+    stick manifest = pick(fs.is_file(pyproject), pyproject, setup_py)
+    stick dist = py_name_of(manifest) ?? ""
+    snuff {eco: "local-pypi", label: spec, path: abs_spec, tool: "python3", fp: fp,
+      script: "mkdir -p ${d} && cd ${d} && python3 -m venv .venv && .venv/bin/python -m pip install --disable-pip-version-check --no-input --no-cache-dir " + sh_quote(abs_spec) + pick(use and dist != "", " && .venv/bin/python -c " + sh_quote(PYPI_USE) + " " + sh_quote(dist), "")}
+  }
+  if fs.is_file(cargo) {
+    stick fp = FOOTPRINTS["rust-cargo"].build.merge({network: FOOTPRINTS["rust-cargo"].setup.network})
+    stick name = cargo_name_of(cargo) ?? "the_crate"
+    stick ident = name.replace("-", "_")
+    stick run = pick(use, "cargo init --bin --vcs none --name cigo_rehearse -q && printf '%s\n' '#[allow(unused_extern_crates)]' 'extern crate ${ident};' 'fn main() {}' > src/main.rs", "cargo init --lib --vcs none --name cigo_rehearse -q")
+    stick cmd = pick(use, "cargo run -q", "cargo build -q")
+    snuff {eco: "local-crates", label: spec, path: abs_spec, tool: "cargo", fp: fp,
+      script: "mkdir -p ${d} && cd ${d} && ${run} && printf '\n[dependencies]\n%s = { path = %s }\n' '${name}' " + sh_quote("\"" + abs_spec + "\"") + " >> Cargo.toml && ${cmd}"}
+  }
+  fail("cigo rehearse ${spec}: a folder with no package.json, pyproject.toml, setup.py or Cargo.toml is not a package this rehearses")
+}
+
+# A git+URL: clone it into the scratch (never the user's tree) and rehearse
+# the clone as a folder. The verdict key is the commit at HEAD.
+pull rehearse_job_for_git(spec) {
+  stick parts = git_url_parts(spec)
+  stick clone = git_clone_to(parts.url, parts.ref)
+  stick abs_spec = clone.path
+  stick use = not flags.contains("--no-use")
+  stick job = rehearse_job_for_folder(spec, abs_spec, use, REHEARSE_DIR)
+  snuff job.merge({eco: "git-" + job.eco, git_url: parts.url, git_ref: parts.ref, git_commit: clone.commit, label: spec})
+}
+
+
 # ----- the verdict cache: never the same bytes twice (#56 step 4) ----------------------
 #
 # A rehearsal's verdict is kept under what was rehearsed: an npm or crates.io
@@ -8885,6 +9191,28 @@ pull verdict_key(job, integrity) {
   roll what = null
   if job.eco == "script" {
     what = "script:" + hash.sha256_file(job.spec)
+  } else if job.eco == "local-npm" or job.eco == "local-pypi" or job.eco == "local-crates" {
+    # A local tarball, wheel or .crate is the bytes on disk; a folder is
+    # the content hash of its files. The same bytes read the same verdict.
+    stick p = str(job.get("path", ""))
+    if p == "" {
+      snuff null
+    }
+    if fs.is_dir(p) {
+      what = job.eco + "|folder:" + folder_hash(p)
+    } else if fs.is_file(p) {
+      what = job.eco + "|file:" + hash.sha256_file(p)
+    } else {
+      snuff null
+    }
+  } else if job.eco.starts_with("git-") {
+    # A git clone's bytes change each time; the commit it landed on names
+    # them. No commit means no key, and the clone is rehearsed every time.
+    stick commit = str(job.get("git_commit", ""))
+    if commit == "" {
+      snuff null
+    }
+    what = "git|" + str(job.get("git_url", "")) + "@" + commit
   } else {
     stick want = blacklist_parse(job.spec)
     if want == null or want.kind != "package" or not text.matches(want.version, EXACT_VERSION) {
@@ -9101,6 +9429,7 @@ pull do_rehearse() {
     exhale "rehearsing ${job.label} (${job.eco}) in the box: nothing it does is applied"
   }
   stick r = rehearse_or_kept(job, null, flags.contains("--keep"))
+  drop_rehearse_clone()
   stick against = flag_value("--against", "")
   if against != "" {
     rehearse_against(spec, r, against, human)
@@ -9310,6 +9639,80 @@ pull rehearse_spec_of(p) {
     snuff null
   }
   snuff spec
+}
+
+# Setup shares kept verdicts (#56). A clean rehearsal of a setup task is
+# per-package evidence for every package the project's lockfiles name: each
+# gets a verdict under the same key `cigo rehearse` reads. The next time
+# `cigo rehearse npm:name@1.2.3` is asked and the lockfile's integrity
+# matches, the answer comes from the kept verdict without the box; and the
+# next setup rehearsal skips a package whose bytes have been judged clean
+# already. The key is the same both ways: npm or crates.io at an exact
+# version with the lockfile's hash when one is known, PyPI at an exact
+# version with its hash.
+pull keep_setup_verdicts_for_project(task_name) {
+  roll kept = 0
+  roll seen = {}
+  for name in LOCKFILES {
+    for f in fs.glob(path.join(ROOT, "**", name)) {
+      if not fs.is_file(f) {
+        continue
+      }
+      for p in lock_packages(f) {
+        stick spec = rehearse_spec_of(p)
+        if spec == null {
+          continue
+        }
+        stick integrity = str(p.get("integrity", ""))
+        stick job = {eco: pick(p.eco == "PyPI", "pypi", pick(p.eco == "crates.io", "crates", "npm")), spec: spec, label: spec}
+        stick key = verdict_key(job, integrity)
+        if key == null or seen.has(key) {
+          continue
+        }
+        seen[key] = true
+        if kept_verdict(key) != null {
+          continue
+        }
+        stick ok = keep_verdict(key, {target: spec, label: spec, ecosystem: job.eco, risk: "none", installed: true, findings: [], outside: [], refused: [], trusted_by_you: false})
+        if ok {
+          kept += 1
+        }
+      }
+    }
+  }
+  if kept > 0 {
+    exhale "    kept ${kept} per-package verdict" + pick(kept == 1, "", "s") + " from this setup rehearsal: cigo rehearse reads them (#56)"
+  }
+}
+
+# Does every package the project's lockfiles name already have a kept
+# verdict? When yes, a setup rehearsal is not news: setup can skip the box.
+pull setup_packages_all_kept() {
+  roll any = false
+  for name in LOCKFILES {
+    for f in fs.glob(path.join(ROOT, "**", name)) {
+      if not fs.is_file(f) {
+        continue
+      }
+      for p in lock_packages(f) {
+        stick spec = rehearse_spec_of(p)
+        if spec == null {
+          continue
+        }
+        stick integrity = str(p.get("integrity", ""))
+        stick job = {eco: pick(p.eco == "PyPI", "pypi", pick(p.eco == "crates.io", "crates", "npm")), spec: spec, label: spec}
+        stick key = verdict_key(job, integrity)
+        if key == null {
+          snuff false
+        }
+        any = true
+        if kept_verdict(key) == null {
+          snuff false
+        }
+      }
+    }
+  }
+  snuff any
 }
 
 # `cigo rehearse --changed [--base=<rev>] [--list] [--max=N]`: every package

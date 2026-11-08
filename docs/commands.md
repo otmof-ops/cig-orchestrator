@@ -625,6 +625,12 @@ cigo rehearse npm:name[@version]       npm install, then require it once
 cigo rehearse pypi:name[==version]     pip install in a scratch venv, then import it
 cigo rehearse crates:name[@version]    a scratch program that links the crate, built and run
 cigo rehearse ./install.sh             a script you were told to run
+cigo rehearse ./pkg-1.0.0.tgz          a local npm tarball someone sent you, installed and required
+cigo rehearse ./pkg-1.0.0.whl          a local wheel, pip installed and imported
+cigo rehearse ./pkg-1.0.0.crate        a local .crate, extracted and built through cargo
+cigo rehearse ./some-package/          a folder with package.json, pyproject.toml/setup.py or Cargo.toml
+cigo rehearse git+https://host/repo    cloned into the scratch (never your tree), then rehearsed as a folder
+cigo rehearse git+https://host/repo#v1 a clone at that ref, rehearsed the same way
 cigo rehearse name[@version]           in the registry this project's toolchains use (two: it asks which)
               [--json] [--keep]        the full evidence; keep the layer to read (cig box list)
 cigo rehearse --changed [--base=<rev>] every package the lockfiles add or change since the base
@@ -635,6 +641,18 @@ cigo rehearse --changed [--base=<rev>] every package the lockfiles add or change
               [--against=<v | ./old.sh>] only what is new against that version, or that script
               [--fail-on=<level>]      the lowest verdict that fails (auto: high under CI, critical at a terminal)
 ```
+
+**Local inputs: a tarball, wheel, crate, folder or git+URL.** A `.tgz` or
+`.tar.gz` is installed as a local npm package; a `.whl` as a local wheel; a
+`.crate` is extracted and taken as a path dependency through cargo. A folder
+is rehearsed by its manifest: `package.json` as npm, `pyproject.toml` or
+`setup.py` as PyPI, `Cargo.toml` as crates.io. A `git+https://…` URL is
+cloned into `.cigo-rehearse-clone/` in the scratch (never into your tree)
+and rehearsed as a folder, and `git+https://…#ref` clones that ref. A
+local file's verdict is kept against its sha256; a folder's against the
+sha256 of its content (files sorted, hidden folders and common build
+output left out); a clone's against the commit at HEAD. The same bytes
+are never rehearsed twice.
 
 **What changed in this version.** `cigo rehearse npm:ua-parser-js@0.7.29
 --against=0.7.28` rehearses both (or uses their kept verdicts) and shows,
@@ -649,11 +667,20 @@ the new behaviour's risk, by `--fail-on` as ever.
 an npm or crates.io package at an exact version (a registry never serves
 other bytes under a published version), with the lockfile's hash when
 `--changed` knows it; a PyPI package only with that hash, since a release
-can gain files later; a script by its sha256. Asked again about the same
-bytes, cigo answers from the kept verdict without the box, and says when it
-was rehearsed. Kept verdicts are signed with the tin's key, so nothing a task
-runs can plant a clean one, and a new cigo version judges again. `--fresh`
-rehearses anyway.
+can gain files later; a script by its sha256; a local file by its sha256;
+a folder by the sha256 of its content; a clone by the commit at HEAD.
+Asked again about the same bytes, cigo answers from the kept verdict
+without the box, and says when it was rehearsed. Kept verdicts are signed
+with the tin's key, so nothing a task runs can plant a clean one, and a
+new cigo version judges again. `--fresh` rehearses anyway.
+
+**Setup shares kept verdicts.** When `cigo run setup` is rehearsed and
+comes back clean, every package the project's lockfiles name is kept under
+the same key `cigo rehearse` reads: npm and crates.io by version with the
+lockfile's integrity, PyPI by version with its hash. The next
+`cigo rehearse npm:name@1.2.3` answers from the kept verdict without the
+box, and the next setup rehearsal skips a package whose bytes have been
+judged clean already. The same key, both ways.
 
 **`--changed`** is the pull request's question: which packages does this
 change bring in? It compares the lockfiles with the base (`--base=<rev>`, or

@@ -5,6 +5,25 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## Unreleased
+
+- **Local inputs for `cigo rehearse`** (#56). A `.tgz`, `.tar.gz`, `.whl` or
+  `.crate` on disk is rehearsed the same way the registry form of its
+  ecosystem is: installed with the ecosystem's own tool against the local
+  path, used once (or not, with `--no-use`). A folder is rehearsed by its
+  manifest (`package.json` as npm, `pyproject.toml` or `setup.py` as PyPI,
+  `Cargo.toml` as crates.io). A `git+https://…` URL is cloned into the
+  scratch (never into your tree) and rehearsed as a folder, with
+  `git+https://…#ref` taking that ref. The verdict is kept against the
+  sha256 of the local file, the sha256 of a folder's content, or the
+  commit at HEAD for a clone.
+- **Setup shares kept verdicts** (#56). A clean rehearsal of a setup task
+  keeps a verdict for each package the project's lockfiles name, under the
+  same key `cigo rehearse` reads: npm and crates.io by version with the
+  lockfile's integrity, PyPI by version with its hash. The next
+  `cigo rehearse npm:name@1.2.3` of the same bytes answers from the kept
+  verdict without the box.
+
 ## 1.15.0 — 2026-11-08
 
 What run-url kept, and what an update adds.
