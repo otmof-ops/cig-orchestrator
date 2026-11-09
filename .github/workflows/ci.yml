@@ -90,8 +90,8 @@ jobs:
     name: native cigo (cigcompile#8)
     runs-on: ubuntu-latest
     env:
-      CIG_RUNTIME_VERSION: v1.16.1
-      CIGCOMPILE_VERSION: v0.1.2
+      CIG_RUNTIME_VERSION: v1.18.0
+      CIGCOMPILE_VERSION: v0.2.0
     steps:
       - uses: actions/checkout@v7
       - name: Let cig make its box
