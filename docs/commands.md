@@ -14,6 +14,7 @@ cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <progra
 cigo undo last
 cigo run-url <url> [--trust] [-- <args>]
 cigo agent [run -- <command> | log | undo --session=<id>|--agent=<name>|--since=2h [--yes]]
+cigo scrub show <id>
 cigo approve <id>
 cigo version
 cigo help
@@ -635,14 +636,54 @@ changed command is asked again. A record that does not verify is said
 (`E889`) and ignored. Approvals from `cigo approve` stay one-shot: the
 remembered store is for scopes wider than one run.
 
-What a command prints is passed on as it was, stdout and stderr each on its
-own stream. When the output holds text addressed to AI agents, or invisible
-Unicode (`E886`, `E887`), a warning comes first: it is data from the
-command, not instructions from the user. The shim's pass-through
-(`cigo guard exec`) and `cigo update`'s installer output are fenced the
-same way when they are read by an agent (an agent variable is set), so
-anything the real `npm install` or the release's `install.sh` printed that
-reads as instructions is marked before it is shown.
+What a command prints is scrubbed before it reaches the agent (#63 step 1):
+invisible Unicode (`E887`) is stripped, a chat-template shape is left in
+place but wrapped in `[cig: begin untrusted text (E886), id r-xxxxxxxx.o1]
+... [cig: end untrusted text]`, a line addressed to AI agents is replaced
+with `[cig: removed 1 passage addressed to AI agents (E886), id
+r-xxxxxxxx.o2]`, and a line that is also reaching for your credentials, an
+exfiltration host, a fetch-and-run or the guard's own state is withheld
+whole (`[cig: content withheld on this line (...), id r-xxxxxxxx.e1]`). Each
+marker names the run's id and its own place (`o` for stdout, `e` for
+stderr, then a count). A one-line notice goes in front of the output
+counting what was done, so the agent does not guess at missing text:
+`[cig: scrubbed this output - 1 passage redacted, 212 invisible characters
+removed (E886, E887). id r-xxxxxxxx. the rest is unchanged.]`. A plain `cigo
+run`, `cigo audit` or any other command that is not `cigo agent run` is not
+touched; the shim's pass-through (`cigo guard exec`) and `cigo update`'s
+installer output still use the warning-first fence when they are read by
+an agent (an agent variable is set), until later steps of #63 extend
+scrubbing there.
+
+**`cigo scrub show <id>`** prints what cigo removed from an agent's output
+under that id: the agent, the session, the command, the counts and each
+removed passage in order, with its mark. The record is sealed in the tin
+under the label `cigo-scrub` (`cig tin keep`; `cig tin give --label
+cigo-scrub --name <id>` is the same read) and is not left in the clear:
+cigo hands it to `cig tin keep` through a private file and removes that
+file as soon as the copy is kept. The box an agent's commands run in has no
+key, so nothing there can open a record. From an agent's session outside a
+box (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT` or `CIGO_AGENT` set) `cigo scrub
+show` is refused as well, which stops an agent that asks, not one that
+clears its environment. When the tin cannot keep a record (no key here, a
+cig older than 1.14.0), the warning says so and `cigo scrub show` has
+nothing to show for that id.
+
+**Writing scrubbed text back.** A file tool (Write, Edit, MultiEdit,
+NotebookEdit) whose text carries cigo's own scrub markers (the agent read a
+scrubbed copy and is writing it back) has each marker swapped for the
+passage it stood for, and each fence taken off, by the PreToolUse hook
+before the write lands: in the new text, and in the text an edit looks
+for, so the edit still finds its place. Each marker names its own passage,
+so a write that carries some of them, in any order, gets each back where
+it was; the agent's real edits are kept. A marker this machine has no
+record for (a page about cigo, cigo's own tests, another machine's output)
+is text like any other and is left as it is; cigo asks the tin only for
+its own runs, so a page full of markers costs nothing. A marker from one
+of this machine's runs with no passage to put back (the tin could not
+keep the record, no longer holds it, or the mark names no passage) is
+refused: nothing is written, so no file gets a marker where its own text
+was.
 
 ```
 cigo agent log [--agent=<name>] [--session=<id>] [--json]     what an agent ran, with verdicts and run ids

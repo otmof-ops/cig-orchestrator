@@ -5,6 +5,42 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## Unreleased
+
+- **Scrubbing what an agent reads** (#63 step 1). At level 4 every shell
+  command an agent runs goes through `cigo agent run`, and what it prints
+  is now scrubbed before the agent sees it: invisible Unicode and
+  look-alike letters are stripped (`E887`), a chat-template shape is
+  fenced in place so the agent can see what was faked (`E886`), a line
+  addressed to AI agents is redacted with a marker that names a short
+  local id, and a line that is also reaching for your credentials, an
+  exfiltration host, a fetch-and-run or the guard's own state is withheld
+  whole. A one-line notice in front of the output counts what was done
+  and names the id, so the agent does not guess at missing text. The
+  originals are sealed in the tin under the label `cigo-scrub` (`cig tin
+  keep`), not left in the clear: the box an agent's commands run in has
+  no key, so nothing there can open them. `cigo scrub show <id>`
+  reads one at your terminal; from an agent's session it is refused as
+  well, which stops an agent that asks, not one that clears its
+  environment where there is no box. The PreToolUse hook (Claude Code's
+  Write, Edit, MultiEdit and NotebookEdit) puts the original passages
+  back in place of the markers before the write lands, in the new text
+  and in the text an edit looks for, so an agent that read a scrubbed
+  copy and writes it back does not overwrite a real file with cigo's
+  mark; the agent's real edits are kept. A marker from one of this
+  machine's runs with no passage to put back (the tin could not keep it,
+  or no longer holds it) is refused, and nothing is written; a marker
+  from anywhere else is left as text. A plain `cigo run` or `cigo
+  audit` is not touched, and the shim's pass-through and `cigo update`'s
+  installer output still use the warning-first fence until later steps
+  of #63 extend scrubbing there. The codes stay `E886` and `E887` that
+  the static read already uses.
+
+- **`cigo trust show` says when an approval's signature is gone.** It
+  stopped with an error (`E600`) when the `.mac` beside an approval was
+  missing; it now says there is no signature, so the approval is not
+  used, and how to approve it again.
+
 ## 1.16.0 — 2026-11-08
 
 The guard reads more and asks better: ransomware's shape, typosquats,
