@@ -678,9 +678,12 @@ for, so the edit still finds its place. Each marker names its own passage,
 so a write that carries some of them, in any order, gets each back where
 it was; the agent's real edits are kept. A marker this machine has no
 record for (a page about cigo, cigo's own tests, another machine's output)
-is text like any other and is left as it is. A marker from a run whose
-record the tin could not keep is refused: nothing is written, so no file
-gets a marker where its own text was.
+is text like any other and is left as it is; cigo asks the tin only for
+its own runs, so a page full of markers costs nothing. A marker from one
+of this machine's runs with no passage to put back (the tin could not
+keep the record, no longer holds it, or the mark names no passage) is
+refused: nothing is written, so no file gets a marker where its own text
+was.
 
 ```
 cigo agent log [--agent=<name>] [--session=<id>] [--json]     what an agent ran, with verdicts and run ids

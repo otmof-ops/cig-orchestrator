@@ -27,8 +27,10 @@ repository root lists versions it must not pick.
   back in place of the markers before the write lands, in the new text
   and in the text an edit looks for, so an agent that read a scrubbed
   copy and writes it back does not overwrite a real file with cigo's
-  mark; the agent's real edits are kept. A marker whose original is not
-  kept here is refused: nothing is written. A plain `cigo run` or `cigo
+  mark; the agent's real edits are kept. A marker from one of this
+  machine's runs with no passage to put back (the tin could not keep it,
+  or no longer holds it) is refused, and nothing is written; a marker
+  from anywhere else is left as text. A plain `cigo run` or `cigo
   audit` is not touched, and the shim's pass-through and `cigo update`'s
   installer output still use the warning-first fence until later steps
   of #63 extend scrubbing there. The codes stay `E886` and `E887` that
