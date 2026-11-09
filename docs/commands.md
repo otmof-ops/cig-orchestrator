@@ -425,6 +425,10 @@ cigo guard off | on           unguarded until you turn it back on
 cigo guard allow <program>    that program is not read any more (its shim goes)
 cigo guard allow <file|sha256> those bytes are not rehearsed again (run-url, the hook): a script you have read
 cigo guard log [--all|--json] what was guarded, and what came of it
+cigo guard stats [--since=30d] [--json]
+                              the log counted: prompts per day, per kind, per code; for asks and gates,
+                              approved yes / declined / left; and how often a notice was followed by a
+                              change of setting
 cigo guard tier [<risk> [<c>]] the tier matrix (risk × confidence → silent/notice/ask/gate), the whole table, one row or one cell
 cigo guard uninstall          every shim and startup-file block it wrote, removed; --yes does it
 cigo undo last                the newest guarded call, taken back (cig unburn of its run)
@@ -540,6 +544,52 @@ skips its shim, and a version manager that puts its own folder first on
 `cigo guard` and `cigo doctor` say whether the shims come first in the
 shell you are in. Level 2's shims are `sh` scripts, so on Windows they come
 later; `cigo run` stays guarded there.
+
+### `cigo guard stats`: the guard measures its own noise
+
+A prompt that is always answered the same way is noise. `cigo guard stats`
+reads the guard log and counts, over a window (`--since=30d` by default):
+
+- prompts per day (by the UTC date), split by tier (ask, gate, notice,
+  refused);
+- events per `kind` (`guarded`, `run-url`, `agent`, `approve`,
+  `blacklist-light-it`, `config`...);
+- events per code (`E580`, `E870`, `E874`, `E887`...), from each event's
+  findings;
+- for asks and gates, how often each was approved (yes), declined (no) or
+  left (no answer, held or still waiting), and how many the log holds no
+  answer for (`unrecorded`: say, a high finding that ran because
+  `--accept-risk` answered it on the command line);
+- how often a notice was followed by a change of a guard-related setting
+  (`security`, `rehearse`, `guard_scope`, `blacklist_unboxed`,
+  `agent_approval`, the preset, ...).
+
+`--json` prints the same numbers for a script. An empty window says so in
+one line and exits 0.
+
+```
+cigo guard stats --since=7d
+guard: 22 events in the last 7 days (6 ask, 3 gate, 4 notice, 2 refused)
+
+per day (UTC)
+  2026-11-02    2 ask    0 gate    1 notice    0 refused
+  2026-11-05    1 ask    1 gate    2 notice    1 refused
+  ...
+
+asks     3 yes  1 no  2 left
+gates    2 yes  1 no  0 left
+
+1 of 1 change of a guard setting followed a notice
+```
+
+The log adds two small records to make the count honest: an event that
+ended a prompt carries a `decision` field (`yes` / `no` / `left`), and a
+change to a guard setting lands as a `config` event in the log. Lines
+written by an older cigo without these fields have their decision read
+from the outcome, so nothing in the old log is guessed at: it either
+counts cleanly or its answer is counted as `unrecorded`. The tier comes
+from the tier matrix: a run that went ahead with no prompt recorded is a
+notice at medium, an ask at high and a gate at critical.
 
 ### Level 4: what your AI agents run
 

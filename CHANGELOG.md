@@ -7,6 +7,24 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **`cigo guard stats`** (#66 step 7). The guard log, counted, so cigo
+  can say whether it is asking too much. A new subcommand reads every
+  event in a window (`--since=30d` by default) and prints prompts per day
+  (asks, gates, notices and refusals counted apart), events per `kind`
+  (`guarded`, `run-url`, `agent`, `approve`, `blacklist-light-it`,
+  `config`...), events per `E`-code from the findings, and for asks and
+  gates how often each was approved (yes), declined (no) or left (no
+  answer, held or still waiting). It also says how often a notice was
+  followed by a change of a guard-related setting (`security`,
+  `rehearse`, `guard_scope`, `blacklist_unboxed`, `agent_approval`, the
+  preset, and the other machine-scoped guard knobs). The log gains two
+  small records that make the count honest: an event that ended a prompt
+  carries a `decision` field (`yes` / `no` / `left`), and a change to a
+  guard setting lands in the log as a `config` event. Old lines without
+  these fields have their decision read from the outcome, so nothing in
+  the old log is guessed at. `--json` carries the same numbers. An empty
+  window says so in one line, exit 0.
+
 - **Scrubbing what an agent reads** (#63 step 1). At level 4 every shell
   command an agent runs goes through `cigo agent run`, and what it prints
   is now scrubbed before the agent sees it: invisible Unicode and

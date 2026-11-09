@@ -3937,7 +3937,7 @@ pull do_help() {
   exhale "                              your entries and allows as one signed file; the one-off runs in force"
   exhale "  cigo quarantine [list | show <sha256> | clear [--all]]   what run-url downloaded, kept to read again"
   exhale "                              your own blacklist: packages, files, domains, ranges and URLs the guard refuses"
-  exhale "  cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes]]"
+  exhale "  cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | stats [--since=30d] | uninstall [--yes]]"
   exhale "                              how much of this machine the guard covers: level 2 puts every package"
   exhale "                              manager behind it (npm install, pip install, cargo build, npx...) anywhere"
   exhale "  cigo undo last              undo the newest guarded call (cig unburn)"
@@ -9532,7 +9532,7 @@ pull blacklist_light_it(name, findings) {
   if not attended() {
     # Agents and CI never approve a blacklisted run.
     log.error("E895 agents and CI can never approve a blacklisted run (" + crits.first().text + "); nothing ran")
-    guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: unattended"})
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: unattended", decision: "no"})
     snuff "refused"
   }
   stick untrusted = guard_flag("--run-untrusted")
@@ -9544,7 +9544,7 @@ pull blacklist_light_it(name, findings) {
     }
     exhale "  don't light it. if you are sure, this is the next step:"
     exhale "    cigo run ${name} --run-untrusted=${name} --light-it"
-    guard_note({kind: "blacklist-light-it", thing: name, outcome: "warning one (${crits.len()} entr" + pick(crits.len() == 1, "y", "ies") + ")"})
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "warning one (${crits.len()} entr" + pick(crits.len() == 1, "y", "ies") + ")", decision: "left"})
     snuff "refused"
   }
   # Warning two: what it could cost. --light-it answers the typed phrase.
@@ -9553,34 +9553,34 @@ pull blacklist_light_it(name, findings) {
     exhale "  if you go on, cigo will note the run in the smoke log and ask for your OS password."
     exhale "  type `light it` to go on; the command line is:"
     exhale "    cigo run ${name} --run-untrusted=${name} --light-it"
-    guard_note({kind: "blacklist-light-it", thing: name, outcome: "warning two (${crits.len()} entr" + pick(crits.len() == 1, "y", "ies") + ")"})
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "warning two (${crits.len()} entr" + pick(crits.len() == 1, "y", "ies") + ")", decision: "left"})
     snuff "refused"
   }
   # OS authentication: the first time.
   if not os_auth("cigo: run a blacklisted task (${name})") {
     log.error("not approved: the system's password prompt was cancelled or failed; `${name}` did not run")
-    guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: OS authentication"})
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: OS authentication", decision: "no"})
     snuff "refused"
   }
   stick mode = config().blacklist_unboxed
   stick want_unboxed = flags.contains("--no-box")
   if mode == "refuse" and want_unboxed {
     log.error("--no-box takes blacklist_unboxed = ask (default: refuse); `${name}` did not run")
-    guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: blacklist_unboxed = refuse"})
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: blacklist_unboxed = refuse", decision: "no"})
     snuff "refused"
   }
   if mode == "ask" and want_unboxed {
     # A second OS authentication for the no-box path.
     if not os_auth("cigo: run a blacklisted task outside the box (${name})") {
       log.error("not approved: the second system's password prompt was cancelled or failed; `${name}` did not run")
-      guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: second OS authentication"})
+      guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: second OS authentication", decision: "no"})
       snuff "refused"
     }
     stick ms = span_ms(config().blacklist_exception_ttl) ?? 86400000
     stick until = time.format_ms(time.now_ms() + ms, "%Y-%m-%dT%H:%M:%S")
     write_exceptions([{task: name, by: env.get("USER", env.get("USERNAME", "someone")), at: time.now_iso(), until: until, unboxed: true}] + blacklist_exceptions())
     log.warn("E583 no box. `${name}` is running loose on your machine because you said so twice.")
-    guard_note({kind: "blacklist-light-it", thing: name, outcome: "approved: no box (until ${until})"})
+    guard_note({kind: "blacklist-light-it", thing: name, outcome: "approved: no box (until ${until})", decision: "yes"})
     snuff "go-unboxed"
   }
   # The box path. CigScript#106 is the box; until it lands, boxed = refused
@@ -9589,7 +9589,7 @@ pull blacklist_light_it(name, findings) {
   exhale "  set blacklist_unboxed = ask and add --no-box to run outside the box:"
   exhale "    cigo config blacklist_unboxed ask"
   exhale "    cigo run ${name} --run-untrusted=${name} --light-it --no-box"
-  guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: the box is not built yet"})
+  guard_note({kind: "blacklist-light-it", thing: name, outcome: "refused: the box is not built yet", decision: "no"})
   snuff "refused"
 }
 
@@ -12187,8 +12187,24 @@ pull do_config() {
   write_setting(key, value)
 }
 
-# Set (or unset, with null) one key in the user's config file.
+# The settings cigo guard stats watches for a "notice was followed by a
+# change of setting" link: the keys that tighten or loosen what the guard
+# does, or how it answers a prompt.
+stick GUARD_SETTINGS = ["preset", "guard_scope", "guard_commands", "guard_shells", "guard_agents", "guard_pause_max", "security", "rehearse", "rehearse_fail_on", "osv", "registry_meta", "metadata_young_days", "blacklist_unboxed", "blacklist_exception_ttl", "agent_approval"]
+
+# Set (or unset, with null) one key in the user's config file. A change to
+# a guard-related setting is logged, so cigo guard stats can say how often
+# a notice was followed by a change of setting.
 pull write_setting(key, value) {
+  roll was = ""
+  if fs.is_file(CONFIG_FILE) {
+    for line in fs.read_text(CONFIG_FILE).lines() {
+      stick c = text.captures(line, '^\s*' + key + '\s*=\s*(.*)$')
+      if c != null {
+        was = str(c.get(1, "")).trim()
+      }
+    }
+  }
   roll kept = []
   if fs.is_file(CONFIG_FILE) {
     kept = fs.read_text(CONFIG_FILE).lines().filter(pack(l) => not text.matches(l, '^\s*' + key + '\s*='))
@@ -12200,6 +12216,9 @@ pull write_setting(key, value) {
     fail("could not write ${CONFIG_FILE}")
   }
   log.info(pick(value == null, "unset ${key}", "${key} = ${value}") + " in ${tilde(CONFIG_FILE)}")
+  if GUARD_SETTINGS.contains(key) and was != str(value ?? "") {
+    guard_note({kind: "config", thing: key, outcome: pick(value == null, "unset (was ${was})", "set to ${value}" + pick(was == "", "", " (was ${was})"))})
+  }
 }
 
 # ----- version and update: the same release discipline as cig ------------------------
@@ -13470,6 +13489,13 @@ pull do_guard() {
   } else if sub == "log" {
     expect_flags(["--json", "--all"])
     do_guard_log()
+  } else if sub == "stats" {
+    # The guard log, counted: prompts per day, per kind and per code; for
+    # asks and gates, how often each was approved, declined or left; and
+    # how often a notice was followed by a change of setting. The default
+    # window is 30 days.
+    expect_flags(["--json", "--since"])
+    do_guard_stats()
   } else if sub == "uninstall" {
     expect_flags(["--yes"])
     do_guard_uninstall()
@@ -13491,7 +13517,7 @@ pull do_guard() {
     expect_flags(["--json"])
     do_guard_tier(targets.get(1, ""), targets.get(2, ""))
   } else {
-    fail("cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes] | tier [<risk> [<confidence>]]]")
+    fail("cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | stats [--since=30d] | uninstall [--yes] | tier [<risk> [<confidence>]]]")
   }
 }
 
@@ -13737,6 +13763,246 @@ pull do_guard_log() {
   }
   for ev in evs {
     exhale event_line(ev)
+  }
+}
+
+# ----- cigo guard stats (#66 step 7): measure cigo's own noise --------------------
+#
+# The guard log counted: prompts per day, per kind, per code; for asks and
+# gates, how often each was approved, declined or left; and how often a
+# notice was followed by a change of setting. Events that do not carry the
+# new `tier`/`decision` fields are read from their outcome and risk, so
+# nothing written by an older cigo is guessed at.
+
+# The tier an event lands in: silent, notice, ask, gate, refuse, or
+# "unknown" for an event that does not look like any of them. A `decision`
+# recorded by a newer cigo settles ask and gate at once; older lines read
+# their tier from the outcome and the risk.
+pull tier_of_event(ev) {
+  stick kind = str(ev.get("kind", ""))
+  stick outcome = str(ev.get("outcome", ""))
+  stick risk = str(ev.get("risk", "none"))
+  stick dec = str(ev.get("decision", ""))
+  if dec != "" {
+    if kind == "approve" or kind == "blacklist-light-it" {
+      snuff "gate"
+    }
+    snuff "ask"
+  }
+  if kind == "approve" or kind == "blacklist-light-it" {
+    snuff "gate"
+  }
+  if kind == "agent" or kind == "guarded" or kind == "run-url" {
+    if outcome.contains("waiting for a person") or outcome == "held" or outcome.starts_with("held ") {
+      snuff "ask"
+    }
+    if outcome.starts_with("refused") {
+      snuff "refuse"
+    }
+    if outcome.contains("approved by a person") or outcome.contains("remembered") {
+      snuff "ask"
+    }
+    # A run that went ahead with no prompt recorded. The tier matrix says
+    # what reached the user: medium is a notice, low and none are silent.
+    # High is an ask and critical a gate, so one that ran was answered
+    # somewhere the log does not say (`--accept-risk` on the command
+    # line): counted as that tier, its answer unrecorded.
+    if risk == "medium" {
+      snuff "notice"
+    }
+    if risk == "high" {
+      snuff "ask"
+    }
+    if risk == "critical" {
+      snuff "gate"
+    }
+    snuff "silent"
+  }
+  snuff "unknown"
+}
+
+# The decision a prompt event carries: "yes", "no", "left" or "" for no
+# decision. Reads the new `decision` field first, then infers from the
+# outcome.
+pull decision_of_event(ev) {
+  stick explicit = str(ev.get("decision", ""))
+  if explicit != "" {
+    snuff explicit
+  }
+  stick kind = str(ev.get("kind", ""))
+  stick outcome = str(ev.get("outcome", ""))
+  if kind == "approve" {
+    if outcome.starts_with("approved") {
+      snuff "yes"
+    }
+    snuff "no"
+  }
+  if kind == "blacklist-light-it" {
+    if outcome.starts_with("approved") {
+      snuff "yes"
+    }
+    if outcome.starts_with("refused") {
+      snuff "no"
+    }
+    snuff "left"
+  }
+  if outcome.contains("waiting for a person") or outcome == "held" {
+    snuff "left"
+  }
+  if outcome.contains("approved by a person") or outcome.contains("remembered") {
+    snuff "yes"
+  }
+  if outcome.starts_with("refused") and (kind == "agent" or kind == "guarded" or kind == "run-url") {
+    # A flat refuse (not from a prompt) reads as "refuse" tier, not "ask";
+    # tier_of_event sorts that out. Here it is left blank.
+    snuff ""
+  }
+  snuff ""
+}
+
+# The E-code the event's finding list names (one event can carry a few);
+# nothing else writes a `code` field today.
+pull codes_of_event(ev) {
+  roll out = []
+  for f in as_list(ev.get("findings", [])) {
+    stick c = str(f.get("code", ""))
+    if c != "" and not out.contains(c) {
+      out.push(c)
+    }
+  }
+  snuff out
+}
+
+# "30d", "2h", "5m" for a span in milliseconds. The default window reads
+# the same back.
+pull span_text(ms) {
+  if ms >= 86400000 and ms % 86400000 == 0 {
+    stick days = int(ms / 86400000)
+    snuff "${days} day" + pick(days == 1, "", "s")
+  }
+  if ms >= 3600000 and ms % 3600000 == 0 {
+    stick hours = int(ms / 3600000)
+    snuff "${hours} hour" + pick(hours == 1, "", "s")
+  }
+  if ms >= 60000 {
+    stick minutes = int(ms / 60000)
+    snuff "${minutes} minute" + pick(minutes == 1, "", "s")
+  }
+  snuff "${int(ms / 1000)} second" + pick(ms == 1000, "", "s")
+}
+
+pull do_guard_stats() {
+  stick since = guard_flag("--since")
+  roll ms = 30 * 86400000
+  if since != null {
+    stick given = span_ms(since)
+    if given == null {
+      fail("cigo guard stats --since=${since}: a span, 30m, 2h, 30d")
+    }
+    ms = given
+  }
+  stick cut = time.format_ms(time.now_ms() - ms, "%Y-%m-%dT%H:%M:%S")
+  stick evs = guard_events(0).filter(pack(e) => str(e.get("at", "")) >= cut)
+  # Per-day, per-kind, per-code, per-decision. One pass.
+  roll days = {}
+  roll kinds = {}
+  roll codes = {}
+  roll ask = {yes: 0, no: 0, left: 0, unrecorded: 0}
+  roll gate = {yes: 0, no: 0, left: 0, unrecorded: 0}
+  roll totals = {ask: 0, gate: 0, notice: 0, refuse: 0, silent: 0}
+  roll config_changes = 0
+  roll notice_before = false
+  roll notice_followed = 0
+  for e in evs {
+    stick day = str(e.get("at", "")).slice(0, 10)
+    stick kind = str(e.get("kind", ""))
+    stick tier = tier_of_event(e)
+    stick dec = decision_of_event(e)
+    kinds[kind] = kinds.get(kind, 0) + 1
+    if totals.has(tier) {
+      totals[tier] = totals.get(tier, 0) + 1
+    }
+    if ["ask", "gate", "notice", "refuse"].contains(tier) {
+      roll row = days.get(day, {ask: 0, gate: 0, notice: 0, refuse: 0})
+      row[tier] = row.get(tier, 0) + 1
+      days[day] = row
+    }
+    # An ask or a gate whose answer the log does not hold is counted as
+    # unrecorded, never guessed.
+    stick answer = pick(dec == "", "unrecorded", dec)
+    if tier == "ask" and ask.has(answer) {
+      ask[answer] = ask.get(answer, 0) + 1
+    } else if tier == "gate" and gate.has(answer) {
+      gate[answer] = gate.get(answer, 0) + 1
+    }
+    for c in codes_of_event(e) {
+      codes[c] = codes.get(c, 0) + 1
+    }
+    if kind == "config" {
+      config_changes += 1
+      if notice_before {
+        notice_followed += 1
+        notice_before = false
+      }
+    } else if tier == "notice" {
+      notice_before = true
+    }
+  }
+  if flags.contains("--json") {
+    exhale json.stringify({
+      since: cut,
+      window: span_text(ms),
+      total: evs.len(),
+      tiers: totals,
+      days: days,
+      kinds: kinds,
+      codes: codes,
+      ask: ask,
+      gate: gate,
+      config_changes: config_changes,
+      notice_followed_by_change: notice_followed,
+    }, 2)
+    snuff
+  }
+  if evs.is_empty() {
+    exhale "nothing guarded in the last " + span_text(ms)
+    snuff
+  }
+  exhale "guard: ${evs.len()} event" + pick(evs.len() == 1, "", "s") + " in the last " + span_text(ms) + " (${totals.get("ask", 0)} ask, ${totals.get("gate", 0)} gate, ${totals.get("notice", 0)} notice, ${totals.get("refuse", 0)} refused)"
+  stick day_keys = days.keys().sort()
+  if not day_keys.is_empty() {
+    exhale ""
+    exhale "per day (UTC)"
+    for d in day_keys {
+      stick row = days[d]
+      exhale "  ${d}  " + str(row.get("ask", 0)).pad_left(3) + " ask  " + str(row.get("gate", 0)).pad_left(3) + " gate  " + str(row.get("notice", 0)).pad_left(3) + " notice  " + str(row.get("refuse", 0)).pad_left(3) + " refused"
+    }
+  }
+  stick kind_keys = kinds.keys().sort()
+  if not kind_keys.is_empty() {
+    exhale ""
+    exhale "per kind"
+    stick kw = kind_keys.map(pack(k) => k.len()).max()
+    for k in kind_keys {
+      exhale "  " + k.pad_right(kw) + "  " + str(kinds[k]).pad_left(4)
+    }
+  }
+  stick code_keys = codes.keys().sort()
+  if not code_keys.is_empty() {
+    exhale ""
+    exhale "per code"
+    for c in code_keys {
+      exhale "  " + c.pad_right(8) + "  " + str(codes[c]).pad_left(4)
+    }
+  }
+  exhale ""
+  exhale "asks     ${ask.get("yes", 0)} yes  ${ask.get("no", 0)} no  ${ask.get("left", 0)} left" + pick(ask.get("unrecorded", 0) > 0, "  ${ask.get("unrecorded", 0)} unrecorded", "")
+  exhale "gates    ${gate.get("yes", 0)} yes  ${gate.get("no", 0)} no  ${gate.get("left", 0)} left" + pick(gate.get("unrecorded", 0) > 0, "  ${gate.get("unrecorded", 0)} unrecorded", "")
+  exhale ""
+  if config_changes == 0 {
+    exhale "no change of a guard setting in the window"
+  } else {
+    exhale "${notice_followed} of ${config_changes} change" + pick(config_changes == 1, "", "s") + " of a guard setting followed a notice"
   }
 }
 
@@ -14990,7 +15256,7 @@ pull do_agent_run() {
       stick f = approval_files(id)
       write_outside(f.pending, json.stringify({id: id, agent: agent, session: session, command: line, cwd: cwd, risk: risk, findings: findings, at: time.now_iso()}, 2) + "\n")
       guard_say_verdict(shown, {risk: risk, findings: findings})
-      guard_note(base.merge({outcome: "waiting for a person", thing: id}))
+      guard_note(base.merge({outcome: "waiting for a person", thing: id, decision: "left"}))
       log.error("E894 your agent's asking for the good stuff. a human has to say yes.")
       log.error("  ${agent} wants to run: ${shown}   (${risk}: " + top_finding(findings).says + ")")
       log.error("  your user approves it on their own terminal with: cigo approve ${id}   (or says no). Nothing ran; ask them, then run the same command again.")
@@ -15246,7 +15512,7 @@ pull agent_run_contained(line, shown, cwd, id, base, risk0, findings0, outcome0,
     stick f = approval_files(id)
     write_outside(f.pending, json.stringify({id: id, agent: base.agent, session: base.session, command: line, cwd: cwd, risk: risk, findings: findings, hosts: hosts_refused, at: time.now_iso()}, 2) + "\n")
     guard_say_verdict(shown, {risk: risk, findings: findings})
-    guard_note(base.merge({risk: risk, outcome: "waiting for a person", thing: id}))
+    guard_note(base.merge({risk: risk, outcome: "waiting for a person", thing: id, decision: "left"}))
     log.error("E894 your agent's asking for the good stuff. a human has to say yes.")
     log.error("  ${base.agent} ran: ${shown}   in the box, and nothing of it was applied: " + pick(wait.is_empty(), "it reached for " + hosts_refused.join(", ") + ", which the box does not open", "it wrote " + wait.map(pack(x) => x.path).join(", ")))
     log.error("  your user approves it on their own terminal with: cigo approve ${id}   (or says no); then run the same command again.")
@@ -15316,7 +15582,7 @@ pull do_approve() {
     fail("cigo approve <id>: the id an agent's E894 message names")
   }
   if in_agent() {
-    guard_note({kind: "approve", thing: id, outcome: "refused: asked from an agent's session"})
+    guard_note({kind: "approve", thing: id, outcome: "refused: asked from an agent's session", decision: "no"})
     log.error("E895 nice try. agents can't sign their own permission slip.")
     log.error("  an approval was asked for from inside an AI agent's session (" + AGENT_VARS.filter(pack(v) => env.get(v, "") != "").join(", ") + " set); refused. Your user approves from their own terminal.")
     exit(2)
@@ -15337,7 +15603,7 @@ pull do_approve() {
   }
   if how == "os-auth" {
     if not os_auth("cigo: approve the command your AI agent wants to run") {
-      guard_note({kind: "approve", thing: id, outcome: "not approved: the system's prompt was refused"})
+      guard_note({kind: "approve", thing: id, outcome: "not approved: the system's prompt was refused", decision: "no"})
       fail("not approved: the system's password prompt was cancelled or failed")
     }
   } else if not person_here() {
@@ -15353,7 +15619,7 @@ pull do_approve() {
   }
   write_outside(f.mac, m.out.trim() + "\n")
   remove_outside(f.pending)
-  guard_note({kind: "approve", thing: id, outcome: "approved (${how})"})
+  guard_note({kind: "approve", thing: id, outcome: "approved (${how})", decision: "yes"})
   exhale "approved once: ${p.agent} can run it now"
 }
 
@@ -15736,7 +16002,7 @@ pull hook_file_tool(call) {
     }
     stick f = approval_files(id)
     write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: shown, cwd: cwd, risk: pick(risk == "none", "high", risk), findings: findings, at: time.now_iso()}, 2) + "\n")
-    guard_note(base.merge({risk: "high", outcome: "waiting for a person", thing: id}))
+    guard_note(base.merge({risk: "high", outcome: "waiting for a person", thing: id, decision: "left"}))
     hook_deny("E894 a human has to say yes: " + why + ". Nothing was written. Ask your user to approve it on their own terminal with `cigo approve " + id + "`, then make the same change again.")
     snuff
   }

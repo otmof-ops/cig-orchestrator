@@ -5422,6 +5422,177 @@ test("tier matrix: every risk × confidence cell reads back as one of silent, no
   assert(str(full.low.high) == "silent", "low × high: " + str(full.low.high))
 })
 
+# A log event, as cigo writes it, so a stats test can seed one without
+# running a guarded command that would need the box.
+pull guard_seed_log(dir, events) {
+  stick log_dir = path.join(guard_home(dir), ".cig-orchestrator", "guard")
+  stick log_file = path.join(log_dir, "log.jsonl")
+  roll lines = []
+  for e in events {
+    lines.push(json.stringify(e))
+  }
+  burn {
+    fs.mkdir(log_dir)
+    fs.write_text(log_file, lines.join("\n") + "\n")
+  }
+}
+
+test("guard stats: empty log says so and exits 0; --json carries the same", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick r = guard_cmd(dir, ["guard", "stats"], {})
+  exits(r, 0)
+  says(r.out, "nothing guarded in the last 30 days")
+  stick j = guard_cmd(dir, ["guard", "stats", "--json"], {})
+  exits(j, 0)
+  stick m = json.parse(j.out)
+  assert(m.total == 0, "total=" + str(m.total))
+  assert(m.window == "30 days", "window=" + str(m.get("window", "")))
+  assert(m.notice_followed_by_change == 0, j.out)
+})
+
+test("guard stats: a seeded log is counted per day, per kind, per code; asks and gates split by yes/no/left", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  # Today and yesterday, in the format cigo writes: a day and a tenth of a
+  # second. The --since window (30 days) covers both.
+  stick today = time.format_ms(time.now_ms(), "%Y-%m-%d")
+  stick yesterday = time.format_ms(time.now_ms() - 86400000, "%Y-%m-%d")
+  guard_seed_log(dir, [
+    # yesterday: an agent command waits, a person approves it, the command runs.
+    {at: yesterday + "T10:00:00", by: "test", kind: "agent", agent: "claude", session: "s1", command: "npm install evil", cwd: "~/p", risk: "high", outcome: "waiting for a person", thing: "abc123", decision: "left"},
+    {at: yesterday + "T10:01:00", by: "test", kind: "approve", thing: "abc123", outcome: "approved (os-auth)", decision: "yes"},
+    {at: yesterday + "T10:02:00", by: "test", kind: "agent", agent: "claude", session: "s1", command: "npm install evil", cwd: "~/p", risk: "high", outcome: "ran, approved by a person", run: "r1", exit: 0},
+    # yesterday: a silent run, a refused run on the blacklist (E580), a medium-risk run (notice: E880).
+    {at: yesterday + "T11:00:00", by: "test", kind: "guarded", command: "npm install", cwd: "~/p", risk: "none", outcome: "ran", run: "r2", exit: 0},
+    {at: yesterday + "T12:00:00", by: "test", kind: "guarded", command: "npm install bad", cwd: "~/p", risk: "critical", outcome: "refused", findings: [{code: "E580", cat: "blacklist", w: 1.0}]},
+    {at: yesterday + "T13:00:00", by: "test", kind: "agent", agent: "claude", session: "s2", command: "ls", cwd: "~/p", risk: "medium", outcome: "ran", run: "r3", exit: 0, findings: [{code: "E880", cat: "footprint", w: 0.5}]},
+    # today: a declined approval (gate = no), a flat refuse, an ask left.
+    {at: today + "T10:00:00", by: "test", kind: "agent", agent: "claude", session: "s3", command: "curl bad", cwd: "~/p", risk: "high", outcome: "refused", findings: [{code: "E874", cat: "fetch-and-run", w: 0.8}]},
+    {at: today + "T11:00:00", by: "test", kind: "guarded", command: "pip install", cwd: "~/p", risk: "high", outcome: "held"},
+    {at: today + "T12:00:00", by: "test", kind: "approve", thing: "zzz", outcome: "not approved: the system's prompt was refused", decision: "no"},
+  ])
+  stick r = guard_cmd(dir, ["guard", "stats"], {})
+  exits(r, 0)
+  says(r.out, "9 events in the last 30 days")
+  says(r.out, "3 ask")
+  says(r.out, "2 gate")
+  says(r.out, "1 notice")
+  says(r.out, "2 refused")
+  says(r.out, "per day")
+  says(r.out, yesterday)
+  says(r.out, today)
+  says(r.out, "per kind")
+  says(r.out, "agent")
+  says(r.out, "approve")
+  says(r.out, "guarded")
+  says(r.out, "per code")
+  says(r.out, "E580")
+  says(r.out, "E874")
+  says(r.out, "E880")
+  says(r.out, "asks     1 yes  0 no  2 left")
+  says(r.out, "gates    1 yes  1 no  0 left")
+  stick j = guard_cmd(dir, ["guard", "stats", "--json"], {})
+  exits(j, 0)
+  stick m = json.parse(j.out)
+  assert(m.total == 9, j.out)
+  assert(m.tiers.ask == 3 and m.tiers.gate == 2 and m.tiers.notice == 1 and m.tiers.refuse == 2, j.out)
+  assert(m.ask.yes == 1 and m.ask.no == 0 and m.ask.left == 2, "asks: " + json.stringify(m.ask))
+  assert(m.gate.yes == 1 and m.gate.no == 1 and m.gate.left == 0, "gates: " + json.stringify(m.gate))
+  assert(m.kinds.agent == 4 and m.kinds.approve == 2 and m.kinds.guarded == 3, "kinds: " + json.stringify(m.kinds))
+  assert(m.codes.E580 == 1 and m.codes.E874 == 1 and m.codes.E880 == 1, "codes: " + json.stringify(m.codes))
+})
+
+test("guard stats: --since narrows the window; a span of a minute leaves yesterday's entries out", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick yesterday = time.format_ms(time.now_ms() - 86400000, "%Y-%m-%d")
+  guard_seed_log(dir, [
+    {at: yesterday + "T10:00:00", by: "test", kind: "guarded", command: "npm install", cwd: "~/p", risk: "critical", outcome: "refused", findings: [{code: "E580", cat: "blacklist", w: 1.0}]},
+  ])
+  stick wide = guard_cmd(dir, ["guard", "stats", "--since=30d"], {})
+  exits(wide, 0)
+  says(wide.out, "1 event in the last 30 days")
+  stick narrow = guard_cmd(dir, ["guard", "stats", "--since=1m"], {})
+  exits(narrow, 0)
+  says(narrow.out, "nothing guarded in the last 1 minute")
+  stick bad = guard_cmd(dir, ["guard", "stats", "--since=forever"], {})
+  exits(bad, 2)
+  says(bad.err, "a span")
+})
+
+test("guard stats: a notice followed by a change of a guard setting is counted once; an unrelated change is not", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick today = time.format_ms(time.now_ms(), "%Y-%m-%d")
+  guard_seed_log(dir, [
+    # Notice -> config change: counts.
+    {at: today + "T10:00:00", by: "test", kind: "agent", agent: "claude", session: "s1", command: "ls", cwd: "~/p", risk: "medium", outcome: "ran", run: "r1", exit: 0, findings: [{code: "E880", cat: "footprint", w: 0.5}]},
+    {at: today + "T10:05:00", by: "test", kind: "config", thing: "security", outcome: "set to strict (was standard)"},
+    # Config change with no notice before it: not counted.
+    {at: today + "T11:00:00", by: "test", kind: "config", thing: "rehearse", outcome: "set to always (was auto)"},
+  ])
+  stick j = guard_cmd(dir, ["guard", "stats", "--json"], {})
+  exits(j, 0)
+  stick m = json.parse(j.out)
+  assert(m.config_changes == 2, "config_changes=" + str(m.config_changes))
+  assert(m.notice_followed_by_change == 1, "notice_followed_by_change=" + str(m.notice_followed_by_change))
+  stick r = guard_cmd(dir, ["guard", "stats"], {})
+  says(r.out, "1 of 2 changes of a guard setting followed a notice")
+})
+
+test("guard stats: a high finding that ran with no answer recorded is an ask whose answer is unrecorded, not a notice", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick today = time.format_ms(time.now_ms(), "%Y-%m-%d")
+  guard_seed_log(dir, [
+    # High is an ask by the tier matrix; this one ran (say, --accept-risk
+    # on the command line) and the log does not hold the answer.
+    {at: today + "T09:00:00", by: "test", kind: "guarded", command: "npm install x", cwd: "~/p", risk: "high", outcome: "ran", findings: [{code: "E873", w: 1.0}]},
+    # Medium that ran is a notice.
+    {at: today + "T09:30:00", by: "test", kind: "guarded", command: "npm test", cwd: "~/p", risk: "medium", outcome: "ran", findings: [{code: "E880", w: 0.5}]},
+  ])
+  stick j = guard_cmd(dir, ["guard", "stats", "--json"], {})
+  exits(j, 0)
+  stick m = json.parse(j.out)
+  assert(m.tiers.ask == 1, "asks=" + str(m.tiers.ask))
+  assert(m.tiers.notice == 1, "notices=" + str(m.tiers.notice))
+  assert(m.ask.unrecorded == 1, "unrecorded=" + str(m.ask.get("unrecorded", "-")))
+  stick r = guard_cmd(dir, ["guard", "stats"], {})
+  says(r.out, "1 unrecorded")
+  says(r.out, "per day (UTC)")
+})
+
+test("guard stats: a change of a guard setting lands in the log as a config event; an unrelated setting does not", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  # A guard-related setting: it lands in the log.
+  exits(guard_cmd(dir, ["config", "rehearse", "never"], {}), 0)
+  stick j = guard_cmd(dir, ["guard", "log", "--json"], {})
+  exits(j, 0)
+  stick evs = json.parse(j.out)
+  stick cfg = evs.filter(pack(e) => str(e.get("kind", "")) == "config" and str(e.get("thing", "")) == "rehearse")
+  assert(cfg.len() == 1, "no config event for rehearse: " + j.out)
+  assert(str(cfg[0].outcome).contains("set to never"), "outcome: " + str(cfg[0].outcome))
+  # An unrelated setting (issues_repo): it does not.
+  exits(guard_cmd(dir, ["config", "issues_repo", "someone/thing"], {}), 0)
+  stick j2 = guard_cmd(dir, ["guard", "log", "--json"], {})
+  stick evs2 = json.parse(j2.out)
+  assert(not evs2.any(pack(e) => str(e.get("thing", "")) == "issues_repo"), "issues_repo logged as a config event: " + j2.out)
+})
+
 test("agent: a remembered yes for the same bytes is not asked again; a changed byte asks again", pack() {
   if on_windows or not has_tin_mac() {
     snuff
