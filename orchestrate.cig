@@ -3943,6 +3943,7 @@ pull do_help() {
   exhale "  cigo undo last              undo the newest guarded call (cig unburn)"
   exhale "  cigo agent [run -- <command> | log | undo --session=<id>|--since=2h [--yes]]"
   exhale "                              what your AI agents run: boxed, read first, a person approves the risky ones"
+  exhale "  cigo scrub show <id>        what was scrubbed from an agent's output under that id (kept locally; not for an agent's terminal)"
   exhale "  cigo approve <id>           approve one agent command rated high (outside the agent's session)"
   exhale "  cigo run-url <url> [--trust] [-- <args>]"
   exhale "                              the safe way to curl | sh: downloaded, read, rehearsed in the box, then run"
@@ -14499,7 +14500,9 @@ pull line_blacklist(line) {
 }
 
 # Text addressed to agents in what a command printed: the warning first,
-# then the output, unchanged.
+# then the output, unchanged. Used by paths that are not `cigo agent run`
+# itself (the shim's pass-through, the release's installer) when an agent
+# is set; `cigo agent run` scrubs the output in place, below.
 pull fence_note(out) {
   for rule in RULES.filter(pack(r) => r.cat == "prompt-injection") {
     if text.matches(out, rule.re) {
@@ -14507,6 +14510,398 @@ pull fence_note(out) {
     }
   }
   snuff null
+}
+
+# ----- step 1 of #63: scrubbing what an agent reads ----------------------
+#
+# At level 4 (agents) every shell command an agent runs is `cigo agent run`,
+# so cigo is in the agent's path before the output reaches it. What was
+# a warning line in front of unchanged text (fence_note, above) is now a
+# transform: invisible Unicode is stripped, a chat-template shape is left
+# in place but wrapped in markers so the agent can see what was faked, a
+# line addressed to AI agents is redacted, and a line that is also
+# reaching for credentials or a sender host is withheld whole. The
+# originals are kept locally under CIGO_HOME/scrub/<id>.json so you can
+# read what was removed (`cigo scrub show <id>`); the agent never sees
+# the originals, and is told what was removed and the id a person can
+# look up. A `cigo run`, `cigo audit` or any other command that is not
+# `cigo agent run` is not touched; the code is open until #63 settles it,
+# so the codes stay E886 (text addressed to AI agents) and E887 (invisible
+# or look-alike text) that the static read already uses.
+
+stick SCRUB_DIR = path.join(CIGO_HOME, "scrub")
+
+# Each scrub's record is sealed in the tin under this label (`cig tin keep`)
+# and named by its id, so the originals of what was removed are never left
+# in the clear: the box an agent's commands run in has no key, so nothing
+# there can open one, and `cigo scrub show` at your terminal can. A run whose
+# record the tin could not keep has its id (never its text) listed in
+# SCRUB_UNKEPT, so a write that carries its markers is refused instead of
+# landing with a marker where the passage was.
+stick SCRUB_LABEL = "cigo-scrub"
+stick SCRUB_UNKEPT = path.join(SCRUB_DIR, "unkept")
+
+# A finding's category that pushes a line from redact to block: on the
+# same line as text addressed to an AI, reaching for your credentials,
+# an exfiltration host, a fetch-and-run, a reverse shell or the guard's
+# own state is a known injection payload on its way somewhere it has no
+# business going. The line is withheld whole.
+stick SCRUB_BLOCK_CATS = ["credentials", "exfiltration", "remote-control", "fetch-and-run", "self-defense"]
+
+# The marker a redacted line stands in for in the agent's copy. Shaped as
+# plain ASCII so a terminal shows it as it is and `scrub_restore` reads it
+# back without surprises. Every marker names its own mark, the run's id with
+# the stream and a count (`r-7a1c9e2b.o2`, the second in stdout), so a write
+# that carries some of the markers, in any order, gets each passage back in
+# its own place.
+pull scrub_mark_redact(mark) {
+  snuff "[cig: removed 1 passage addressed to AI agents (E886), id " + mark + "]"
+}
+
+pull scrub_mark_block(mark) {
+  snuff "[cig: content withheld on this line (E886 reaches for credentials or a sender), id " + mark + "]"
+}
+
+pull scrub_fence_open(mark) {
+  snuff "[cig: begin untrusted text (E886), id " + mark + "] "
+}
+
+stick SCRUB_FENCE_CLOSE = " [cig: end untrusted text]"
+stick SCRUB_MARK_RE = '\[cig: (?:removed 1 passage addressed to AI agents \(E886\)|content withheld on this line \(E886[^\)]*\)), id (r-[0-9a-f]{8})\.([oe][0-9]+)\]'
+stick SCRUB_FENCE_RE = '\[cig: begin untrusted text \(E886\), id (r-[0-9a-f]{8})\.([oe][0-9]+)\] (.*?) \[cig: end untrusted text\]'
+
+# A short local id for one scrub: the beginning of the sha256 of the
+# output with the millisecond stamp, so two scrubs in a row do not share
+# an id.
+pull scrub_new_id(body) {
+  snuff "r-" + hash.sha256(str(body) + "|" + time.now_iso() + "|" + str(time.now_ms())).slice(0, 8)
+}
+
+# Scrub one stream (stdout or stderr) line by line: nothing fires returns
+# null. `id` is one for the whole `cigo agent run` so a notice of several
+# streams can name the same id.
+pull scrub_one(label, body, id) {
+  if str(body) == "" {
+    snuff null
+  }
+  stick letter = pick(label == "stdout", "o", "e")
+  roll marks = 0
+  stick strip_rules = RULES.filter(pack(r) => r.cat == "prompt-injection" and r.code == "E887")
+  stick addr_rules = RULES.filter(pack(r) => r.cat == "prompt-injection" and r.code == "E886")
+  stick danger = RULES.filter(pack(r) => SCRUB_BLOCK_CATS.contains(r.cat))
+  roll pieces = []
+  roll stripped = 0
+  roll fenced = 0
+  roll redacted = 0
+  roll blocked = 0
+  roll removed = []
+  roll codes = []
+  roll rest = str(body)
+  while true {
+    stick nl = rest.find("\n")
+    stick has_sep = nl != -1
+    stick line = pick(has_sep, rest.slice(0, nl), rest)
+    stick sep = pick(has_sep, "\n", "")
+    roll t = line
+    stick hits_addr = addr_rules.any(pack(r) => text.matches(line, r.re))
+    stick reaches = danger.any(pack(d) => text.matches(line, d.re))
+    if hits_addr and reaches {
+      marks = marks + 1
+      stick mark = id + "." + letter + str(marks)
+      pieces.push(scrub_mark_block(mark) + sep)
+      blocked = blocked + 1
+      removed.push({action: "block", code: "E886", where: label, mark: mark, passage: line})
+      if not codes.contains("E886") {
+        codes.push("E886")
+      }
+    } else {
+      # E887 first: strip invisible or look-alike characters, always.
+      for rule in strip_rules {
+        if text.matches(t, rule.re) {
+          stick before = t.len()
+          t = text.replace(t, rule.re, "")
+          stripped = stripped + (before - t.len())
+          removed.push({action: "strip", code: rule.code, rule: rule.id, where: label, passage: line})
+          if not codes.contains("E887") {
+            codes.push("E887")
+          }
+        }
+      }
+      # E886: redact text addressed to AI agents, or fence a chat-template
+      # shape (so the agent sees the format that was faked) when that is
+      # the only thing that fires. Redact wins over fence on the same
+      # line, because an instruction aimed at an agent reads as such
+      # whether or not it also uses a chat-template shape.
+      stick addr_hit = addr_rules.any(pack(r) => r.id != "pi-template" and text.matches(t, r.re))
+      stick tpl_hit = addr_rules.any(pack(r) => r.id == "pi-template" and text.matches(t, r.re))
+      if addr_hit {
+        stick addr_rule = addr_rules.filter(pack(r) => r.id != "pi-template" and text.matches(t, r.re)).first()
+        marks = marks + 1
+        stick mark = id + "." + letter + str(marks)
+        t = scrub_mark_redact(mark)
+        redacted = redacted + 1
+        removed.push({action: "redact", code: "E886", rule: str(addr_rule.id), where: label, mark: mark, passage: line})
+        if not codes.contains("E886") {
+          codes.push("E886")
+        }
+      } else if tpl_hit {
+        marks = marks + 1
+        stick mark = id + "." + letter + str(marks)
+        t = scrub_fence_open(mark) + t + SCRUB_FENCE_CLOSE
+        fenced = fenced + 1
+        removed.push({action: "fence", code: "E886", rule: "pi-template", where: label, mark: mark, passage: line})
+        if not codes.contains("E886") {
+          codes.push("E886")
+        }
+      }
+      pieces.push(t + sep)
+    }
+    if not has_sep {
+      break
+    }
+    rest = rest.slice(nl + 1)
+  }
+  if stripped == 0 and fenced == 0 and redacted == 0 and blocked == 0 {
+    snuff null
+  }
+  snuff {text: pieces.join(""), stripped: stripped, fenced: fenced, redacted: redacted, blocked: blocked, removed: removed, codes: codes}
+}
+
+# A scrub's record, sealed in the tin under the run's id. `cig tin keep`
+# reads a file, so the record goes to a private file (umask 077) under
+# CIGO_HOME for as long as the keep takes and is removed straight after.
+# A tin that cannot keep it (no key here, a cig older than 1.14.0) leaves
+# the run's id in SCRUB_UNKEPT and says false.
+pull scrub_keep(id, doc) {
+  stick tmp = path.join(SCRUB_DIR, id + ".json")
+  roll kept = {code: -1, err: "the record could not be written"}
+  if write_outside(tmp, json.stringify(doc, 2) + "\n") {
+    burn {
+      try {
+        kept = proc.run("cig", ["tin", "keep", tmp, "--label", SCRUB_LABEL, "--name", id], {timeout_ms: 20000})
+      } ashtray e {
+        kept = {code: -1, err: e.message}
+      }
+    }
+    remove_outside(tmp)
+  }
+  if kept.code == 0 {
+    snuff true
+  }
+  stick before = pick(fs.is_file(SCRUB_UNKEPT), fs.read_text(SCRUB_UNKEPT), "")
+  write_outside(SCRUB_UNKEPT, before + id + "\n")
+  snuff false
+}
+
+# A scrub's record from the tin, or null: never kept, gone, or no key here.
+# The box an agent's commands run in has no key, so a command there gets
+# null for every id.
+pull scrub_load(id) {
+  roll r = null
+  burn {
+    try {
+      r = proc.run("cig", ["tin", "give", "--label", SCRUB_LABEL, "--name", id], {timeout_ms: 20000, reads: true})
+    } ashtray e {
+      r = {code: -1, out: "", err: e.message}
+    }
+  }
+  if r.code != 0 {
+    snuff null
+  }
+  roll doc = null
+  burn {
+    try {
+      doc = json.parse(str(r.out))
+    } ashtray e {
+      doc = null
+    }
+  }
+  snuff doc
+}
+
+# What a run's markers stand for, by mark: {} when this machine keeps no
+# record under that id.
+pull scrub_marks(id) {
+  roll out = {}
+  stick doc = scrub_load(id)
+  if doc == null {
+    snuff out
+  }
+  for r in as_list(doc.get("removed", [])) {
+    stick mark = str(r.get("mark", ""))
+    stick act = str(r.get("action", ""))
+    if mark != "" and (act == "redact" or act == "block" or act == "fence") {
+      out[mark] = r
+    }
+  }
+  snuff out
+}
+
+# Did this machine scrub under `id` and fail to keep the record?
+pull scrub_unkept(id) {
+  if not fs.is_file(SCRUB_UNKEPT) {
+    snuff false
+  }
+  snuff fs.read_text(SCRUB_UNKEPT).split("\n").contains(id)
+}
+
+# What an agent reads of a command's stdout and stderr, scrubbed: null
+# when nothing fired. The originals of each removed passage are kept as
+# one record, sealed in the tin under the run's id (`scrub_keep`); `cigo
+# scrub show <id>` reads it. The agent never sees the originals, and the
+# record is not in the agent's command's output: the id named in the notice
+# is all it has.
+pull scrub_agent_output(base, out, err) {
+  stick id = scrub_new_id(str(out) + str(err))
+  stick so = scrub_one("stdout", out, id)
+  stick se = scrub_one("stderr", err, id)
+  if so == null and se == null {
+    snuff null
+  }
+  roll removed = []
+  roll stripped = 0
+  roll fenced = 0
+  roll redacted = 0
+  roll blocked = 0
+  roll codes = []
+  for s in [so, se] {
+    if s == null {
+      continue
+    }
+    stripped = stripped + s.stripped
+    fenced = fenced + s.fenced
+    redacted = redacted + s.redacted
+    blocked = blocked + s.blocked
+    for r in s.removed {
+      removed.push(r)
+    }
+    for c in s.codes {
+      if not codes.contains(c) {
+        codes.push(c)
+      }
+    }
+  }
+  stick doc = {
+    id: id,
+    at: time.now_iso(),
+    agent: str(base.get("agent", "")),
+    session: str(base.get("session", "")),
+    command: str(base.get("command", "")),
+    cwd: str(base.get("cwd", "")),
+    stripped: stripped, fenced: fenced, redacted: redacted, blocked: blocked,
+    codes: codes,
+    removed: removed,
+  }
+  stick kept = scrub_keep(id, doc)
+  snuff {
+    id: id,
+    kept: kept,
+    out: pick(so != null, pick(so != null, so, {text: ""}).text, str(out)),
+    err: pick(se != null, pick(se != null, se, {text: ""}).text, str(err)),
+    stripped: stripped, fenced: fenced, redacted: redacted, blocked: blocked, codes: codes, removed: removed,
+  }
+}
+
+# The one-line notice prepended to a scrubbed stream, so the agent does
+# not guess at missing text or hallucinate around it.
+pull scrub_notice(r) {
+  roll parts = []
+  if r.redacted > 0 {
+    parts.push(str(r.redacted) + " passage" + pick(r.redacted == 1, "", "s") + " redacted")
+  }
+  if r.fenced > 0 {
+    parts.push(str(r.fenced) + " passage" + pick(r.fenced == 1, "", "s") + " fenced")
+  }
+  if r.stripped > 0 {
+    parts.push(str(r.stripped) + " invisible character" + pick(r.stripped == 1, "", "s") + " removed")
+  }
+  if r.blocked > 0 {
+    parts.push(str(r.blocked) + " line" + pick(r.blocked == 1, "", "s") + " withheld")
+  }
+  snuff "[cig: scrubbed this output - " + parts.join(", ") + " (" + r.codes.join(", ") + "). id " + r.id + ". the rest is unchanged.]"
+}
+
+# Text a file tool would write that carries cigo's own scrub markers (the
+# agent read a scrubbed copy and is writing it back): each marker becomes
+# the passage it stood for again, and a fence comes off the agent's text,
+# from the record kept under the marker's run. Each marker names its own
+# passage, so a write that carries some of them, in any order, gets each
+# back in its place, and the agent's real edits are kept. A marker this
+# machine has no record for (a page about cigo, cigo's own tests, another
+# machine's output) is text like any other and stays as it is; one whose
+# run's record the tin could not keep is named in `missing`, and the write
+# is refused, so no file gets a marker where its own text was.
+pull scrub_restore(textv) {
+  roll t = str(textv)
+  roll restored = 0
+  roll ids = []
+  roll missing = []
+  roll records = {}
+  for m in text.find_all(t, SCRUB_MARK_RE) + text.find_all(t, SCRUB_FENCE_RE) {
+    stick fence = m.starts_with("[cig: begin untrusted text")
+    stick c = text.captures(m, pick(fence, SCRUB_FENCE_RE, SCRUB_MARK_RE))
+    if c == null {
+      continue
+    }
+    stick id = c[1]
+    if not records.has(id) {
+      records[id] = scrub_marks(id)
+    }
+    stick entry = records[id].get(id + "." + c[2], null)
+    if entry == null {
+      if scrub_unkept(id) and not missing.contains(id) {
+        missing.push(id)
+      }
+      continue
+    }
+    if not ids.contains(id) {
+      ids.push(id)
+    }
+    t = t.replace(m, pick(fence, c.get(3, ""), str(entry.get("passage", ""))))
+    restored = restored + 1
+  }
+  snuff {text: t, restored: restored, ids: ids, missing: missing}
+}
+
+# `cigo scrub show <id>` reads what was removed from an agent's output
+# under that id, from the record sealed in the tin. An agent's command in
+# the box cannot open one (no key there); from an agent's session outside
+# a box it is refused as well, which stops an agent that asks, not one
+# that clears its environment.
+pull do_scrub() {
+  expect_flags([])
+  stick sub = targets.get(0, "")
+  if sub != "show" {
+    fail("cigo scrub show <id>: the id a `cigo agent run` notice named")
+  }
+  if in_agent() {
+    log.error("cigo scrub show is for your terminal, not an agent's: what was removed is not passed back to the agent through cigo (an agent variable is set: " + AGENT_VARS.filter(pack(v) => env.get(v, "") != "").join(", ") + ").")
+    exit(2)
+  }
+  stick id = targets.get(1, "")
+  if not text.matches(id, '^r-[0-9a-f]{8}$') {
+    fail("cigo scrub show <id>: the id a `cigo agent run` notice named, `r-` and eight hex digits")
+  }
+  stick doc = scrub_load(id)
+  if doc == null {
+    fail("no scrub is kept under `" + id + "`" + pick(scrub_unkept(id), ": the tin could not keep that one's record when it was made", " (cigo agent log lists what your agents have run)"))
+  }
+  exhale "scrub " + id + "  " + str(doc.get("at", ""))
+  exhale "  agent    " + str(doc.get("agent", ""))
+  exhale "  session  " + str(doc.get("session", ""))
+  exhale "  command  " + str(doc.get("command", ""))
+  exhale "  cwd      " + str(doc.get("cwd", ""))
+  stick codes = as_list(doc.get("codes", [])).map(pack(x) => str(x))
+  exhale "  codes    " + codes.join(", ")
+  exhale "  counts   " + str(doc.get("redacted", 0)) + " redacted, " + str(doc.get("fenced", 0)) + " fenced, " + str(doc.get("stripped", 0)) + " stripped, " + str(doc.get("blocked", 0)) + " withheld"
+  exhale "  what was removed:"
+  for r in as_list(doc.get("removed", [])) {
+    stick mark = str(r.get("mark", ""))
+    exhale "    " + str(r.get("action", "")) + "  " + str(r.get("code", "")) + " in " + str(r.get("where", "")) + pick(mark == "", "", " (" + mark + ")") + ":"
+    for line in str(r.get("passage", "")).lines() {
+      exhale "      " + line
+    }
+  }
 }
 
 pull do_agent() {
@@ -14615,16 +15010,37 @@ pull agent_contained() {
   snuff cig.os() == "linux" and rehearsal_possible() and contain_possible()
 }
 
-# What an agent's command printed, the fence first, the finding after, the
-# log line, and its own exit code.
+# What an agent's command printed, the scrub first, the finding after, the
+# log line, and its own exit code. Text addressed to AI agents, invisible
+# Unicode and lines reaching for credentials never reach the agent as they
+# were; the originals are kept under `cigo scrub show <id>`.
 pull agent_finish(r, shown, base, risk, findings, outcome, session, home_written) {
   roll said = outcome
-  stick note = fence_note(str(r.get("out", "")) + str(r.get("err", "")))
-  if note != null {
-    log.warn(note)
-    said = said + ", output fenced"
+  stick raw_out = str(r.get("out", ""))
+  stick raw_err = str(r.get("err", ""))
+  stick scrubbed = scrub_agent_output(base, raw_out, raw_err)
+  roll out_text = raw_out
+  roll err_text = raw_err
+  if scrubbed != null {
+    stick notice = scrub_notice(scrubbed) + "\n"
+    if scrubbed.out != "" {
+      out_text = notice + scrubbed.out
+      err_text = scrubbed.err
+    } else {
+      out_text = ""
+      err_text = notice + scrubbed.err
+    }
+    log.warn("E886 someone was whispering to your agent, so cigo cut the wire.")
+    log.warn("  " + str(base.get("agent", "agent")) + " read: " + clip(str(base.get("command", "")), 160))
+    log.warn("  " + str(scrubbed.redacted) + " redacted, " + str(scrubbed.fenced) + " fenced, " + str(scrubbed.stripped) + " invisible characters removed, " + str(scrubbed.blocked) + " withheld")
+    if scrubbed.kept {
+      log.warn("  see what was removed: cigo scrub show " + scrubbed.id)
+    } else {
+      log.warn("  the tin could not keep what was removed (cig 1.14.0 or later with a key here keeps it), so `cigo scrub show` has nothing to show and a write that carries these markers is refused")
+    }
+    said = said + ", output scrubbed"
   }
-  print_raw(str(r.get("out", "")), str(r.get("err", "")))
+  print_raw(out_text, err_text)
   if risk == "medium" {
     guard_say_verdict(shown, {risk: risk, findings: findings})
     log.warn("cigo: it ran in the box, rated medium; read the finding above before you go on (cigo agent undo --session ${session} takes the session back)")
@@ -15158,15 +15574,90 @@ pull file_tool_text(name, input) {
   snuff str(input.get("new_source", ""))
 }
 
+# A file tool's input with every scrub marker (`cigo agent run` redacted,
+# withheld or fenced a passage, the agent read the copy and is writing it
+# back) put back to the original, in the new text and in the text an edit
+# looks for, before the write is judged and before it lands. Returns the
+# input, how many were restored, their runs, and the runs whose records
+# the tin could not keep (`missing`: the write is refused).
+pull hook_file_tool_restore(name, input) {
+  roll updated = input
+  roll total = 0
+  roll ids = []
+  roll missing = []
+  roll fields = []
+  if name == "Write" {
+    fields = ["content"]
+  } else if name == "Edit" {
+    fields = ["old_string", "new_string"]
+  } else if name == "NotebookEdit" {
+    fields = ["new_source"]
+  }
+  roll results = []
+  for f in fields {
+    stick res = scrub_restore(str(input.get(f, "")))
+    results.push(res)
+    if res.restored > 0 {
+      roll m = {}
+      m[f] = res.text
+      updated = updated.merge(m)
+    }
+  }
+  if name == "MultiEdit" {
+    roll edits = []
+    roll any = false
+    for e in as_list(input.get("edits", [])) {
+      roll ne = e
+      for f in ["old_string", "new_string"] {
+        stick res = scrub_restore(str(map_get(e, f, "")))
+        results.push(res)
+        if res.restored > 0 {
+          any = true
+          roll m = {}
+          m[f] = res.text
+          ne = ne.merge(m)
+        }
+      }
+      edits.push(ne)
+    }
+    if any {
+      updated = updated.merge({edits: edits})
+    }
+  }
+  for res in results {
+    total = total + res.restored
+    for i in res.ids {
+      if not ids.contains(i) {
+        ids.push(i)
+      }
+    }
+    for i in res.missing {
+      if not missing.contains(i) {
+        missing.push(i)
+      }
+    }
+  }
+  snuff {input: updated, restored: total, ids: ids, missing: missing}
+}
+
 # Claude Code's Write, Edit, MultiEdit and NotebookEdit write without a
 # shell; the hook judges them by where they would write and what (#80): the
 # guard's own files are refused (E897); a startup file, a git hook, an
 # autostart entry or a folder on PATH waits for a person (E894), as does
 # text rated high; inside the project they go ahead; elsewhere in your home
-# too, and they are logged under the agent's session.
+# too, and they are logged under the agent's session. Before any of that,
+# a scrub marker in the new text is swapped for the original passage
+# (#63 step 1) so the agent's write cannot overwrite a file with cigo's
+# redaction mark.
 pull hook_file_tool(call) {
   stick name = str(call.get("tool_name", ""))
-  stick input = call.tool_input
+  stick raw_input = call.tool_input
+  stick restored = hook_file_tool_restore(name, raw_input)
+  if not restored.missing.is_empty() {
+    hook_deny("cigo refused this write, and nothing was written: its text carries cigo's scrub marker for " + restored.missing.join(", ") + ", and this machine could not keep what the marker stands for, so the file would get the marker where its own text was. Make the change without the marker.")
+    snuff
+  }
+  stick input = restored.input
   stick cwd = str(call.get("cwd", fs.cwd()))
   stick session = str(call.get("session_id", ""))
   stick target = str(input.get("file_path", input.get("notebook_path", "")))
@@ -15224,6 +15715,10 @@ pull hook_file_tool(call) {
   }
   if not (at == cwd or at.starts_with(cwd + "/")) {
     guard_note(base.merge({risk: risk, outcome: "written in your home"}))
+  }
+  if restored.restored > 0 {
+    guard_note(base.merge({risk: risk, outcome: "scrub markers restored on write", restored: restored.restored, ids: restored.ids}))
+    exhale json.stringify({hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: input}})
   }
 }
 
@@ -15845,6 +16340,8 @@ pull dispatch() {
     do_run_url()
   } else if command == "agent" {
     do_agent()
+  } else if command == "scrub" {
+    do_scrub()
   } else if command == "approve" {
     do_approve()
   } else if command == "adopt" {
