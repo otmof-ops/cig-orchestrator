@@ -5,7 +5,10 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
-## Unreleased
+## 1.17.0 — 2026-11-09
+
+What an agent reads, scrubbed; PyPI and crates READMEs read as npm's are; the
+guard counting its own noise.
 
 - **`cigo guard stats`** (#66 step 7). The guard log, counted, so cigo
   can say whether it is asking too much. A new subcommand reads every
