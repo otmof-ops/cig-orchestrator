@@ -2683,6 +2683,17 @@ test("the guard: cigo trust <task> approves after the verdict, never critical, a
   stick s = guard_tool(dir, ["trust", "show", "curl-sh"], {})
   exits(s, 0)
   says(s.out, "matches your key")
+  # An approval whose signature file is gone is said, not a crash.
+  burn {
+    for f in fs.list(path.join(cigo_home(dir), "trust")) {
+      if f.ends_with(".mac") {
+        fs.rm(f)
+      }
+    }
+  }
+  stick bare = guard_tool(dir, ["trust", "show", "curl-sh"], {})
+  exits(bare, 0)
+  says(bare.out, "signature: none beside it")
   stick n = guard_tool(dir, ["run", "never"], {})
   exits(n, 1)
   says(n.out, "rated high")

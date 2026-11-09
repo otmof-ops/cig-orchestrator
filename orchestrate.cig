@@ -11389,7 +11389,11 @@ pull do_trust(g) {
       snuff
     }
     exhale fs.read_text(f.json).trim()
-    stick r = tin_mac(f.json, pick(fs.is_file(f.mac), fs.read_text(f.mac).trim(), ""))
+    if not fs.is_file(f.mac) {
+      exhale "signature: none beside it, so the approval is not used (cigo trust ${name} approves it again)"
+      snuff
+    }
+    stick r = tin_mac(f.json, fs.read_text(f.mac).trim())
     exhale pick(r.code == 0, "signature: matches your key", pick(r.code == 1, "signature: does NOT match your key (E889): ignored", "signature: not checked (cig 1.11.0 or later checks it)"))
     snuff
   }

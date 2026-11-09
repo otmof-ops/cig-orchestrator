@@ -34,6 +34,11 @@ repository root lists versions it must not pick.
   of #63 extend scrubbing there. The codes stay `E886` and `E887` that
   the static read already uses.
 
+- **`cigo trust show` says when an approval's signature is gone.** It
+  stopped with an error (`E600`) when the `.mac` beside an approval was
+  missing; it now says there is no signature, so the approval is not
+  used, and how to approve it again.
+
 ## 1.16.0 — 2026-11-08
 
 The guard reads more and asks better: ransomware's shape, typosquats,
