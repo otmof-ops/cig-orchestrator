@@ -5,7 +5,7 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
-## Unreleased
+## 1.18.0 — 2026-11-10
 
 Everything cigo keeps, held by cig's passes; a hook that reads a command
 once.
