@@ -577,7 +577,9 @@ line is read afresh. A hit gives exactly the findings a fresh read gives.
 
 - Only the scan of the line is kept. Your blacklist is read live on every
   call, and what a person says to an ask is never answered from the cache.
-- Each verdict lasts a week.
+- Each verdict lasts a week. It holds the command line as written, in
+  cig's keys folder, which the box hides from every hop. The guard log
+  keeps the same line redacted.
 - `cigo guard cache stats` counts the verdicts kept and, from the guard
   log, how many reads came from the cache in the last 30 days (each agent
   event in the log carries `cache: hit`, `miss` or `none`).

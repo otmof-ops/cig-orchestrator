@@ -2665,10 +2665,6 @@ test("the guard's approval is one lookup, a changed lockfile is checked again, a
 })
 
 test("the guard: cigo trust <task> approves after the verdict, never critical, and show says the pass holds", pack() {
-  if not has_tin_mac() {
-    exhale "      (skipped: cig 1.11.0 or later signs the trust store)"
-    snuff
-  }
   stick dir = fresh("tests/fixtures/guard")
   stick t1 = guard_tool(dir, ["trust", "curl-sh"], {})
   exits(t1, 0)
@@ -2735,9 +2731,11 @@ test("the guard: an approval is a pass over what the task names: a changed scrip
     fs.rm(path.join(dir, "Cargo.lock"))
   }
   assert(approved(), "the approval did not hold again with the lockfile gone")
-  # cig's own revoke takes every approval back.
-  exits(cig(dir, ["pass", "revoke", "--kind", "approval"]), 0)
-  assert(not approved(), "an approval held after cig pass revoke --kind approval")
+  # cig's own revoke takes it back (by its id: the suite shares one cig home).
+  stick holding = json.parse(guard_tool(dir, ["trust", "list", "--json"], {}).out).filter(pack(r) => r.get("holds", false))
+  assert(holding.len() == 1, json.stringify(holding))
+  exits(cig(dir, ["pass", "revoke", holding[0].pass]), 0)
+  assert(not approved(), "an approval held after cig pass revoke")
 })
 
 test("the guard: an approval from before passes is honored once and moved onto a pass; a forged one is not (E889)", pack() {
@@ -2755,6 +2753,7 @@ test("the guard: an approval from before passes is honored once and moved onto a
   }
   stick signed = hop_env(dir, "cig", ["tin", "mac", rec, "--label", "cigo-trust"], {})
   exits(signed, 0)
+  stick rec_copy = fs.read_text(rec)
   burn {
     fs.write_text(rec.replace(".json", ".mac"), signed.out.trim() + "\n")
   }
@@ -2764,8 +2763,31 @@ test("the guard: an approval from before passes is honored once and moved onto a
   stick l = json.parse(guard_tool(dir, ["trust", "list", "--json"], {}).out)
   assert(l.len() == 1 and l[0].holds and l[0].risk == "high" and l[0].at == "2026-11-01T00:00:00", json.stringify(l))
   # The pass revoked, the record put aside is never read again.
-  exits(cig(dir, ["pass", "revoke", "--kind", "approval"]), 0)
+  exits(cig(dir, ["pass", "revoke", l[0].pass]), 0)
   assert(not json.parse(guard_tool(dir, ["audit", "curl-sh", "--json"], {}).out).tasks["curl-sh"].trusted, "a revoked approval came back from the old record")
+  # A copy of the old pair put back is not honored again (E889).
+  burn {
+    fs.write_text(rec, rec_copy)
+    fs.write_text(rec.replace(".json", ".mac"), signed.out.trim() + "\n")
+  }
+  stick back = guard_tool(dir, ["audit", "curl-sh", "--json"], {})
+  assert(not json.parse(back.out).tasks["curl-sh"].trusted, "an approval from before passes, put back after it moved onto one, was honored")
+  says(back.err, "E889")
+})
+
+test("the guard: a record planted in the approvals' index revokes nothing and removes nothing outside it", pack() {
+  stick dir = fresh("tests/fixtures/guard")
+  exits(guard_tool(dir, ["trust", "curl-sh"], {}), 0)
+  stick victim = path.join(dir, "victim.json")
+  stick idx = path.join(cigo_home(dir), "trust", "passes")
+  burn {
+    fs.write_text(victim, "{}\n")
+    fs.write_text(path.join(idx, "planted.json"), json.stringify({task: "curl-sh", project: dir, pass: "../../../" + path.base(dir) + "/victim", token: "cigpass1.AAAA"}) + "\n")
+  }
+  exits(guard_tool(dir, ["trust", "revoke", "--all"], {}), 0)
+  assert(fs.exists(victim), "a planted record's id removed a file outside the index")
+  assert(not json.parse(guard_tool(dir, ["audit", "curl-sh", "--json"], {}).out).tasks["curl-sh"].trusted, "the real approval was not revoked")
+  says(guard_tool(dir, ["trust", "list"], {}).out, "no approvals")
 })
 
 test("the guard: cigo audit lists each task's risk and findings, in text and JSON", pack() {
@@ -4019,6 +4041,23 @@ test("blacklist: a list changed by hand is said, the entry taken out still holds
   stick after = guard_tool(dir, ["audit", "install"], l)
   says(after.out, "install: none")
   assert(not after.err.contains("E587"), after.err)
+})
+
+test("blacklist: an older copy of a list put back does not verify: signing a list revokes the pass it was signed with before (cig-script#186)", pack() {
+  stick dir = blacklist_project()
+  stick l = lists(dir)
+  exits(guard_tool(dir, ["blacklist", "add", "npm:first-pkg", "--reason=one"], l), 0)
+  stick f = path.join(dir + "-lists", "mine.list")
+  stick v1 = fs.read_text(f)
+  exits(guard_tool(dir, ["blacklist", "add", "npm:second-pkg", "--reason=two"], l), 0)
+  burn {
+    fs.write_text(f, v1)
+  }
+  stick a = guard_tool(dir, ["blacklist", "why", "npm:second-pkg"], l)
+  says(a.err, "E587 a list that does not verify")
+  # The entry added since still counts, from the last copy that verified.
+  exits(a, 1)
+  says(a.out, "two")
 })
 
 test("blacklist: rehearse refuses a blacklisted package before it asks for the box, and why names the entry", pack() {

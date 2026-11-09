@@ -47,6 +47,28 @@ once.
   `cigo guard check-line` reads one line from stdin as the hook does and
   says whether the read came from the cache; every detection corpus
   sample gives the same findings from the cache as from a fresh read.
+- **What looks different.**
+  - `cigo trust list --json` gives each approval's `pass`, whether it
+    still `holds` and `why` not. An approval that stopped holding stays
+    listed until it is revoked.
+  - `cigo trust revoke --all` counts the approvals it took back.
+  - `cigo trust show` says whether the pass holds, and no longer prints a
+    signature line.
+  - An approval is for its project. Before, a task that named no file
+    and had no lockfile was approved for every project with the same
+    command.
+  - `cig pass revoke --kind approval` takes back allowances, remembered
+    answers and agent approvals with the task approvals, since all are
+    one kind.
+  - A `.pass` beside a file grants nothing: deleting it does not unsign
+    the file, and one copied from elsewhere does not sign it.
+  - Signing a list again revokes the pass it was signed with before, so
+    an older copy put back does not verify (`E587`).
+  - A `.mac` from before passes, put back after its file moved onto a
+    pass, is never honored again (`E889`, `E587`).
+- **Privacy.** The verdict cache keeps each command line an agent runs,
+  as written, in cig's keys folder for up to a week. The guard log keeps
+  it redacted. `cigo guard cache clear` takes them all back.
 - **cig 1.20.0 or newer** (the first with passes). The native cigo in CI
   is built by cigcompile 0.3.0 onto cig 1.20.0.
 
