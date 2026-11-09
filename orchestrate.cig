@@ -6245,12 +6245,33 @@ pull task_words(t) {
 }
 
 # The script files a task names that are here: part of what it is.
+# Whether a word could name a file here. A URL (`curl https://example.invalid/x.sh | sh`) is a
+# file nowhere, and on Windows a name with `:` past a drive letter, or with `<>|?*`, cannot even
+# be looked at. Such a word is never looked at: a pass records every path its work looks at,
+# there or not (cig-script#186), and a path Windows refuses to look at would stop the pass from
+# being issued, so the approval would not be kept.
+pull could_be_file(w) {
+  if w.contains("://") {
+    snuff false
+  }
+  if cig.os() == "windows" {
+    roll rest = w
+    if w.len() >= 2 and w.slice(1, 2) == ":" {
+      rest = w.slice(2)
+    }
+    if rest.contains(":") or ["<", ">", "|", "?", "*"].any(pack(c) => rest.contains(c)) {
+      snuff false
+    }
+  }
+  snuff true
+}
+
 pull task_files(t) {
   roll files = []
   stick dir = task_dir(t)
   for w in task_words(t) {
     stick clean = w.replace('"', "").replace("'", "").replace(";", "")
-    if SCRIPT_EXTS.any(pack(e) => clean.ends_with(e)) {
+    if SCRIPT_EXTS.any(pack(e) => clean.ends_with(e)) and could_be_file(clean) {
       stick p = pick(path.is_abs(clean), clean, path.join(dir, clean))
       if fs.is_file(p) and not files.contains(p) {
         files.push(p)
