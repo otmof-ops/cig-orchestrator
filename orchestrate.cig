@@ -14537,9 +14537,12 @@ stick SCRUB_DIR = path.join(CIGO_HOME, "scrub")
 # there can open one, and `cigo scrub show` at your terminal can. A run whose
 # record the tin could not keep has its id (never its text) listed in
 # SCRUB_UNKEPT, so a write that carries its markers is refused instead of
-# landing with a marker where the passage was.
+# landing with a marker where the passage was; one it kept is listed in
+# SCRUB_KEPT, so the hook asks the tin only for this machine's own ids and
+# a page full of made-up markers costs it nothing.
 stick SCRUB_LABEL = "cigo-scrub"
 stick SCRUB_UNKEPT = path.join(SCRUB_DIR, "unkept")
+stick SCRUB_KEPT = path.join(SCRUB_DIR, "kept")
 
 # A finding's category that pushes a line from redact to block: on the
 # same line as text addressed to an AI, reaching for your credentials,
@@ -14685,12 +14688,21 @@ pull scrub_keep(id, doc) {
     }
     remove_outside(tmp)
   }
-  if kept.code == 0 {
-    snuff true
+  stick list = pick(kept.code == 0, SCRUB_KEPT, SCRUB_UNKEPT)
+  roll before = ""
+  if fs.is_file(list) {
+    before = fs.read_text(list)
   }
-  stick before = pick(fs.is_file(SCRUB_UNKEPT), fs.read_text(SCRUB_UNKEPT), "")
-  write_outside(SCRUB_UNKEPT, before + id + "\n")
-  snuff false
+  write_outside(list, before + id + "\n")
+  snuff kept.code == 0
+}
+
+# The ids listed in SCRUB_KEPT or SCRUB_UNKEPT.
+pull scrub_ids(list) {
+  if not fs.is_file(list) {
+    snuff []
+  }
+  snuff fs.read_text(list).split("\n").filter(pack(x) => x != "")
 }
 
 # A scrub's record from the tin, or null: never kept, gone, or no key here.
@@ -14739,10 +14751,7 @@ pull scrub_marks(id) {
 
 # Did this machine scrub under `id` and fail to keep the record?
 pull scrub_unkept(id) {
-  if not fs.is_file(SCRUB_UNKEPT) {
-    snuff false
-  }
-  snuff fs.read_text(SCRUB_UNKEPT).split("\n").contains(id)
+  snuff scrub_ids(SCRUB_UNKEPT).contains(id)
 }
 
 # What an agent reads of a command's stdout and stderr, scrubbed: null
@@ -14828,16 +14837,23 @@ pull scrub_notice(r) {
 # passage, so a write that carries some of them, in any order, gets each
 # back in its place, and the agent's real edits are kept. A marker this
 # machine has no record for (a page about cigo, cigo's own tests, another
-# machine's output) is text like any other and stays as it is; one whose
-# run's record the tin could not keep is named in `missing`, and the write
-# is refused, so no file gets a marker where its own text was.
+# machine's output) is text like any other and stays as it is; one from
+# this machine's own runs with no passage to put back is named in
+# `missing`, and the write is refused, so no file gets a marker where its
+# own text was.
 pull scrub_restore(textv) {
   roll t = str(textv)
   roll restored = 0
   roll ids = []
   roll missing = []
   roll records = {}
-  for m in text.find_all(t, SCRUB_MARK_RE) + text.find_all(t, SCRUB_FENCE_RE) {
+  stick found = text.find_all(t, SCRUB_MARK_RE) + text.find_all(t, SCRUB_FENCE_RE)
+  if found.is_empty() {
+    snuff {text: t, restored: 0, ids: [], missing: []}
+  }
+  stick kept_ids = scrub_ids(SCRUB_KEPT)
+  stick unkept_ids = scrub_ids(SCRUB_UNKEPT)
+  for m in found {
     stick fence = m.starts_with("[cig: begin untrusted text")
     stick c = text.captures(m, pick(fence, SCRUB_FENCE_RE, SCRUB_MARK_RE))
     if c == null {
@@ -14845,11 +14861,18 @@ pull scrub_restore(textv) {
     }
     stick id = c[1]
     if not records.has(id) {
-      records[id] = scrub_marks(id)
+      if kept_ids.contains(id) {
+        records[id] = scrub_marks(id)
+      } else {
+        records[id] = {}
+      }
     }
     stick entry = records[id].get(id + "." + c[2], null)
     if entry == null {
-      if scrub_unkept(id) and not missing.contains(id) {
+      # One of this machine's runs, and no passage to put back (the tin
+      # could not keep the record, no longer holds it, or the mark names no
+      # passage): the write is refused rather than landing with the marker.
+      if (unkept_ids.contains(id) or kept_ids.contains(id)) and not missing.contains(id) {
         missing.push(id)
       }
       continue
