@@ -5891,7 +5891,10 @@ test("agent: the Claude Code hook wraps a Bash call in cigo agent run, keeps the
   stick out = json.parse(a.out).hookSpecificOutput
   assert(out.hookEventName == "PreToolUse", a.out)
   assert(not out.has("permissionDecision"), "the hook decided a permission it should leave to Claude Code: " + a.out)
-  says(out.updatedInput.command, " --no-check agent run --agent=claude-code --session=abc -- 'npm test'")
+  # The hook says how it read the line (the suite's passes may already hold
+  # it), for agent run's log only.
+  says(out.updatedInput.command, " --no-check agent run --agent=claude-code --session=abc --cache=")
+  says(out.updatedInput.command, " -- 'npm test'")
   assert(out.updatedInput.description == "Run tests" and out.updatedInput.timeout == 120000 and out.updatedInput.run_in_background == false, a.out)
   stick d = hook({session_id: "abc", cwd: dir, tool_name: "Bash", tool_input: {command: "rm -rf ~/"}})
   exits(d, 0)
