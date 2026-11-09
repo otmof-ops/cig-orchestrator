@@ -201,10 +201,14 @@ disagreement into a stop; `CIGO_VERSIONS=0` keeps the warnings quiet.
 Before a task runs, the guard reads what it is about to run: the command as
 written, the scripts it names, for a setup stage the install hooks of the
 packages installed here, and each of those packages' README and
-`description` for text aimed at an AI agent (`E886`, `E887`). Against the
-patterns real attacks use. Each hit is a finding with a code (`cig explain
-E873`), the place and the matching text, scored per category into a risk:
-`none`, `low`, `medium`, `high`, `critical`.
+`description` for text aimed at an AI agent (`E886`, `E887`). npm packages
+are read from `node_modules/`, PyPI distributions from their
+`.dist-info/METADATA` in `.venv/` or `venv/`, and crates from `vendor/` or
+`target/package/`; what the install has not put on disk is silent, since
+the scan never fetches. Against the patterns real attacks use. Each hit is
+a finding with a code (`cig explain E873`), the place and the matching
+text, scored per category into a risk: `none`, `low`, `medium`, `high`,
+`critical`.
 
 Shell text is read twice: as written, and as the shell would join it, with
 the simple assignments made earlier in the same text folded in and the

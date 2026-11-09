@@ -7,6 +7,19 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **The package-docs scan reaches PyPI and crates.io** (#55). The static
+  read now reads each installed PyPI distribution's `.dist-info/METADATA`
+  (its `Summary` header and the body, which is the README the wheel
+  shipped with) and each vendored or packaged crate's `Cargo.toml`
+  `description` and `README*`, the way it already reads an npm package's
+  README and `package.json` description. Only the prompt-injection rules
+  run on these (`E886`, `E887`): a README that quotes `curl | sh` as an
+  install example is not a fetch-and-run. Nothing is fetched: the scan
+  reads what `pip install` already extracted into `.venv/` or `venv/`,
+  and what `cargo vendor` or `cargo package` already wrote under
+  `vendor/` or `target/package/`. A package whose install has not
+  produced bytes on disk is silent.
+
 - **Scrubbing what an agent reads** (#63 step 1). At level 4 every shell
   command an agent runs goes through `cigo agent run`, and what it prints
   is now scrubbed before the agent sees it: invisible Unicode and
