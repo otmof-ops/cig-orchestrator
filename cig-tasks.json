@@ -39,9 +39,9 @@
       "needs": [
         "lint"
       ],
-      "timeout_ms": 900000,
+      "timeout_ms": 2700000,
       "box": false,
-      "desc": "the test suite, itself written in CigScript; on the tin, so the boxes of the cigs it starts can be made (the box does not nest)"
+      "desc": "the test suite, itself written in CigScript; on the tin, so the boxes of the cigs it starts can be made (the box does not nest). 45 minutes: since passes (cig-script#186) the suite runs about three times longer on macOS and Windows than on Linux"
     }
   }
 }

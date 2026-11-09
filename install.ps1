@@ -27,14 +27,14 @@ $bin = Join-Path $Prefix 'bin'
 
 if (-not (Get-Command cig -ErrorAction SilentlyContinue)) {
     [Console]::Error.WriteLine('install: cig is not on PATH. Install CigScript first:')
-    [Console]::Error.WriteLine('  irm https://raw.githubusercontent.com/otmof-ops/cig-script/v1.16.1/install.ps1 | iex')
+    [Console]::Error.WriteLine('  irm https://raw.githubusercontent.com/otmof-ops/cig-script/v1.20.0/install.ps1 | iex')
     exit 1
 }
 
 # The same floor as the launchers and the tool's `# cig` pin.
 $needsMajor = 1
-$needsMinor = 16
-$needsPatch = 1
+$needsMinor = 20
+$needsPatch = 0
 
 $verOut = ''
 try { $verOut = (& cig --version 2>$null | Select-Object -First 1) } catch { }

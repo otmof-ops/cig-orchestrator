@@ -1,7 +1,7 @@
 #!/usr/bin/env cig
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: Apache-2.0
-# cig >=1.16.1
+# cig >=1.20.0
 # cig-orchestrator: every language in the project, one chain, no glue script.
 #
 # Most projects are several languages in a row: a Python step that makes
@@ -31,7 +31,7 @@ pack { "." }
 
 stick VERSION = "1.17.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
-stick CIG_NEEDS = ">=1.16.1"
+stick CIG_NEEDS = ">=1.20.0"
 stick REPO = "otmof-ops/cig-orchestrator"
 stick MANIFEST = "cig-tasks.json"
 stick STATE = ".cig-orchestrator"
@@ -3937,7 +3937,7 @@ pull do_help() {
   exhale "                              your entries and allows as one signed file; the one-off runs in force"
   exhale "  cigo quarantine [list | show <sha256> | clear [--all]]   what run-url downloaded, kept to read again"
   exhale "                              your own blacklist: packages, files, domains, ranges and URLs the guard refuses"
-  exhale "  cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | stats [--since=30d] | uninstall [--yes]]"
+  exhale "  cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | stats [--since=30d] | cache [stats | clear] | uninstall [--yes]]"
   exhale "                              how much of this machine the guard covers: level 2 puts every package"
   exhale "                              manager behind it (npm install, pip install, cargo build, npx...) anywhere"
   exhale "  cigo undo last              undo the newest guarded call (cig unburn)"
@@ -5734,9 +5734,9 @@ stick CIGO_HOME = env.get("CIGO_HOME", path.join(fs.home(), ".cig-orchestrator")
 # low run; medium and high are held at a terminal until approved (`cigo
 # trust <task>`, or `--accept-risk` for one run) and run with the report
 # unattended (security = strict fails high there); critical is refused, and
-# `--run-untrusted=<task>` runs it anyway at a terminal. An approval is
-# signed with a key derived from the tin's (`cig tin mac`), which nothing a
-# task runs can make: in the box the key folder is empty.
+# `--run-untrusted=<task>` runs it anyway at a terminal. An approval is one
+# of cig's passes, made under a key derived from the tin's, which nothing a
+# task runs can reach: in the box the keys folder is empty.
 
 stick TRUST_DIR = path.join(CIGO_HOME, "trust")
 stick TRUST_LABEL = "cigo-trust"
@@ -5750,6 +5750,234 @@ stick ALLOW_LABEL = "cigo-allow"
 # its own permission slip (the key folder is empty in the box).
 stick REMEMBER_DIR = path.join(CIGO_HOME, "remembered")
 stick REMEMBER_LABEL = "cigo-remembered"
+
+# ----- passes (cig-script#186): what cigo keeps, held by cig ---------------------------
+#
+# Every yes cigo keeps, and every file it must not take from anyone else, is
+# held by one of cig's passes: made in process under a key derived from the
+# tin's, which nothing a task runs can reach (in the box the keys folder is
+# an empty tmpfs), and checked in process. An approval of a task records the
+# files the task names as the pass's inputs, so a changed byte in any of
+# them stops it holding. A file cigo writes (a blacklist list, its allows,
+# the one-off exceptions, an allowance, a remembered answer, an agent's
+# approval, a kept verdict) is held by a pass over its bytes, named beside it
+# in `<file>.pass`. Records from before passes, signed by `cig tin mac`
+# beside a `.mac`, are checked once and moved onto a pass.
+
+# A yes is about the bytes or the task it names, not about the cig or the
+# cigo that asked.
+stick PASS_OPTS = {code: false, cig: false}
+roll PASS_NOTED = false
+
+# Said once a run: cig's pass state cannot be read here.
+pull pass_note(e) {
+  if not PASS_NOTED {
+    PASS_NOTED = true
+    log.warn("cig's passes cannot be read here (" + clip(str(e.message), 200) + "), so nothing cigo kept counts this run; cig doctor says why")
+  }
+}
+
+# The newest pass of `kind` for `subject` that holds now, or null.
+pull pass_found(kind, subject) {
+  try {
+    snuff pass.find(kind, subject, PASS_OPTS)
+  } ashtray e {
+    pass_note(e)
+    snuff null
+  }
+}
+
+# `cig pass revoke <id>`: true when it took (a dry run takes nothing).
+pull pass_revoke(id) {
+  if str(id ?? "") == "" {
+    snuff false
+  }
+  roll r = null
+  burn {
+    try {
+      r = proc.run("cig", ["pass", "revoke", str(id)], {timeout_ms: 30000})
+    } ashtray e {
+      r = {code: -1}
+    }
+  }
+  snuff r.code == 0 or r.get("simulated", false)
+}
+
+# A file's pass is about the file, by its full path, under the label of the
+# store it belongs to.
+pull signed_subject(label, file) {
+  snuff {v: "cigo-signed-1", label: label, file: path.abs(file)}
+}
+
+# Where a file's signature from before passes was kept: `<key>.mac` beside a
+# record `<key>.json`, `<file>.mac` beside anything else (a list).
+pull legacy_mac(file) {
+  if file.ends_with(".json") {
+    snuff file.slice(0, file.len() - 5) + ".mac"
+  }
+  snuff file + ".mac"
+}
+
+# What a signed file's pass reads: the file, whole, as bytes.
+pull signed_work(s) {
+  snuff {file: s.file, sha256: hash.sha256_file(s.file)}
+}
+
+# The id of the pass a `<file>.pass` beside a file names, or "" unless it is
+# a pass of `kind` whose one file input is that very file: a `.pass` written
+# by hand or copied from elsewhere names nothing cigo will revoke.
+pull sidecar_id(file, kind) {
+  stick side = file + ".pass"
+  if not fs.is_file(side) {
+    snuff ""
+  }
+  try {
+    stick sh = pass.show(fs.read_text(side).trim())
+    stick files = as_list(sh.get("inputs", [])).filter(pack(i) => str(i.get("kind", "")) == "file")
+    if sh.kind == kind and files.len() == 1 and str(files[0].get("name", "")) == path.abs(file) {
+      snuff str(sh.id)
+    }
+  } ashtray e {
+  }
+  snuff ""
+}
+
+# A file whose signature from before passes moved onto a pass is marked by
+# a pass of its own, which reads nothing and so holds until it is revoked:
+# a `.mac` put back for that file later is never honored again.
+pull legacy_moved_subject(label, file) {
+  snuff {v: "cigo-legacy-moved-1", label: label, file: path.abs(file)}
+}
+
+pull legacy_moved(label, file) {
+  snuff pass_found("approval", legacy_moved_subject(label, file)) != null
+}
+
+pull mark_legacy_moved(label, file) {
+  try {
+    pass.issue("approval", legacy_moved_subject(label, file), pack(s) => {moved: s.file}, PASS_OPTS)
+  } ashtray e {
+    snuff false
+  }
+  snuff true
+}
+
+# Sign a file as it is now: a pass of `kind` over its bytes, named beside it
+# in `<file>.pass` (its token). The pass it was signed with before is revoked
+# first, so an older copy of the file put back does not verify again; its
+# signature from before passes goes. {ok, err}.
+pull sign_file(file, label, kind) {
+  stick side = file + ".pass"
+  stick old = sidecar_id(file, kind)
+  if old != "" and not pass_revoke(old) {
+    snuff {ok: false, err: "the pass it was signed with before could not be revoked (cig pass revoke)"}
+  }
+  roll p = null
+  try {
+    p = pass.issue(kind, signed_subject(label, file), pack(s) => signed_work(s), PASS_OPTS)
+  } ashtray e {
+    snuff {ok: false, err: str(e.message)}
+  }
+  if not write_outside(side, str(p.get("token", null) ?? "") + "\n") {
+    snuff {ok: false, err: "could not write " + tilde(side)}
+  }
+  if fs.is_file(legacy_mac(file)) {
+    remove_outside(legacy_mac(file))
+  }
+  snuff {ok: true, err: ""}
+}
+
+# Is this file signed as it is now? "ok" (a pass for it holds, or a `.mac`
+# from before passes verified and the file moved onto a pass), "changed" (the
+# file changed since it was signed, or the `.pass` beside it is not this
+# file's), "revoked" (its pass was revoked or ran out: cig pass revoke, a
+# rekey, a new cig for a verdict), "forged" (a `.mac` that does not verify
+# under this machine's key), "unchecked" (a `.mac` this cig cannot check) or
+# "gone" (no file, or no signature beside it).
+pull signed_state(file, label, kind) {
+  if not fs.is_file(file) {
+    snuff "gone"
+  }
+  if pass_found(kind, signed_subject(label, file)) != null {
+    snuff "ok"
+  }
+  stick mac = legacy_mac(file)
+  if fs.is_file(mac) {
+    # Moved onto a pass already: a `.mac` put back is not honored again.
+    if legacy_moved(label, file) {
+      snuff "forged"
+    }
+    stick before = hash.sha256_file(file)
+    stick r = tin_mac_as(file, fs.read_text(mac).trim(), label)
+    if r.code == 1 {
+      snuff "forged"
+    }
+    if r.code != 0 {
+      snuff "unchecked"
+    }
+    # The `.mac` vouched for these bytes, and they move onto a pass. If the
+    # file changed between the check and the pass, neither is trusted.
+    roll p = null
+    try {
+      p = pass.issue(kind, signed_subject(label, file), pack(s) => signed_work(s), PASS_OPTS)
+    } ashtray e {
+      # Honored this once; the `.mac` stays until a pass can be made.
+      snuff "ok"
+    }
+    if str(dig(p, ["result", "sha256"]) ?? "") != before {
+      pass_revoke(p.get("id", null))
+      snuff "forged"
+    }
+    # Without the mark, a copy of the `.mac` put back later would verify
+    # again: the `.mac` stays (honored this once) until the mark is made.
+    if mark_legacy_moved(label, file) and write_outside(file + ".pass", str(p.get("token", null) ?? "") + "\n") {
+      remove_outside(mac)
+    }
+    snuff "ok"
+  }
+  stick side = file + ".pass"
+  if fs.is_file(side) {
+    roll c = null
+    try {
+      c = pass.check(fs.read_text(side).trim())
+    } ashtray e {
+      # Not a pass at all: written by hand.
+      snuff "changed"
+    }
+    # It holds, but not for this file: a `.pass` from somewhere else.
+    if c.get("ok", false) {
+      snuff "changed"
+    }
+    snuff pick(str(c.get("why", "") ?? "").contains(path.base(file)), "changed", "revoked")
+  }
+  snuff "gone"
+}
+
+# How a signed file that no longer verifies came to be, for its E587 line.
+pull unverified_how(file, label, kind) {
+  if signed_state(file, label, kind) == "revoked" {
+    snuff "its pass was revoked (cig pass revoke, or cig tin rekey)"
+  }
+  snuff "was changed outside cigo blacklist"
+}
+
+# The pass a signed file names beside it (`<file>.pass`), revoked: the file
+# itself may be restored from a copy, and its pass must not hold again.
+# False when the revoke did not take (the `.pass` stays).
+pull unsign_file(file, kind) {
+  stick side = file + ".pass"
+  stick id = sidecar_id(file, kind)
+  if id != "" and not pass_revoke(id) {
+    snuff false
+  }
+  if fs.is_file(side) {
+    remove_outside(side)
+  }
+  if fs.is_file(legacy_mac(file)) {
+    remove_outside(legacy_mac(file))
+  }
+  snuff true
+}
 
 # ----- the tier matrix: risk × confidence → silent / notice / ask / refuse / gate
 #
@@ -5828,26 +6056,21 @@ pull remember_files(key) {
   snuff {json: path.join(REMEMBER_DIR, key + ".json"), mac: path.join(REMEMBER_DIR, key + ".mac")}
 }
 
-# Is this content remembered? The record is read only when its signature
-# verifies under the tin's key, so one written from outside the machine
-# (and never signed) does not count, and one from a label other than this
-# one (the trust store's, an agent approval's) does not count either.
+# Is this content remembered? The record counts only while its pass holds
+# (its bytes as cigo wrote them, under this machine's key), so one written
+# from outside the machine, or by a task, does not count. One from before
+# passes whose `.mac` does not verify is said (E889).
 pull remembered(content) {
-  stick key = remember_key(content)
-  stick f = remember_files(key)
-  if not fs.is_file(f.json) or not fs.is_file(f.mac) {
-    snuff false
-  }
-  stick r = tin_mac_as(f.json, fs.read_text(f.mac).trim(), REMEMBER_LABEL)
-  if r.code == 1 {
+  stick f = remember_files(remember_key(content))
+  stick st = signed_state(f.json, REMEMBER_LABEL, "approval")
+  if st == "forged" or st == "changed" {
     log.warn("E889 a remembered answer is not signed by your key (${tilde(f.json)}); ignored")
-    snuff false
   }
-  snuff r.code == 0
+  snuff st == "ok"
 }
 
-# Write a remembered yes, signed. False when it could not be signed (an
-# older cig, or no key here): the caller falls through to its own flow.
+# Write a remembered yes and keep it with a pass. False when it could not be
+# kept: the caller falls through to its own flow.
 pull remember_yes(content, scope, by, reason) {
   stick key = remember_key(content)
   stick f = remember_files(key)
@@ -5855,12 +6078,7 @@ pull remember_yes(content, scope, by, reason) {
   if not write_outside(f.json, json.stringify(rec, 2) + "\n") {
     snuff false
   }
-  stick r = tin_mac_as(f.json, null, REMEMBER_LABEL)
-  if r.code != 0 {
-    remove_outside(f.json)
-    snuff false
-  }
-  if not write_outside(f.mac, r.out.trim() + "\n") {
+  if not sign_file(f.json, REMEMBER_LABEL, "approval").ok {
     remove_outside(f.json)
     snuff false
   }
@@ -5977,7 +6195,6 @@ stick HEADLINES = {
 }
 stick PLAIN = {E580: "on the blacklist", E871: "credential file named", E872: "exfiltration pattern", E873: "persistence", E874: "downloads and executes remote code", E875: "obfuscated code", E876: "ransomware shape", E877: "destructive command", E878: "privilege escalation", E879: "references cig's or cigo's own state", E886: "text addressed to AI agents", E887: "invisible or look-alike text", E888: "probes for a sandbox", E881: "a typosquat of a popular package", E882: "a recently published version", E883: "a new install script this version adds", E884: "no linked source repository"}
 roll SAID = {}
-roll TRUST_NOTED = false
 
 pull guard_on() {
   snuff config().security != "off" and not flags.contains("--no-guard")
@@ -6028,12 +6245,33 @@ pull task_words(t) {
 }
 
 # The script files a task names that are here: part of what it is.
+# Whether a word could name a file here. A URL (`curl https://example.invalid/x.sh | sh`) is a
+# file nowhere, and on Windows a name with `:` past a drive letter, or with `<>|?*`, cannot even
+# be looked at. Such a word is never looked at: a pass records every path its work looks at,
+# there or not (cig-script#186), and a path Windows refuses to look at would stop the pass from
+# being issued, so the approval would not be kept.
+pull could_be_file(w) {
+  if w.contains("://") {
+    snuff false
+  }
+  if cig.os() == "windows" {
+    roll rest = w
+    if w.len() >= 2 and w.slice(1, 2) == ":" {
+      rest = w.slice(2)
+    }
+    if rest.contains(":") or ["<", ">", "|", "?", "*"].any(pack(c) => rest.contains(c)) {
+      snuff false
+    }
+  }
+  snuff true
+}
+
 pull task_files(t) {
   roll files = []
   stick dir = task_dir(t)
   for w in task_words(t) {
     stick clean = w.replace('"', "").replace("'", "").replace(";", "")
-    if SCRIPT_EXTS.any(pack(e) => clean.ends_with(e)) {
+    if SCRIPT_EXTS.any(pack(e) => clean.ends_with(e)) and could_be_file(clean) {
       stick p = pick(path.is_abs(clean), clean, path.join(dir, clean))
       if fs.is_file(p) and not files.contains(p) {
         files.push(p)
@@ -6117,49 +6355,195 @@ pull tin_mac_as(file, check, label) {
   snuff r
 }
 
-# Is this task approved as it is now? A record that does not verify under
-# this machine's key is a forged approval (E889): ignored and said.
-pull trusted(t, name) {
-  stick key = trust_key(t, name)
-  if config().trust == "off" or str(t.get("trust", "")) == "never" {
-    snuff {trusted: false, key: key}
+# The fields of a task an approval is about, each as JSON text: what
+# trust_key hashes besides the files. The environment by its names alone.
+pull trust_spec(t) {
+  roll m = {}
+  for k in ["cmd", "shell", "cmds", "cwd", "rm", "each", "stdin", "stdin_from"] {
+    if t.has(k) {
+      m[k] = json.stringify(t[k])
+    }
   }
+  stick envs = t.get("env", {})
+  if type_of(envs) == "map" {
+    m["env"] = json.stringify(envs.keys().sort())
+  }
+  snuff m
+}
+
+# Which approval: this task, in this project, as written. The files it names
+# are not here: the approval's work reads them, so they are its pass's
+# inputs, and a changed byte in any of them (a lockfile that appears too)
+# stops it holding.
+pull trust_subject(t, name) {
+  snuff {v: "cigo-trust-2", task: name, root: ROOT, spec: trust_spec(t)}
+}
+
+# The work of an approval: read every file trust_key reads (the scripts the
+# task names; whether each lockfile beside it and at the root is there, and
+# the ones that are), and return trust_key's digest, the name an approval
+# from before passes went by.
+pull trust_work(s) {
+  roll t = {}
+  for k in s.spec.keys() {
+    t[k] = json.parse(s.spec[k])
+  }
+  if t.has("env") {
+    roll names = {}
+    for n in as_list(t.env) {
+      names[str(n)] = ""
+    }
+    t["env"] = names
+  }
+  for f in task_files(t) + task_lockfiles(t) {
+    hash.sha256_file(f)
+  }
+  snuff {task: s.task, key: trust_key(t, s.task)}
+}
+
+# Approvals cigo has kept, for `cigo trust list`, `show` and `revoke`: one
+# record a pass under TRUST_INDEX, with the pass's token. The pass decides;
+# a record says what was approved and when, and grants nothing.
+stick TRUST_INDEX = path.join(TRUST_DIR, "passes")
+
+pull trust_index() {
+  roll recs = []
+  if fs.is_dir(TRUST_INDEX) {
+    for f in fs.list(TRUST_INDEX).sort() {
+      if f.ends_with(".json") {
+        stick at = path.join(TRUST_INDEX, path.base(f))
+        try {
+          recs.push(json.parse(fs.read_text(at)).merge({_file: at}))
+        } ashtray e {
+        }
+      }
+    }
+  }
+  snuff recs
+}
+
+pull trust_index_add(p, rec) {
+  stick id = str(p.get("id", null) ?? "")
+  if id == "" {
+    snuff
+  }
+  write_outside(path.join(TRUST_INDEX, id + ".json"), json.stringify(rec.merge({pass: id, token: str(p.get("token", null) ?? "")}), 2) + "\n")
+}
+
+# Take an approval back: its pass revoked, its record gone. A record is not
+# signed, so its pass is revoked only when the record's token is an approval
+# pass with the id the record names; the file removed is the record's own,
+# never a path built from what it says. False when the revoke did not take
+# (the record stays).
+pull trust_index_revoke(rec) {
+  stick id = str(rec.get("pass", ""))
+  roll vouched = false
+  if text.matches(id, '^[0-9a-f]{64}$') {
+    try {
+      stick sh = pass.show(str(rec.get("token", "")))
+      vouched = sh.kind == "approval" and str(sh.id) == id
+    } ashtray e {
+    }
+  }
+  if vouched and not pass_revoke(id) {
+    snuff false
+  }
+  remove_outside(str(rec.get("_file", "")))
+  snuff true
+}
+
+# Does an approval's pass still hold? {ok, why}.
+pull trust_holds(rec) {
+  try {
+    snuff pass.check(str(rec.get("token", "")))
+  } ashtray e {
+    snuff {ok: false, why: clip(str(e.message), 160)}
+  }
+}
+
+pull trust_pass(t, name) {
+  try {
+    snuff pass.issue("approval", trust_subject(t, name), pack(s) => trust_work(s), PASS_OPTS)
+  } ashtray e {
+    log.warn("the approval of `${name}` was not kept: " + clip(str(e.message), 200))
+    snuff null
+  }
+}
+
+# Is this task approved as it is now? One lookup, in process: the newest
+# approval pass for this task as written that still holds. An approval from
+# before passes is honored, and moved onto a pass the first time.
+pull trusted(t, name) {
+  if config().trust == "off" or str(t.get("trust", "")) == "never" {
+    snuff {trusted: false, key: trust_key(t, name)}
+  }
+  stick p = pass_found("approval", trust_subject(t, name))
+  if p != null {
+    snuff {trusted: true, key: str(dig(p, ["result", "key"]) ?? ""), pass: p.id}
+  }
+  snuff trusted_legacy(t, name)
+}
+
+# An approval from before passes: `<key>.json` beside `<key>.mac` in
+# TRUST_DIR, signed by `cig tin mac`. One that verifies is moved onto a pass
+# for the task as it is now, and the old files are put aside in
+# TRUST_DIR/retired (never read again); one that does not is a forged
+# approval (E889), ignored and said.
+pull trusted_legacy(t, name) {
+  stick key = trust_key(t, name)
   stick f = trust_files(key)
   if not fs.is_file(f.json) or not fs.is_file(f.mac) {
     snuff {trusted: false, key: key}
   }
-  stick r = tin_mac(f.json, fs.read_text(f.mac).trim())
-  if r.code == 0 {
-    snuff {trusted: true, key: key}
+  if legacy_moved(TRUST_LABEL, f.json) {
+    log.warn("E889 ${tilde(f.json)} is an approval from before passes that already moved onto one, put back since; ignored (cigo trust revoke ${name} removes it)")
+    snuff {trusted: false, key: key}
   }
+  stick r = tin_mac(f.json, fs.read_text(f.mac).trim())
   if r.code == 1 {
     log.warn("E889 a forged approval: ${tilde(f.json)} is not signed by your key; ignored (cigo trust revoke ${name} removes it)")
-  } else if not TRUST_NOTED {
-    TRUST_NOTED = true
-    log.warn("the trust store is checked with cig 1.11.0 or later (cig tin mac); this cig cannot, so every task is checked")
+    snuff {trusted: false, key: key}
   }
-  snuff {trusted: false, key: key}
+  if r.code != 0 {
+    snuff {trusted: false, key: key}
+  }
+  roll old = {}
+  try {
+    old = json.parse(fs.read_text(f.json))
+  } ashtray e {
+  }
+  stick p = trust_pass(t, name)
+  if p == null {
+    # Honored this once; the record stays until a pass can be made.
+    snuff {trusted: true, key: key}
+  }
+  # The pass vouches for what its work read, the record for what trust_key
+  # read a moment before: if they differ, the task moved in between, and
+  # neither counts.
+  if str(dig(p, ["result", "key"]) ?? "") != key {
+    pass_revoke(p.get("id", null))
+    snuff {trusted: false, key: key}
+  }
+  trust_index_add(p, {task: name, project: ROOT, at: str(old.get("at", time.now_iso())), by: str(old.get("by", "")), risk: str(old.get("risk", "")), findings: as_list(old.get("findings", [])), key: key})
+  stick retired = path.join(TRUST_DIR, "retired")
+  if mark_legacy_moved(TRUST_LABEL, f.json) and write_outside(path.join(retired, key + ".json"), fs.read_text(f.json)) {
+    remove_outside(f.json)
+    remove_outside(f.mac)
+  }
+  log.info("the approval of `${name}` moved onto a pass (${str(p.id ?? "").slice(0, 12)})")
+  snuff {trusted: true, key: key, pass: p.id}
 }
 
-# Write the approval and sign it. False when it could not be signed (an
-# older cig, or no key here): the run goes on, the approval is not kept.
+# Keep the approval, as a pass. False when it could not be kept: the run
+# goes on, the approval is not kept.
 pull approve(t, name, verdict) {
-  stick key = trust_key(t, name)
-  stick f = trust_files(key)
-  stick rec = {key: key, task: name, project: ROOT, at: time.now_iso(), by: "cig-orchestrator ${VERSION}", risk: verdict.risk, findings: verdict.findings.map(pack(x) => x.code + " " + x.where)}
-  if not write_outside(f.json, json.stringify(rec, 2) + "\n") {
-    fail("could not write ${f.json}")
-  }
-  stick r = tin_mac(f.json, null)
-  if r.code != 0 {
-    remove_outside(f.json)
-    log.warn("the approval of `${name}` was not kept: it could not be signed (" + r.err.trim() + "); cig 1.11.0 or later signs the trust store")
+  stick p = trust_pass(t, name)
+  if p == null {
     snuff false
   }
-  if not write_outside(f.mac, r.out.trim() + "\n") {
-    fail("could not write ${f.mac}")
-  }
-  log.info("approved `${name}` as it is now (key ${key.slice(0, 12)}); a change to its command, scripts or lockfiles is checked again")
+  stick key = str(dig(p, ["result", "key"]) ?? "")
+  trust_index_add(p, {task: name, project: ROOT, at: time.now_iso(), by: "cig-orchestrator ${VERSION}", risk: verdict.risk, findings: verdict.findings.map(pack(x) => x.code + " " + x.where), key: key})
+  log.info("approved `${name}` as it is now (pass ${str(p.id ?? "").slice(0, 12)}); a change to its command, scripts or lockfiles is checked again")
   snuff true
 }
 
@@ -8850,11 +9234,7 @@ pull missing_list_entries(name) {
 }
 
 pull list_verifies(f) {
-  stick mac = f + ".mac"
-  if not fs.is_file(f) or not fs.is_file(mac) {
-    snuff false
-  }
-  snuff tin_mac_as(f, fs.read_text(mac).trim(), BLACKLIST_LABEL).code == 0
+  snuff signed_state(f, BLACKLIST_LABEL, "rules") == "ok"
 }
 
 pull today() {
@@ -8870,7 +9250,7 @@ pull blacklist(all) {
     roll out = []
     # Your own list, gone or unsigned: its entries still count (#80).
     stick mine = path.join(BLACKLIST_DIR, MINE)
-    if not fs.is_file(mine) or not fs.is_file(mine + ".mac") {
+    if signed_state(mine, BLACKLIST_LABEL, "rules") == "gone" {
       out = out + missing_list_entries(MINE).map(pack(e) => e.merge({verified: true}))
     }
     if fs.is_dir(BLACKLIST_DIR) {
@@ -8885,7 +9265,7 @@ pull blacklist(all) {
           if not ok {
             if not BLACKLIST_NOTED.has(name) {
               BLACKLIST_NOTED[name] = true
-              log.warn("E587 a list that does not verify: ${tilde(f)} was changed outside cigo blacklist; its entries still count, with the last copy of it that verified (cigo blacklist reload signs it once you have read the change)")
+              log.warn("E587 a list that does not verify: ${tilde(f)} " + unverified_how(f, BLACKLIST_LABEL, "rules") + "; its entries still count, with the last copy of it that verified (cigo blacklist reload signs it once you have read the change)")
             }
             stick kept = path.join(BLACKLIST_KEEP, name)
             if list_verifies(kept) {
@@ -9074,12 +9454,9 @@ pull save_list(name, entries) {
     if not write_outside(target, body) {
       fail("could not write ${tilde(target)}")
     }
-    stick r = tin_mac_as(target, null, BLACKLIST_LABEL)
-    if r.code != 0 {
-      fail("the list was written but could not be signed (" + clip(str(r.err).trim(), 160) + "); cig 1.11.0 or later with a key here signs it, and an unsigned list is said every run (E587)")
-    }
-    if not write_outside(target + ".mac", r.out.trim() + "\n") {
-      fail("could not write ${tilde(target)}.mac")
+    stick signed = sign_file(target, BLACKLIST_LABEL, "rules")
+    if not signed.ok {
+      fail("the list was written but could not be signed (" + clip(signed.err, 160) + "); an unsigned list is said every run (E587)")
     }
   }
   # The last list that verified, kept in the tin as well: deleting the file
@@ -9143,11 +9520,7 @@ pull allow_entries(body) {
 # said once (E587) and its entries are ignored (the last copy that verified
 # never stands in: taking an allow out never widens a block).
 pull allows_verify(f) {
-  stick mac = f + ".mac"
-  if not fs.is_file(f) or not fs.is_file(mac) {
-    snuff false
-  }
-  snuff tin_mac_as(f, fs.read_text(mac).trim(), BL_ALLOW_LABEL).code == 0
+  snuff signed_state(f, BL_ALLOW_LABEL, "rules") == "ok"
 }
 
 pull allows() {
@@ -9160,7 +9533,7 @@ pull allows() {
       } else {
         if not BLACKLIST_NOTED.has(ALLOWS_FILE) {
           BLACKLIST_NOTED[ALLOWS_FILE] = true
-          log.warn("E587 a list that does not verify: ${tilde(f)} was changed outside cigo blacklist; the allows in it are ignored until cigo blacklist reload")
+          log.warn("E587 a list that does not verify: ${tilde(f)} " + unverified_how(f, BL_ALLOW_LABEL, "rules") + "; the allows in it are ignored until cigo blacklist reload")
         }
       }
     }
@@ -9183,12 +9556,9 @@ pull save_allows(items) {
     if not write_outside(target, body) {
       fail("could not write ${tilde(target)}")
     }
-    stick r = tin_mac_as(target, null, BL_ALLOW_LABEL)
-    if r.code != 0 {
-      fail("the allows file was written but could not be signed (" + clip(str(r.err).trim(), 160) + ")")
-    }
-    if not write_outside(target + ".mac", r.out.trim() + "\n") {
-      fail("could not write ${tilde(target)}.mac")
+    stick signed = sign_file(target, BL_ALLOW_LABEL, "rules")
+    if not signed.ok {
+      fail("the allows file was written but could not be signed (" + clip(signed.err, 160) + ")")
     }
   }
   guard_note({kind: "blacklist-allow", outcome: "signed (${items.len()} allow" + pick(items.len() == 1, "", "s") + ")"})
@@ -9243,11 +9613,12 @@ pull allow_for_url(url) {
 # {task, by, at, until, unboxed}, newest first; expired rows dropped.
 pull blacklist_exceptions() {
   stick f = EXCEPTIONS_FILE
-  if not fs.is_file(f) or not fs.is_file(f + ".mac") {
+  stick st = signed_state(f, BL_ALLOW_LABEL, "rules")
+  if st == "gone" {
     snuff []
   }
-  if tin_mac_as(f, fs.read_text(f + ".mac").trim(), BL_ALLOW_LABEL).code != 0 {
-    log.warn("E587 a list that does not verify: ${tilde(f)} was changed outside cigo blacklist; the one-off exceptions in it are ignored")
+  if st != "ok" {
+    log.warn("E587 a list that does not verify: ${tilde(f)} " + pick(st == "revoked", "its pass was revoked (cig pass revoke, or cig tin rekey)", "was changed outside cigo blacklist") + "; the one-off exceptions in it are ignored")
     snuff []
   }
   roll out = []
@@ -9278,11 +9649,7 @@ pull write_exceptions(rows) {
   if not write_outside(f, body) {
     snuff false
   }
-  stick m = tin_mac_as(f, null, BL_ALLOW_LABEL)
-  if m.code != 0 {
-    snuff false
-  }
-  snuff write_outside(f + ".mac", m.out.trim() + "\n")
+  snuff sign_file(f, BL_ALLOW_LABEL, "rules").ok
 }
 
 pull blacklist_exception_for(task_name) {
@@ -10929,12 +11296,9 @@ pull kept_verdict(key) {
     snuff null
   }
   stick f = verdict_files(key)
-  if not fs.is_file(f.json) or not fs.is_file(f.mac) {
-    snuff null
-  }
-  stick r = tin_mac_as(f.json, fs.read_text(f.mac).trim(), VERDICT_LABEL)
-  if r.code != 0 {
-    if r.code == 1 {
+  stick st = signed_state(f.json, VERDICT_LABEL, "verdict")
+  if st != "ok" {
+    if st == "forged" or st == "changed" {
       log.warn("a kept verdict is not signed by your key (${tilde(f.json)}): ignored, and rehearsed again")
     }
     snuff null
@@ -10957,12 +11321,11 @@ pull keep_verdict(key, r) {
   if not write_outside(f.json, json.stringify(rec, 2) + "\n") {
     snuff false
   }
-  stick m = tin_mac_as(f.json, null, VERDICT_LABEL)
-  if m.code != 0 {
+  if not sign_file(f.json, VERDICT_LABEL, "verdict").ok {
     remove_outside(f.json)
     snuff false
   }
-  snuff write_outside(f.mac, m.out.trim() + "\n")
+  snuff true
 }
 
 # A rehearsal, or the verdict kept from one of the same bytes.
@@ -11557,11 +11920,23 @@ pull do_trust(g) {
   stick sub = targets.get(0, "")
   if sub == "" or sub == "list" {
     roll recs = []
+    for r in trust_index() {
+      stick h = trust_holds(r)
+      roll shown = {}
+      for k in r.keys() {
+        if k != "token" and k != "_file" {
+          shown[k] = r[k]
+        }
+      }
+      recs.push(shown.merge({holds: h.get("ok", false), why: h.get("why", null)}))
+    }
+    # Approvals from before passes not used since: honored, and moved onto
+    # a pass the first time their task runs.
     if fs.is_dir(TRUST_DIR) {
       for f in fs.list(TRUST_DIR).sort() {
         if f.ends_with(".json") {
           try {
-            recs.push(json.parse(fs.read_text(path.join(TRUST_DIR, f))))
+            recs.push(json.parse(fs.read_text(path.join(TRUST_DIR, path.base(f)))).merge({from_before_passes: true}))
           } ashtray e {
           }
         }
@@ -11573,7 +11948,13 @@ pull do_trust(g) {
       exhale "no approvals (cigo trust <task> approves one as it is now; cigo run <task> --accept-risk after a verdict does too)"
     } else {
       for r in recs {
-        exhale "${str(r.get("task", "?"))}  ${str(r.get("risk", ""))}  ${str(r.get("at", ""))}  ${tilde(str(r.get("project", "")))}  (key ${str(r.get("key", "")).slice(0, 12)})"
+        roll tail = ""
+        if r.get("from_before_passes", false) {
+          tail = "  (key ${str(r.get("key", "")).slice(0, 12)}, from before passes)"
+        } else {
+          tail = "  (pass ${str(r.get("pass", "")).slice(0, 12)})" + pick(r.get("holds", false), "", ": no longer holds, " + str(r.get("why", "")))
+        }
+        exhale "${str(r.get("task", "?"))}  ${str(r.get("risk", ""))}  ${str(r.get("at", ""))}  ${tilde(str(r.get("project", "")))}" + tail
       }
     }
     snuff
@@ -11583,47 +11964,88 @@ pull do_trust(g) {
     if name == "" or not g.tasks.has(name) {
       fail("cigo trust show <task>; `cigo list` shows them")
     }
-    stick key = trust_key(g.tasks[name], name)
-    stick f = trust_files(key)
-    if not fs.is_file(f.json) {
-      exhale "`${name}` is not approved as it is now (key ${key.slice(0, 12)})"
+    stick t = g.tasks[name]
+    stick p = pass_found("approval", trust_subject(t, name))
+    if p == null {
+      stick tr = trusted_legacy(t, name)
+      if not tr.trusted {
+        exhale "`${name}` is not approved as it is now (key ${tr.key.slice(0, 12)})"
+        snuff
+      }
+      exhale "`${name}` was approved before passes; that approval now holds as a pass"
       snuff
     }
-    exhale fs.read_text(f.json).trim()
-    if not fs.is_file(f.mac) {
-      exhale "signature: none beside it, so the approval is not used (cigo trust ${name} approves it again)"
-      snuff
+    stick rec = trust_index().filter(pack(r) => str(r.get("pass", "")) == p.id)
+    if not rec.is_empty() {
+      roll shown = {}
+      for k in rec[0].keys() {
+        if k != "token" and k != "_file" {
+          shown[k] = rec[0][k]
+        }
+      }
+      exhale json.stringify(shown, 2)
     }
-    stick r = tin_mac(f.json, fs.read_text(f.mac).trim())
-    exhale pick(r.code == 0, "signature: matches your key", pick(r.code == 1, "signature: does NOT match your key (E889): ignored", "signature: not checked (cig 1.11.0 or later checks it)"))
+    exhale "pass ${p.id.slice(0, 12)}: holds, kept by cig under your tin's key; it reads ${p.inputs} input" + pick(p.inputs == 1, "", "s") + ", and a changed byte in any of them stops it (cig pass show ${p.id.slice(0, 16)})"
     snuff
   }
   if sub == "revoke" {
     if flags.contains("--all") {
       roll n = 0
+      for r in trust_index() {
+        if not trust_index_revoke(r) {
+          fail("could not revoke the approval of `${str(r.get("task", "?"))}` (cig pass revoke ${str(r.get("pass", "")).slice(0, 16)} failed); the rest were not taken back either")
+        }
+        n += 1
+      }
       if fs.is_dir(TRUST_DIR) {
         for f in fs.list(TRUST_DIR) {
-          if f.ends_with(".json") or f.ends_with(".mac") {
-            remove_outside(path.join(TRUST_DIR, f))
+          if f.ends_with(".json") {
+            remove_outside(path.join(TRUST_DIR, path.base(f)))
             n += 1
+          } else if f.ends_with(".mac") {
+            remove_outside(path.join(TRUST_DIR, path.base(f)))
           }
         }
       }
-      exhale "revoked every approval (${n} file" + pick(n == 1, "", "s") + ")"
+      exhale "revoked every approval (${n})"
       snuff
     }
     stick name = targets.get(1, "")
     if name == "" or not g.tasks.has(name) {
       fail("cigo trust revoke <task>|--all")
     }
-    stick key = trust_key(g.tasks[name], name)
-    stick f = trust_files(key)
-    if not fs.is_file(f.json) {
+    stick t = g.tasks[name]
+    roll n = 0
+    for r in trust_index() {
+      if str(r.get("task", "")) == name and str(r.get("project", "")) == ROOT {
+        if not trust_index_revoke(r) {
+          fail("could not revoke the approval of `${name}` (cig pass revoke ${str(r.get("pass", "")).slice(0, 16)} failed); it still holds")
+        }
+        n += 1
+      }
+    }
+    # Any pass for the task as it is now that no record names (a record that
+    # could not be written), however many there are.
+    roll left = 16
+    roll p = pass_found("approval", trust_subject(t, name))
+    while p != null and left > 0 {
+      if not pass_revoke(p.id) {
+        fail("could not revoke the approval of `${name}` (cig pass revoke ${p.id.slice(0, 16)} failed); it still holds")
+      }
+      n += 1
+      left -= 1
+      p = pass_found("approval", trust_subject(t, name))
+    }
+    stick f = trust_files(trust_key(t, name))
+    if fs.is_file(f.json) {
+      remove_outside(f.json)
+      remove_outside(f.mac)
+      n += 1
+    }
+    if n == 0 {
       exhale "`${name}` was not approved as it is now; nothing to revoke"
       snuff
     }
-    remove_outside(f.json)
-    remove_outside(f.mac)
     exhale "revoked the approval of `${name}`"
     snuff
   }
@@ -13690,6 +14112,17 @@ pull do_guard() {
   } else if sub == "log" {
     expect_flags(["--json", "--all"])
     do_guard_log()
+  } else if sub == "cache" {
+    # The verdict cache (#117): how often a command's read came from it, and
+    # `clear` to make every read again.
+    expect_flags(["--json"])
+    do_guard_cache(targets.get(1, "stats"))
+  } else if sub == "check-line" {
+    # The guard's read of one command line, as the agent hook reads it, from
+    # stdin (so the line is never a shell word): the findings, the risk, the
+    # tier, and whether the read came from the verdict cache.
+    expect_flags(["--json"])
+    do_guard_check_line()
   } else if sub == "stats" {
     # The guard log, counted: prompts per day, per kind and per code; for
     # asks and gates, how often each was approved, declined or left; and
@@ -13718,7 +14151,7 @@ pull do_guard() {
     expect_flags(["--json"])
     do_guard_tier(targets.get(1, ""), targets.get(2, ""))
   } else {
-    fail("cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | stats [--since=30d] | uninstall [--yes] | tier [<risk> [<confidence>]]]")
+    fail("cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | stats [--since=30d] | cache [stats | clear] | uninstall [--yes] | tier [<risk> [<confidence>]]]")
   }
 }
 
@@ -13946,7 +14379,7 @@ pull do_guard_allow_bytes(thing) {
     what = tilde(f)
   }
   if not allow_bytes(sha, what) {
-    fail("the allowance could not be signed (cig tin mac, cig 1.11.0 or later) or kept in ${tilde(ALLOW_DIR)}")
+    fail("the allowance could not be kept as a pass (cig doctor says why) or written in ${tilde(ALLOW_DIR)}")
   }
   guard_note({kind: "allow", thing: sha})
   exhale "${what} is allowed (sha256 ${sha.slice(0, 12)}…): cigo run-url runs these bytes without a rehearsal"
@@ -14764,15 +15197,11 @@ pull allow_files(sha) {
 }
 
 pull allowed_bytes(sha) {
-  stick f = allow_files(sha)
-  if not fs.is_file(f.json) or not fs.is_file(f.mac) {
-    snuff false
+  stick st = signed_state(allow_files(sha).json, ALLOW_LABEL, "approval")
+  if st == "forged" or st == "changed" {
+    log.warn("an allowance is not signed by your key (${tilde(allow_files(sha).json)}): ignored")
   }
-  stick r = tin_mac_as(f.json, fs.read_text(f.mac).trim(), ALLOW_LABEL)
-  if r.code == 1 {
-    log.warn("an allowance is not signed by your key (${tilde(f.json)}): ignored")
-  }
-  snuff r.code == 0
+  snuff st == "ok"
 }
 
 pull allow_bytes(sha, what) {
@@ -14780,12 +15209,11 @@ pull allow_bytes(sha, what) {
   if not write_outside(f.json, json.stringify({sha256: sha, what: what, at: time.now_iso(), by: "cig-orchestrator " + VERSION}, 2) + "\n") {
     snuff false
   }
-  stick m = tin_mac_as(f.json, null, ALLOW_LABEL)
-  if m.code != 0 {
+  if not sign_file(f.json, ALLOW_LABEL, "approval").ok {
     remove_outside(f.json)
     snuff false
   }
-  snuff write_outside(f.mac, m.out.trim() + "\n")
+  snuff true
 }
 
 pull url_blacklist(url) {
@@ -14947,18 +15375,15 @@ pull approval_files(id) {
   snuff {pending: path.join(AGENT_DIR, "pending", id + ".json"), json: path.join(AGENT_DIR, "approved", id + ".json"), mac: path.join(AGENT_DIR, "approved", id + ".mac")}
 }
 
-# A person's approval for this exact command here, signed with the tin's
-# key; used once.
+# A person's approval for this exact command here, held by a pass over the
+# record; used once (consume_grant revokes the pass).
 pull approved(id) {
   stick f = approval_files(id)
-  if not fs.is_file(f.json) or not fs.is_file(f.mac) {
-    snuff false
-  }
-  stick r = tin_mac_as(f.json, fs.read_text(f.mac).trim(), AGENT_LABEL)
-  if r.code == 1 {
+  stick st = signed_state(f.json, AGENT_LABEL, "approval")
+  if st == "forged" or st == "changed" {
     log.warn("E889 an agent approval is not signed by your key (${tilde(f.json)}); ignored")
   }
-  snuff r.code == 0
+  snuff st == "ok"
 }
 
 # URLs a command line names, against your blacklist.
@@ -15401,7 +15826,7 @@ pull do_scrub() {
 pull do_agent() {
   stick sub = targets.get(0, "")
   if sub == "run" {
-    expect_flags(["--agent", "--session"])
+    expect_flags(["--agent", "--session", "--cache"])
     do_agent_run()
   } else if sub == "log" {
     expect_flags(["--agent", "--session", "--json"])
@@ -15417,6 +15842,123 @@ pull do_agent() {
   }
 }
 
+# ----- the verdict cache (cig-orchestrator#117, cig-script#186) -------------------------
+#
+# An agent's session repeats itself: the same `git status`, the same test
+# run, dozens of times. The read of a command line is remembered as one of
+# cig's verdict passes, about the line exactly as written and this cigo's
+# version; the pass also reads this cigo's own source and the rules the read
+# uses, so a new release, a changed rule or another line misses. Only the
+# scan of the line is remembered: the blacklist half is read live every
+# time, and what a person says to an ask is never remembered here. A hit
+# gives exactly the findings a fresh read gives, since both go through the
+# same text form (a weight with a fraction is kept as text in a pass).
+# Entries last a week. `cigo guard cache clear` revokes every verdict pass.
+
+# "hit", "miss" or "none" (no pass could be kept or read) for the line read
+# last, for the guard log.
+roll VERDICT_CACHE = "none"
+
+pull findings_out(found) {
+  snuff found.map(pack(f) => f.merge({w: str(f.get("w", 0))}))
+}
+
+pull findings_in(found) {
+  snuff as_list(found).map(pack(f) => f.merge({w: float(str(f.get("w", "0")))}))
+}
+
+pull scan_line(line) {
+  snuff scan_text("the command", line, true, false, 0, {left: DECODE_BUDGET})
+}
+
+# The scan of a command line, from the cache when a verdict for it holds.
+pull line_findings(line) {
+  roll m = null
+  try {
+    m = pass.memo("verdict", {v: "cigo-verdict-2", line: line, cigo: VERSION}, pack(s) => findings_out(scan_line(s.line)), {until: "7d"})
+  } ashtray e {
+    VERDICT_CACHE = "none"
+    snuff findings_in(findings_out(scan_line(line)))
+  }
+  VERDICT_CACHE = pick(m.get("hit", false), "hit", pick(m.get("id", null) == null, "none", "miss"))
+  snuff findings_in(m.result)
+}
+
+# `cigo guard check-line [--json]`: a line from stdin, read as the hook
+# reads a command an agent runs.
+pull do_guard_check_line() {
+  stick line = stdin()
+  stick findings = line_findings(line) + line_blacklist(line)
+  stick risk = risk_of(findings)
+  stick tier = tier_for(risk, findings)
+  if flags.contains("--json") {
+    exhale json.stringify({risk: risk, tier: tier, cache: VERDICT_CACHE, findings: findings}, 2)
+    snuff
+  }
+  exhale "${risk} (${tier}), read " + pick(VERDICT_CACHE == "hit", "from the verdict cache", "afresh")
+  for f in findings {
+    exhale "  ${f.code}  ${f.cat}  ${f.where}: ${f.text}"
+  }
+}
+
+# `cigo guard cache [stats | clear]`.
+pull do_guard_cache(what) {
+  if what == "clear" {
+    roll r = null
+    burn {
+      try {
+        r = proc.run("cig", ["pass", "revoke", "--kind", "verdict"], {timeout_ms: 30000})
+      } ashtray e {
+        r = {code: -1, err: e.message}
+      }
+    }
+    if r.code != 0 and not r.get("simulated", false) {
+      fail("the verdict cache could not be cleared: " + clip(str(r.get("err", "")).trim(), 200))
+    }
+    guard_note({kind: "cache", outcome: "cleared"})
+    exhale "cleared: every verdict pass stops holding (the read of each command, and kept rehearsal verdicts, are made again)"
+    snuff
+  }
+  if what != "stats" {
+    fail("cigo guard cache [stats | clear]")
+  }
+  stick cut = time.format_ms(time.now_ms() - 30 * 86400000, "%Y-%m-%dT%H:%M:%S")
+  roll hits = 0
+  roll misses = 0
+  for e in guard_events(0) {
+    stick c = str(e.get("cache", ""))
+    if c == "" or str(e.get("at", "")) < cut {
+      continue
+    }
+    if c == "hit" {
+      hits += 1
+    } else if c == "miss" {
+      misses += 1
+    }
+  }
+  roll kept = 0
+  burn {
+    try {
+      stick r = proc.run("cig", ["pass", "list", "--kind", "verdict", "--json"], {timeout_ms: 30000, reads: true})
+      if r.code == 0 {
+        kept = as_list(json.parse(r.out)).len()
+      }
+    } ashtray e {
+    }
+  }
+  stick reads = hits + misses
+  if flags.contains("--json") {
+    exhale json.stringify({kept: kept, hits: hits, misses: misses, days: 30}, 2)
+    snuff
+  }
+  exhale "${kept} verdict pass" + pick(kept == 1, "", "es") + " kept: the command reads and kept rehearsal verdicts (cig pass list --kind verdict)"
+  if reads == 0 {
+    exhale "no command read through the cache in the last 30 days"
+  } else {
+    exhale "last 30 days: ${hits} of ${reads} command" + pick(reads == 1, "", "s") + " read from the cache (" + str(int(hits * 100 / reads)) + "%)"
+  }
+}
+
 pull do_agent_run() {
   stick line = extra.join(" ").trim()
   if line == "" {
@@ -15428,12 +15970,16 @@ pull do_agent_run() {
   stick shown = clip(redact(line), 200)
   roll findings = []
   if guard_on() {
-    findings = scan_text("the command", line, true, false, 0, {left: DECODE_BUDGET}) + line_blacklist(line)
+    findings = line_findings(line) + line_blacklist(line)
   }
   stick risk = risk_of(findings)
   stick tier = tier_for(risk, findings)
   stick id = approval_id(line, cwd)
-  stick base = {kind: "agent", agent: agent, session: session, command: shown, cwd: tilde(cwd), risk: risk}
+  # The hook read the line first and says how (`--cache`, for the log only:
+  # it decides nothing); without it, this read is the one that counts.
+  stick said_cache = guard_flag("--cache")
+  stick cache_word = pick(said_cache == "hit" or said_cache == "miss" or said_cache == "none", said_cache ?? "", VERDICT_CACHE)
+  stick base = {kind: "agent", agent: agent, session: session, command: shown, cwd: tilde(cwd), risk: risk, cache: cache_word}
   # An agent has no terminal of its own: a gate is refused in the agent's
   # session, since nothing a task runs can answer an OS authentication.
   # Refuse = refused with one line; notice = runs in the box with the note
@@ -15753,10 +16299,14 @@ pull approval_grant(id) {
   snuff {ok: true, hosts: hosts}
 }
 
+# Used: the pass is revoked as well as the record taken away, so a copy of
+# the record put back later is not an approval again.
 pull consume_grant(id) {
   stick f = approval_files(id)
+  if not unsign_file(f.json, "approval") {
+    log.warn("the approval ${id} could not be revoked (cig pass revoke); its record goes, which stops it holding")
+  }
   remove_outside(f.json)
-  remove_outside(f.mac)
 }
 
 # What a command printed, as it printed it: stdout to stdout, stderr to
@@ -15813,12 +16363,11 @@ pull do_approve() {
   if not write_outside(f.json, json.stringify({id: id, command: p.command, cwd: p.cwd, agent: p.agent, session: p.session, hosts: as_list(p.get("hosts", [])), by: how, at: time.now_iso()}, 2) + "\n") {
     fail("could not write ${f.json}")
   }
-  stick m = tin_mac_as(f.json, null, AGENT_LABEL)
-  if m.code != 0 {
+  stick signed = sign_file(f.json, AGENT_LABEL, "approval")
+  if not signed.ok {
     remove_outside(f.json)
-    fail("the approval could not be signed (cig tin mac): " + m.err.trim())
+    fail("the approval could not be kept as a pass: " + clip(signed.err, 200))
   }
-  write_outside(f.mac, m.out.trim() + "\n")
   remove_outside(f.pending)
   guard_note({kind: "approve", thing: id, outcome: "approved (${how})", decision: "yes"})
   exhale "approved once: ${p.agent} can run it now"
@@ -16006,13 +16555,13 @@ pull do_agent_hook(which_agent) {
   }
   stick cwd = str(call.get("cwd", fs.cwd()))
   stick session = str(call.get("session_id", ""))
-  stick findings = scan_text("the command", line, true, false, 0, {left: DECODE_BUDGET}) + line_blacklist(line)
+  stick findings = line_findings(line) + line_blacklist(line)
   stick risk = risk_of(findings)
   stick tier = tier_for(risk, findings)
   # In an agent's session a gate has no one to answer it, so it is refused,
   # as refuse is; ask waits for a person.
   if tier == "gate" or tier == "refuse" {
-    guard_note({kind: "agent", agent: "claude-code", session: session, command: clip(redact(line), 200), cwd: tilde(cwd), risk: risk, outcome: "refused"})
+    guard_note({kind: "agent", agent: "claude-code", session: session, command: clip(redact(line), 200), cwd: tilde(cwd), risk: risk, outcome: "refused", cache: VERDICT_CACHE})
     hook_deny("cigo refused this command, and nothing ran: it is rated critical (" + top_finding(findings).code + " " + top_finding(findings).says + "). Tell your user what you were trying to do; do not try another way around it.")
     snuff
   }
@@ -16024,11 +16573,11 @@ pull do_agent_hook(which_agent) {
   if tier == "ask" and not approved(id) and not remembered(line) {
     stick f = approval_files(id)
     write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: line, cwd: cwd, risk: risk, findings: findings, at: time.now_iso()}, 2) + "\n")
-    guard_note({kind: "agent", agent: "claude-code", session: session, command: clip(redact(line), 200), cwd: tilde(cwd), risk: risk, outcome: "waiting for a person", thing: id})
+    guard_note({kind: "agent", agent: "claude-code", session: session, command: clip(redact(line), 200), cwd: tilde(cwd), risk: risk, outcome: "waiting for a person", thing: id, cache: VERDICT_CACHE})
     hook_deny("E894 a human has to say yes: this command is rated high (" + top_finding(findings).code + " " + top_finding(findings).says + "). Nothing ran. Ask your user to approve it on their own terminal with `cigo approve " + id + "` (it asks the system for their password), then run the same command again.")
     snuff
   }
-  stick wrapped = cigo_quick() + " agent run --agent=claude-code --session=" + sh_quote(session) + " -- " + sh_quote(line)
+  stick wrapped = cigo_quick() + " agent run --agent=claude-code --session=" + sh_quote(session) + " --cache=" + VERDICT_CACHE + " -- " + sh_quote(line)
   exhale json.stringify({hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: input.merge({command: wrapped})}})
 }
 

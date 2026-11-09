@@ -5,6 +5,73 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## Unreleased
+
+Everything cigo keeps, held by cig's passes; a hook that reads a command
+once.
+
+- **Approvals are passes** (otmof-ops/cig-script#186). An approval of a
+  task is one of cig's `approval` passes: it names the task as written in
+  this project, and the files it depends on (the scripts it names, each
+  lockfile beside it and at the root, there or not) are the pass's
+  recorded inputs. Checking it is one lookup in process: the `cig tin mac`
+  process every check paid is gone. A changed byte in any of those files,
+  or a lockfile that appears, stops it holding. `cigo trust list` says
+  whether each approval still holds, and why not; `cigo trust revoke`
+  revokes the pass, and `cig pass revoke --kind approval` takes every
+  approval back at once.
+- **Every file cigo signs is held by a pass.** The blacklist's lists, its
+  allows and the one-off exceptions (`rules` passes), allowances,
+  remembered answers and agent approvals (`approval` passes), and kept
+  rehearsal verdicts (`verdict` passes) are each held by a pass over their
+  bytes, named beside the file in `<file>.pass`. A file changed by hand
+  stops verifying as before (`E587`), and one whose signature is gone
+  still counts from the tin (`E588`). An agent approval is used once, and
+  using it now revokes its pass as well, so a copy of the record put back
+  later is not an approval again.
+- **What cigo signed before is honored and moved onto a pass.** A record
+  or list signed with `cig tin mac` is checked once, the first time it is
+  read: one that verifies moves onto a pass (an approval's old record is
+  put aside under `trust/retired/`), and one that does not is said
+  (`E889`, `E587`) as before. The blacklist bundle that `export` writes
+  for another machine keeps its `cig tin mac` signature.
+- **The verdict cache** (#117). The guard's read of a command line an
+  agent runs is kept as a `verdict` pass about the line as written and
+  this cigo's version, which also records cigo's own source and the rules
+  the read used: the same line again is read from it, with exactly the
+  findings a fresh read gives, and a new release, a changed rule or
+  another line reads afresh. Only the scan is kept: the blacklist is read
+  live, and an ask is never answered from it. Verdicts last a week. `cigo
+  guard cache stats` counts the hits from the guard log (each agent event
+  carries `cache`); `cigo guard cache clear` revokes every verdict pass.
+  `cigo guard check-line` reads one line from stdin as the hook does and
+  says whether the read came from the cache; every detection corpus
+  sample gives the same findings from the cache as from a fresh read.
+- **What looks different.**
+  - `cigo trust list --json` gives each approval's `pass`, whether it
+    still `holds` and `why` not. An approval that stopped holding stays
+    listed until it is revoked.
+  - `cigo trust revoke --all` counts the approvals it took back.
+  - `cigo trust show` says whether the pass holds, and no longer prints a
+    signature line.
+  - An approval is for its project. Before, a task that named no file
+    and had no lockfile was approved for every project with the same
+    command.
+  - `cig pass revoke --kind approval` takes back allowances, remembered
+    answers and agent approvals with the task approvals, since all are
+    one kind.
+  - A `.pass` beside a file grants nothing: deleting it does not unsign
+    the file, and one copied from elsewhere does not sign it.
+  - Signing a list again revokes the pass it was signed with before, so
+    an older copy put back does not verify (`E587`).
+  - A `.mac` from before passes, put back after its file moved onto a
+    pass, is never honored again (`E889`, `E587`).
+- **Privacy.** The verdict cache keeps each command line an agent runs,
+  as written, in cig's keys folder for up to a week. The guard log keeps
+  it redacted. `cigo guard cache clear` takes them all back.
+- **cig 1.20.0 or newer** (the first with passes). The native cigo in CI
+  is built by cigcompile 0.3.0 onto cig 1.20.0.
+
 ## 1.17.0 — 2026-11-09
 
 What an agent reads, scrubbed; PyPI and crates READMEs read as npm's are; the
