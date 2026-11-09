@@ -44,6 +44,9 @@ once.
   live, and an ask is never answered from it. Verdicts last a week. `cigo
   guard cache stats` counts the hits from the guard log (each agent event
   carries `cache`); `cigo guard cache clear` revokes every verdict pass.
+  `cigo guard check-line` reads one line from stdin as the hook does and
+  says whether the read came from the cache; every detection corpus
+  sample gives the same findings from the cache as from a fresh read.
 - **cig 1.20.0 or newer** (the first with passes). The native cigo in CI
   is built by cigcompile 0.3.0 onto cig 1.20.0.
 

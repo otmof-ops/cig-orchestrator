@@ -13990,6 +13990,12 @@ pull do_guard() {
     # `clear` to make every read again.
     expect_flags(["--json"])
     do_guard_cache(targets.get(1, "stats"))
+  } else if sub == "check-line" {
+    # The guard's read of one command line, as the agent hook reads it, from
+    # stdin (so the line is never a shell word): the findings, the risk, the
+    # tier, and whether the read came from the verdict cache.
+    expect_flags(["--json"])
+    do_guard_check_line()
   } else if sub == "stats" {
     # The guard log, counted: prompts per day, per kind and per code; for
     # asks and gates, how often each was approved, declined or left; and
@@ -15749,6 +15755,23 @@ pull line_findings(line) {
   }
   VERDICT_CACHE = pick(m.get("hit", false), "hit", pick(m.get("id", null) == null, "none", "miss"))
   snuff findings_in(m.result)
+}
+
+# `cigo guard check-line [--json]`: a line from stdin, read as the hook
+# reads a command an agent runs.
+pull do_guard_check_line() {
+  stick line = stdin()
+  stick findings = line_findings(line) + line_blacklist(line)
+  stick risk = risk_of(findings)
+  stick tier = tier_for(risk, findings)
+  if flags.contains("--json") {
+    exhale json.stringify({risk: risk, tier: tier, cache: VERDICT_CACHE, findings: findings}, 2)
+    snuff
+  }
+  exhale "${risk} (${tier}), read " + pick(VERDICT_CACHE == "hit", "from the verdict cache", "afresh")
+  for f in findings {
+    exhale "  ${f.code}  ${f.cat}  ${f.where}: ${f.text}"
+  }
 }
 
 # `cigo guard cache [stats | clear]`.

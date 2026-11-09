@@ -447,6 +447,8 @@ cigo guard stats [--since=30d] [--json]
 cigo guard cache [stats | clear] [--json]
                               the verdict cache: how often an agent's command was read from it, and
                               clear to read every command again
+cigo guard check-line [--json] one command line from stdin, read as the agent hook reads it: the
+                              findings, the risk, the tier, and whether the read came from the cache
 cigo guard tier [<risk> [<c>]] the tier matrix (risk × confidence → silent/notice/ask/gate), the whole table, one row or one cell
 cigo guard uninstall          every shim and startup-file block it wrote, removed; --yes does it
 cigo undo last                the newest guarded call, taken back (cig unburn of its run)
@@ -582,6 +584,10 @@ line is read afresh. A hit gives exactly the findings a fresh read gives.
 - `cigo guard cache clear` revokes every verdict pass (`cig pass revoke
   --kind verdict`): the next read of each command, and of each kept
   rehearsal verdict, is made again.
+- `cigo guard check-line` reads one line from stdin as the hook would and
+  says what it found, and whether the read came from the cache. The suite
+  holds the cache to it: every sample of the detection corpus, read as a
+  command line, gives the same findings from the cache as from a fresh read.
 
 ### `cigo guard stats`: the guard measures its own noise
 

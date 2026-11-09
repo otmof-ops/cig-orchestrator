@@ -5910,6 +5910,38 @@ test("agent: the hook's read of a command is kept as a verdict pass: the same li
   assert(caches().len() == 4 and caches()[3] == "miss", json.stringify(caches()))
 })
 
+test("the verdict cache gives every detection corpus sample, read as a command line, exactly the findings a fresh read gives (#117, cig-script#186)", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick corpus = fresh("tests/fixtures/detection")
+  pull check(line) {
+    stick r = hop_env(dir, "sh", ["-c", 'printf "%s" "$1" | cig run "$2" -- guard check-line --json', "sh", line, tool], guard_env(dir, NOT_AN_AGENT))
+    exits(r, 0)
+    snuff json.parse(r.out)
+  }
+  # A mark no other test reads, so the suite's own passes answer nothing.
+  stick mark = "\n# corpus " + str(time.now_ms())
+  roll n = 0
+  roll differ = []
+  for p in fs.list(corpus).sort() {
+    if path.base(p) == "cig-tasks.json" {
+      continue
+    }
+    stick line = fs.read_text(p) + mark
+    stick fresh_read = check(line)
+    stick kept = check(line)
+    assert(fresh_read.cache == "miss" and kept.cache == "hit", path.base(p) + ": " + fresh_read.cache + " then " + kept.cache)
+    if json.stringify(fresh_read.findings) != json.stringify(kept.findings) or fresh_read.risk != kept.risk or fresh_read.tier != kept.tier {
+      differ.push(path.base(p))
+    }
+    n += 1
+  }
+  assert(n >= 52, "the corpus is short: ${n}")
+  assert(differ.is_empty(), "a read from the cache differs from a fresh one: ${differ.join(", ")}")
+})
+
 test("agent: scope agents --agents=claude-code adds the hook to Claude Code's settings and keeps the rest; uninstall takes it out; a linked settings file is left to you", pack() {
   if on_windows {
     snuff
