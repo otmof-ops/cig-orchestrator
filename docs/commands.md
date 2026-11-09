@@ -10,7 +10,7 @@ cigo check
 cigo doctor
 cigo outputs [<task>...]
 cigo toolchains [<name>] [--markdown]
-cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | uninstall [--yes]]
+cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | stats | cache [stats | clear] | uninstall [--yes]]
 cigo undo last
 cigo run-url <url> [--trust] [-- <args>]
 cigo agent [run -- <command> | log | undo --session=<id>|--agent=<name>|--since=2h [--yes]]
@@ -251,11 +251,20 @@ What a verdict does depends on `security`: `standard` (the default) refuses
 critical, holds medium and high at a terminal until approved, and runs them
 with the report unattended; `strict` (the default under CI) also fails high
 unattended; `report` says it and runs; `off` does not look. An approval is
-the task as it is (command, environment names, scripts, lockfiles) hashed
-into one key and signed with `cig tin mac` under a subkey of the tin's key:
-one lookup per run, checked again when a byte changes, and a record that
-does not verify is a forged approval (`E889`), ignored and said. Nothing a
-task runs can sign one: in cig's box the key folder is empty.
+one of cig's passes (cig 1.20.0, `cig pass`): it names the task as it is
+written (command, environment names) in this project, and the files the
+task depends on (the scripts it names; each lockfile beside it and at the
+project's root, there or not) are the pass's recorded inputs. Checking it
+is one lookup in process per run; a changed byte in any of those files,
+or a lockfile that appears, stops it holding, and the task is read again.
+Nothing a task runs can make one: in cig's box the keys folder is empty.
+`cigo trust list` shows each approval and whether its pass still holds
+(and why not); `cigo trust revoke` revokes the pass, and so does `cig pass
+revoke --kind approval`, for every approval at once. An approval from
+before passes (a record signed with `cig tin mac`) is honored and moved
+onto a pass the first time its task runs, the old record put aside under
+`trust/retired/`; one that does not verify is a forged approval (`E889`),
+ignored and said.
 
 ### Known-bad packages: OSV
 
@@ -356,8 +365,10 @@ cigo blacklist exceptions [--json]           the one-off runs in force (blacklis
 ```
 
 The entries live one per line in `~/.config/cigscript/blacklist.d/mine.list`
-(`#` starts the reason, `expires=2027-03-01` ends it), signed with the tin's
-key under cigo's own label. A list changed by anything but `cigo blacklist`
+(`#` starts the reason, `expires=2027-03-01` ends it), held by one of
+cig's passes over its bytes, named beside it in `mine.list.pass` (a list
+from before passes, signed with `cig tin mac`, moves onto a pass the
+first time it is read). A list changed by anything but `cigo blacklist`
 does not verify: the run says so (`E587`), and its entries still count
 together with the last copy of it that verified. Taking an entry out of the
 file therefore lets nothing through, until you sign the change with `cigo
@@ -433,6 +444,9 @@ cigo guard stats [--since=30d] [--json]
                               the log counted: prompts per day, per kind, per code; for asks and gates,
                               approved yes / declined / left; and how often a notice was followed by a
                               change of setting
+cigo guard cache [stats | clear] [--json]
+                              the verdict cache: how often an agent's command was read from it, and
+                              clear to read every command again
 cigo guard tier [<risk> [<c>]] the tier matrix (risk × confidence → silent/notice/ask/gate), the whole table, one row or one cell
 cigo guard uninstall          every shim and startup-file block it wrote, removed; --yes does it
 cigo undo last                the newest guarded call, taken back (cig unburn of its run)
@@ -548,6 +562,26 @@ skips its shim, and a version manager that puts its own folder first on
 `cigo guard` and `cigo doctor` say whether the shims come first in the
 shell you are in. Level 2's shims are `sh` scripts, so on Windows they come
 later; `cigo run` stays guarded there.
+
+### `cigo guard cache`: the read of a command, remembered
+
+An agent's session repeats itself: the same `git status`, the same test
+run, dozens of times. The guard's read of a command line an agent runs
+(the Claude Code hook, and `cigo agent run`) is kept as one of cig's
+`verdict` passes. It is about the line exactly as written and this
+cigo's version, and it also records this cigo's own source and the rules
+the read used, so a new release, a changed rule or one byte of another
+line is read afresh. A hit gives exactly the findings a fresh read gives.
+
+- Only the scan of the line is kept. Your blacklist is read live on every
+  call, and what a person says to an ask is never answered from the cache.
+- Each verdict lasts a week.
+- `cigo guard cache stats` counts the verdicts kept and, from the guard
+  log, how many reads came from the cache in the last 30 days (each agent
+  event in the log carries `cache: hit`, `miss` or `none`).
+- `cigo guard cache clear` revokes every verdict pass (`cig pass revoke
+  --kind verdict`): the next read of each command, and of each kept
+  rehearsal verdict, is made again.
 
 ### `cigo guard stats`: the guard measures its own noise
 
@@ -683,9 +717,9 @@ high like critical.
 **Remembered answers.** A yes to an ask-tier question can be kept keyed
 by the sha256 of the bytes the question was about (the command line, or
 the file tool's path with its new text): the next ask for the same bytes
-is skipped. Records live under `~/.cig-orchestrator/remembered/`, signed
-with the tin's key under their own label so a task cannot write its own
-permission slip; one byte of a difference is a different key, so a
+is skipped. Records live under `~/.cig-orchestrator/remembered/`, each
+held by one of cig's passes over its bytes, so a task cannot write its
+own permission slip; one byte of a difference is a different key, so a
 changed command is asked again. A record that does not verify is said
 (`E889`) and ignored. Approvals from `cigo approve` stay one-shot: the
 remembered store is for scopes wider than one run.
@@ -1043,7 +1077,9 @@ holds the before-bytes of what a task's `touches` named) under
 | `guard/` | the guard's level and what it installed (`state.json`), its log (`log.jsonl`), a pause or off switch, the Enter-key hooks (`hook.bash`, `hook.zsh`), and the first copy of each startup file it gave a block (`before/`) |
 | `quarantine/` | what `cigo run-url` downloaded, by its sha256 |
 | `here/` | the empty folder cigo runs from when it is called from your home folder itself |
-| `agent/` | agent commands waiting for a person (`pending/`) and the one-time approvals, each signed (`approved/`) |
+| `agent/` | agent commands waiting for a person (`pending/`) and the one-time approvals, each held by a pass (`approved/`); using one revokes its pass |
+| `trust/` | the approvals: a record per approval's pass (`passes/`), and approvals from before passes, put aside once moved onto one (`retired/`) |
+| `allowed/`, `remembered/` | allowances and remembered answers, each held by a pass over its bytes (`<record>.json.pass` names it) |
 
 ## Environment
 
