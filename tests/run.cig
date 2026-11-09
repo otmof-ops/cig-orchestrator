@@ -5357,9 +5357,18 @@ test("agent: a command rated high waits for a person (E894); an approval from an
   }
   stick ok = hop_env(dir, "sh", ["-c", run], guard_env(dir, NOT_AN_AGENT))
   says(ok.out, "approved once")
+  stick appr = path.join(h, ".cig-orchestrator", "agent", "approved", id + ".json")
+  stick appr_copy = fs.read_text(appr)
+  stick side_copy = fs.read_text(appr + ".pass")
   stick ran = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=s2", "--", line], {})
   exits(ran, 0)
   says(read(h, ".bashrc"), "AGENT_WAS_HERE")
+  # A copy of the approval put back after it was used is not an approval
+  # again: using it revoked its pass (cig-script#186).
+  burn {
+    fs.write_text(appr, appr_copy)
+    fs.write_text(appr + ".pass", side_copy)
+  }
   stick again = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=s2", "--", line], {})
   exits(again, 2)
   says(again.err, "E894")
