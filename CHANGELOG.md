@@ -14,16 +14,32 @@ repository root lists versions it must not pick.
   (`guarded`, `run-url`, `agent`, `approve`, `blacklist-light-it`,
   `config`...), events per `E`-code from the findings, and for asks and
   gates how often each was approved (yes), declined (no) or left (no
-  answer, held or still waiting). It also says how often a notice was
+  answer, held or still waiting), and how many the log holds no answer
+  for (unrecorded). It also says how often a notice was
   followed by a change of a guard-related setting (`security`,
   `rehearse`, `guard_scope`, `blacklist_unboxed`, `agent_approval`, the
   preset, and the other machine-scoped guard knobs). The log gains two
   small records that make the count honest: an event that ended a prompt
   carries a `decision` field (`yes` / `no` / `left`), and a change to a
   guard setting lands in the log as a `config` event. Old lines without
-  these fields have their decision read from the outcome, so nothing in
-  the old log is guessed at. `--json` carries the same numbers. An empty
+  these fields have their decision read from the outcome and their tier
+  from the tier matrix (a run that went ahead is a notice at medium, an
+  ask at high, a gate at critical), so nothing in the old log is guessed
+  at. `--json` carries the same numbers. An empty
   window says so in one line, exit 0.
+
+- **The package-docs scan reaches PyPI and crates.io** (#55). The static
+  read now reads each installed PyPI distribution's `.dist-info/METADATA`
+  (its `Summary` header and the body, which is the README the wheel
+  shipped with) and each vendored or packaged crate's `Cargo.toml`
+  `description` and `README*`, the way it already reads an npm package's
+  README and `package.json` description. Only the prompt-injection rules
+  run on these (`E886`, `E887`): a README that quotes `curl | sh` as an
+  install example is not a fetch-and-run. Nothing is fetched: the scan
+  reads what `pip install` already extracted into `.venv/` or `venv/`,
+  and what `cargo vendor` or `cargo package` already wrote under
+  `vendor/` or `target/package/`. A package whose install has not
+  produced bytes on disk is silent.
 
 - **Scrubbing what an agent reads** (#63 step 1). At level 4 every shell
   command an agent runs goes through `cigo agent run`, and what it prints

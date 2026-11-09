@@ -6241,6 +6241,203 @@ pull package_docs(t) {
   snuff docs
 }
 
+# The docs each installed PyPI distribution carries, read for prompt
+# injection: the `.dist-info/METADATA` file pip extracts beside every
+# installed package. METADATA is RFC-822 (headers to the first blank
+# line, body after), so the `Summary` header is the short description
+# and the body is the README the wheel shipped with. Scanned for `E886`
+# and `E887` only, the way the npm scan is: a README that quotes
+# `curl | sh` as an install example is not a fetch-and-run.
+#
+# A distribution with no METADATA on disk is silent: it means the install
+# has not run yet, and we never fetch.
+stick PYPI_DIST_INFO_GLOBS = [
+  ".venv/lib/python*/site-packages/*.dist-info/METADATA",
+  ".venv/lib/pypy*/site-packages/*.dist-info/METADATA",
+  "venv/lib/python*/site-packages/*.dist-info/METADATA",
+  "venv/lib/pypy*/site-packages/*.dist-info/METADATA",
+  ".venv/Lib/site-packages/*.dist-info/METADATA",
+  "venv/Lib/site-packages/*.dist-info/METADATA",
+]
+
+pull pypi_docs(t) {
+  roll docs = []
+  stick cwd = task_cwd(t)
+  roll seen = []
+  for glob in PYPI_DIST_INFO_GLOBS {
+    for rel in glob_under(cwd, glob) {
+      stick mf = path.join(ROOT, rel)
+      if seen.contains(mf) {
+        continue
+      }
+      seen.push(mf)
+      roll body = ""
+      try {
+        body = unbom(fs.read_text(mf))
+      } ashtray e {
+        continue
+      }
+      stick dist = path.base(path.dir(mf))
+      stick name = pypi_dist_name(dist)
+      stick split = split_metadata(body)
+      if split.summary != "" {
+        docs.push({where: name + " Summary", text: split.summary, file: mf})
+      }
+      if split.body != "" {
+        roll text_body = split.body
+        if text_body.len() > READ_DOC_CAP {
+          text_body = text_body.slice(0, READ_DOC_CAP)
+        }
+        docs.push({where: name + " METADATA", text: text_body, file: mf})
+      }
+    }
+  }
+  snuff docs
+}
+
+# A `.dist-info` folder's name is `{name}-{version}.dist-info` (PEP 376).
+# Everything before the last hyphen is the distribution name, with
+# underscores written back to hyphens so the report reads as the name
+# pip knew the package by.
+pull pypi_dist_name(dist) {
+  stick c = text.captures(dist, '^(.+)-[^-]+\.dist-info$')
+  if c != null {
+    snuff c[1].replace("_", "-")
+  }
+  snuff dist
+}
+
+# METADATA's two parts: the `Summary` header (one line), and everything
+# after the first blank line (the long description, usually the README).
+# Headers are read case-insensitively; a continuation line (an indented
+# line, or the RFC-822 `.` continuation) belongs to the previous header.
+# Older METADATA puts the long description in a `Description:` header
+# instead; that is used only when the body is empty.
+pull split_metadata(body) {
+  stick b = body.replace("\r\n", "\n")
+  stick at = b.find("\n\n")
+  stick head = pick(at < 0, b, b.slice(0, at))
+  stick tail = pick(at < 0, "", b.slice(at + 2))
+  roll summary = ""
+  roll description_header = ""
+  roll in_description = false
+  for raw in head.lines() {
+    if in_description {
+      if raw.starts_with(" ") or raw.starts_with("\t") {
+        stick cont = raw.trim_start()
+        description_header = description_header + pick(cont == ".", "", cont) + "\n"
+        continue
+      }
+      in_description = false
+    }
+    stick c = text.captures(raw, '^([A-Za-z][A-Za-z0-9-]*)\s*:\s*(.*)$')
+    if c == null {
+      continue
+    }
+    stick key = c[1].lower()
+    if key == "summary" {
+      summary = c[2]
+    } else if key == "description" {
+      description_header = c[2] + "\n"
+      in_description = true
+    }
+  }
+  roll out_body = tail
+  if out_body.trim() == "" {
+    out_body = description_header
+  }
+  snuff {summary: summary, body: out_body}
+}
+
+# Each vendored or packaged crate's docs, read for prompt injection: its
+# `Cargo.toml`'s `[package] description` and the `README*` beside it.
+# Two project-local places: `vendor/` (what `cargo vendor` writes, used
+# by air-gapped builds) and `target/package/<name>-<version>/` (what
+# `cargo package` writes). `~/.cargo/registry/src/` is a per-user cache;
+# when a crate is not vendored or packaged, there is nothing a static
+# read can say about it, and we never fetch.
+stick CRATES_DOC_ROOTS = ["vendor/*/Cargo.toml", "target/package/*/Cargo.toml"]
+
+pull crates_docs(t) {
+  roll docs = []
+  stick cwd = task_cwd(t)
+  roll seen = []
+  for glob in CRATES_DOC_ROOTS {
+    for rel in glob_under(cwd, glob) {
+      stick cf = path.join(ROOT, rel)
+      if seen.contains(cf) {
+        continue
+      }
+      seen.push(cf)
+      roll ct = ""
+      try {
+        ct = unbom(fs.read_text(cf))
+      } ashtray e {
+        continue
+      }
+      stick info = parse_cargo_package(ct)
+      stick pkg_dir = path.dir(cf)
+      stick name = pick(info.name == "", path.base(pkg_dir), info.name)
+      if info.description != "" {
+        docs.push({where: name + " description", text: info.description, file: cf})
+      }
+      stick candidates = pick(info.readme == "", PACKAGE_README_NAMES, [info.readme])
+      for n in candidates {
+        stick rp = path.join(pkg_dir, n)
+        if fs.is_file(rp) {
+          try {
+            roll rbody = fs.read_text(rp)
+            if rbody.len() > READ_DOC_CAP {
+              rbody = rbody.slice(0, READ_DOC_CAP)
+            }
+            docs.push({where: name + " " + n, text: rbody, file: rp})
+          } ashtray e {
+          }
+          break
+        }
+      }
+    }
+  }
+  snuff docs
+}
+
+# A Cargo.toml's `[package]` section's `name`, `description` and `readme`.
+# A workspace-only manifest (no `[package]` section) returns empties, so
+# nothing is scanned for it. CigScript's stdlib has no TOML parser; this
+# is a line-by-line walk that reads `key = "value"` in the `[package]`
+# section only. Values that span several lines (triple-quoted strings)
+# are left empty on purpose; the README reader picks up the long form.
+pull parse_cargo_package(src) {
+  roll name = ""
+  roll description = ""
+  roll readme = ""
+  roll in_pkg = false
+  stick nb = src.replace("\r\n", "\n")
+  for raw in nb.lines() {
+    stick line = raw.trim_end()
+    if line.starts_with("[") {
+      in_pkg = line == "[package]"
+      continue
+    }
+    if not in_pkg {
+      continue
+    }
+    stick c = text.captures(line, '^\s*([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*"([^"\n]*)"')
+    if c == null {
+      continue
+    }
+    stick k = c[1].lower()
+    if k == "name" {
+      name = c[2]
+    } else if k == "description" {
+      description = c[2]
+    } else if k == "readme" {
+      readme = c[2]
+    }
+  }
+  snuff {name: name, description: description, readme: readme}
+}
+
 # A doc file's prompt-injection findings: only the pi-* rules, each over the
 # whole body (not line by line, so a note spread across several lines reads
 # as one). Comments and shell handling are left out: a README is not a shell
@@ -6367,7 +6564,11 @@ pull static_read(t, name) {
     for h in hooks {
       sources.push({where: h.where, text: h.text, hook: h.get("hook", ""), file: h.get("file", null)})
     }
-    docs = package_docs(t)
+    # npm (the package.json description and README), PyPI (the
+    # `.dist-info/METADATA` Summary and body), and crates.io (vendored or
+    # packaged `Cargo.toml` and README). Each reader runs where its
+    # ecosystem's bytes land; glob misses are silent.
+    docs = package_docs(t) + pypi_docs(t) + crates_docs(t)
   }
   roll findings = []
   stick budget = {left: DECODE_BUDGET}
