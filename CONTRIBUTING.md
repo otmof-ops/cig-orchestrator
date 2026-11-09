@@ -40,6 +40,10 @@ the tests whose names contain them.
 `CIGO_TEST_BINARY=<program>` runs the same suite against cigo compiled to a
 native program (`cigcompile build orchestrate.cig -o <out>`, cigcompile 0.1.2
 or later); CI does both.
+`cig run scripts/bench.cig` times cigo's commands here (the start, `list`,
+`audit`, the agent hook) through `bin/cigo` with a scratch home, beside the
+targets in #90: `--only <words>` for some rows, `--json` for a tool. It
+reports and never gates, since timings on a shared runner are noise.
 
 ## The workflow
 
