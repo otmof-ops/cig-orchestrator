@@ -7,6 +7,27 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **`cigo guard stats`** (#66 step 7). The guard log, counted, so cigo
+  can say whether it is asking too much. A new subcommand reads every
+  event in a window (`--since=30d` by default) and prints prompts per day
+  (asks, gates, notices and refusals counted apart), events per `kind`
+  (`guarded`, `run-url`, `agent`, `approve`, `blacklist-light-it`,
+  `config`...), events per `E`-code from the findings, and for asks and
+  gates how often each was approved (yes), declined (no) or left (no
+  answer, held or still waiting), and how many the log holds no answer
+  for (unrecorded). It also says how often a notice was
+  followed by a change of a guard-related setting (`security`,
+  `rehearse`, `guard_scope`, `blacklist_unboxed`, `agent_approval`, the
+  preset, and the other machine-scoped guard knobs). The log gains two
+  small records that make the count honest: an event that ended a prompt
+  carries a `decision` field (`yes` / `no` / `left`), and a change to a
+  guard setting lands in the log as a `config` event. Old lines without
+  these fields have their decision read from the outcome and their tier
+  from the tier matrix (a run that went ahead is a notice at medium, an
+  ask at high, a gate at critical), so nothing in the old log is guessed
+  at. `--json` carries the same numbers. An empty
+  window says so in one line, exit 0.
+
 - **The package-docs scan reaches PyPI and crates.io** (#55). The static
   read now reads each installed PyPI distribution's `.dist-info/METADATA`
   (its `Summary` header and the body, which is the README the wheel
