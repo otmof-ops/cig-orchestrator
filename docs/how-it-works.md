@@ -71,7 +71,7 @@ version once per command (`probe_version`, a hop, so only `run`, `check` and
 stop. *Crash reports* wrap the dispatch in a `try`: a runtime or type error
 inside the tool is written as a report through a hop outside the pack
 (`write_outside`), so the rollback that follows leaves it, and the error is
-coughed on so cig rolls the run back; `cigo crash` and `cigo config` manage
+coughed on so cig rolls the run back; `cigo crash` (a hand-over to `ciginstaller crash`) and `cigo config` manage
 the reports and `~/.cig-orchestrator/config`. *Update, uninstall and doctor* are stubs: one function
 (`hand_to_installer`) finds ciginstaller (on `PATH`, then
 `$CIGSCRIPT_HOME/bin`, then `~/.cigscript/bin`), runs it with the mapped

@@ -5,10 +5,11 @@ because the tooling does most of the checking.
 
 ## Before you start
 
-- **Something went wrong?** Open a [bug
+- **Something went wrong?** Run `ciginstaller bug cigo`. Or open a [bug
   report](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=bug-report.yml)
   with the manifest (or the part that matters), the command, the full
-  output, and `cigo version`, `cig --version` and `ciginstaller status`.
+  output, the output of `ciginstaller status` and `ciginstaller bug cigo`,
+  and `cigo version` and `cig --version`.
 - **A language or tool cigo doesn't know?** A [toolchain
   request](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=toolchain-request.yml)
   is enough to get it built with you; a pull request is even better.

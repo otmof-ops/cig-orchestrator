@@ -163,9 +163,11 @@ asdf) or change the pin; the run goes ahead unless `--strict` was given.
 **`cigo hit a bug and had to stop`**
 
 That is a crash in cigo itself, not in your task: a report was saved under
-`~/.cig-orchestrator/crashes/` and the run was rolled back. `cigo crash show
-<id>` prints exactly what `cigo crash send <id>` would file as an issue;
-sending is yours to decide. See [crash reports](commands.md#crash-reports).
+`~/.cig-orchestrator/crashes/` and the run was rolled back. `cigo crash list`
+(that is, `ciginstaller crash list`) finds the report in the ashtray, `cigo
+crash show <id>` prints exactly what `cigo crash send <id>` would file as an
+issue; sending is yours to decide. See [crash
+reports](commands.md#crash-reports).
 
 **`cig unburn` refuses with `E704`**
 
@@ -188,10 +190,13 @@ install Node inside WSL, or put its `bin` first on PATH.
 
 ## Still stuck
 
-Open a [guidance
+Run `ciginstaller bug cigo`: it writes up what went wrong with the evidence,
+and shows what would be sent before anything is saved. For a run that went
+wrong, `cigo report <run>` is the same with the run named. Without
+ciginstaller, open a [guidance
 request](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=guidance-request.yml)
 with the command, what it printed, and `cigo version --json`. If it looks
 like a bug, a [bug
 report](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=bug-report.yml)
 gets it fixed, with a test so it stays fixed; if cigo crashed, `cigo crash
-send <id>` files the report for you.
+send <id>` (`ciginstaller crash send`) files the report for you.

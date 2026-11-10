@@ -1309,7 +1309,9 @@ test("a bug inside cigo is a crash report, saved outside the project and kept th
   exits(r, 1)
   says(r.err, "cigo hit a bug and had to stop: map has no key `this_key_does_not_exist`")
   says(r.err, "A crash report was saved locally:")
-  says(r.err, "cigo crash show ")
+  says(r.err, "`ciginstaller crash list` shows it there")
+  says(r.err, "To report it yourself: `ciginstaller bug cigo`")
+  says(r.err, "https://github.com/otmof-ops/cig-orchestrator/issues/new?template=bug-report.yml")
   says(r.err, "rolling back")
   stick reports = fs.glob(path.join(cigo_home(dir), "crashes", "*.json"))
   assert(reports.len() == 1, "expected one report, found ${reports.len()}")
@@ -1319,26 +1321,11 @@ test("a bug inside cigo is a crash report, saved outside the project and kept th
   assert(report.panic_location.starts_with("orchestrate.cig:"), report.panic_location)
   assert(report.active_run_id != null, "the run id is missing: ${json.stringify(report)}")
   assert(not fs.exists(path.join(dir, ".cig-orchestrator")), "the run was not rolled back")
-  # list, show, delete
-  stick l = tool_home(dir, ["crash", "list"])
-  exits(l, 0)
-  says(l.out, report.id)
-  says(l.out, "orchestrate.cig:")
-  stick s = tool_home(dir, ["crash", "show", report.id.slice(0, 10)])
-  exits(s, 0)
-  says(s.out, "this is exactly what `cigo crash send` would file")
-  says(s.out, "\"fingerprint\": \"${report.fingerprint}\"")
-  stick d = tool_home(dir, ["crash", "delete", report.id])
-  exits(d, 0)
-  assert(fs.glob(path.join(cigo_home(dir), "crashes", "*.json")).is_empty(), "the report is still there")
-  stick none = tool_home(dir, ["crash", "list"])
-  exits(none, 0)
-  says(none.err, "no crash reports saved (that is good)")
   # A task failing is not a crash.
   stick fail = tool_home(dir, ["run", "liar"])
   exits(fail, 1)
   never_says(fail.err, "cigo hit a bug")
-  assert(fs.glob(path.join(cigo_home(dir), "crashes", "*.json")).is_empty(), "a task failure wrote a crash report")
+  assert(fs.glob(path.join(cigo_home(dir), "crashes", "*.json")).len() == 1, "a task failure wrote a crash report")
 })
 
 test("config keeps crash_reports, issues_repo and update_channel, and never keeps a report local", pack() {
@@ -1357,9 +1344,6 @@ test("config keeps crash_reports, issues_repo and update_channel, and never keep
   says(r.err, "crash_reports is \"never\": the report stays local")
   stick reports = fs.glob(path.join(cigo_home(dir), "crashes", "*.json"))
   assert(reports.len() == 1, "the report was not saved")
-  stick send = tool_home(dir, ["crash", "send", json.load(reports[0]).id])
-  exits(send, 2)
-  says(send.err, "crash_reports is \"never\"")
   exits(tool_home(dir, ["config", "crash_reports", "--unset"]), 0)
   says(tool_home(dir, ["config", "crash_reports"]).out, "ask")
 })
@@ -1459,6 +1443,95 @@ test("without ciginstaller the stubs say whose job it is, how to get it, and exi
     says(r.err, c[1])
     says(r.err, "get ciginstaller: https://github.com/otmof-ops/cig-installer#install")
   }
+})
+
+# ----- crash and report: ciginstaller's now (F3) -----------------------------------
+
+# Two tests for one stub, as the contract asks: a fake ciginstaller gets the
+# mapped arguments and its exit code passes through; with none, the two lines
+# and 127. `typed` is what the person ran, `mapped` what ciginstaller must see.
+pull report_stub_tests(label, typed, mapped, says_line) {
+  test("${label} hands over to ciginstaller: the arguments and the exit code pass through", pack() {
+    if on_windows {
+      snuff
+    }
+    stick dir = fresh("tests/fixtures/chain")
+    stick bindir = write_fake_installer(dir)
+    stick log = dir + "-installer.log"
+    stick more = {PATH: bindir + path_sep + env.get("PATH", ""), FAKE_INSTALLER_LOG: log, FAKE_EXIT: "5"}
+    stick r = hop_env(dir, tool_prog("cig"), tool_args(typed), more)
+    exits(r, 5)
+    says(r.out, "fake-installer-says-hello")
+    assert(fs.read_text(log).lines() == [mapped], json.stringify(fs.read_text(log).lines()))
+    exits(hop_env(dir, tool_prog("cig"), tool_args(typed), more.merge({FAKE_EXIT: "0"})), 0)
+  })
+  test("${label} without ciginstaller says whose job it is, how to get it, and exits 127", pack() {
+    if on_windows {
+      snuff
+    }
+    stick dir = fresh("tests/fixtures/chain")
+    stick r = hop_env(dir, tool_prog(proc.which("cig")), tool_args(typed), no_installer_env(dir))
+    exits(r, 127)
+    says(r.err, says_line)
+    says(r.err, "get ciginstaller: https://github.com/otmof-ops/cig-installer#install")
+  })
+}
+
+report_stub_tests("crash list", ["crash", "list"], "crash list", "`cigo crash list` is ciginstaller's job now: ciginstaller crash list")
+report_stub_tests("crash with no word and --json", ["crash", "--json"], "crash list --json", "`cigo crash list` is ciginstaller's job now: ciginstaller crash list --json")
+report_stub_tests("crash show <id>", ["crash", "show", "abc"], "crash show abc", "`cigo crash show` is ciginstaller's job now: ciginstaller crash show abc")
+report_stub_tests("crash send <id>", ["crash", "send", "abc"], "crash send abc", "`cigo crash send` is ciginstaller's job now: ciginstaller crash send abc")
+report_stub_tests("crash send --all --via link (values keep their place)", ["crash", "send", "--all", "--via", "link"], "crash send --all --via link", "ciginstaller crash send --all --via link")
+report_stub_tests("crash delete <id>", ["crash", "delete", "abc"], "crash delete abc", "`cigo crash delete` is ciginstaller's job now: ciginstaller crash delete abc")
+report_stub_tests("crash delete --all", ["crash", "delete", "--all"], "crash delete --all", "ciginstaller crash delete --all")
+report_stub_tests("report with no run", ["report"], "bug cigo", "`cigo report` is ciginstaller's job now: ciginstaller bug cigo")
+report_stub_tests("report --send with no run", ["report", "--send"], "bug cigo --send", "ciginstaller bug cigo --send")
+report_stub_tests("report <run>", ["report", "r-1"], "bug --run r-1 --part cigo", "`cigo report` is ciginstaller's job now: ciginstaller bug --run r-1 --part cigo")
+report_stub_tests("report <run> --send", ["report", "r-1", "--send"], "bug --run r-1 --part cigo --send", "ciginstaller bug --run r-1 --part cigo --send")
+
+test("crash and report refuse what they do not know before ciginstaller is asked", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick bindir = write_fake_installer(dir)
+  stick log = dir + "-installer.log"
+  stick more = {PATH: bindir + path_sep + env.get("PATH", ""), FAKE_INSTALLER_LOG: log}
+  stick c = hop_env(dir, tool_prog("cig"), tool_args(["crash", "submit"]), more)
+  exits(c, 2)
+  says(c.err, "`cigo crash` takes list, show <id>, send <id> or delete <id>|--all")
+  stick r = hop_env(dir, tool_prog("cig"), tool_args(["report", "--nope"]), more)
+  exits(r, 2)
+  says(r.err, "unknown flag `--nope` for `report`")
+  stick two = hop_env(dir, tool_prog("cig"), tool_args(["report", "a", "b"]), more)
+  exits(two, 2)
+  says(two.err, "`cigo report` takes one run")
+  assert(not fs.exists(log), "ciginstaller was run for a call the stub refuses")
+})
+
+test("a cigo crash is still saved and queued in cig's ashtray with no ciginstaller on the machine", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick onlycig = dir + "-only-cig"
+  burn {
+    fs.mkdir(onlycig)
+    stick ln = proc.run("ln", ["-s", proc.which("cig"), path.join(onlycig, "cig")], {timeout_ms: 10000})
+    assert(ln.code == 0, ln.err)
+  }
+  stick bare = no_installer_env(dir).merge({PATH: onlycig + path_sep + "/usr/bin" + path_sep + "/bin", CIGO_HOME: cigo_home(dir)})
+  assert(not bare.PATH.contains("ciginstaller"), "the test PATH names an installer")
+  stick r = hop_env(dir, tool_prog(proc.which("cig")), tool_args(["run", "version"]), bare.merge({CIGO_INTERNAL_PANIC: "mid-run", CIG_REPORTS: "ask"}))
+  exits(r, 1)
+  says(r.err, "A crash report was saved locally:")
+  says(r.err, "Handing it to cig's ashtray")
+  assert(fs.glob(path.join(cigo_home(dir), "crashes", "*.json")).len() == 1, "cigo's copy was not saved")
+  stick ash = hop_env(dir, proc.which("cig"), ["--json", "crash", "list"], bare)
+  says(ash.out, "\"origin\":\"cig-orchestrator\"")
+  # and the stub for reading it says what is missing
+  stick l = hop_env(dir, tool_prog(proc.which("cig")), tool_args(["crash", "list"]), bare)
+  exits(l, 127)
 })
 
 test("update names no cigo version, and refuses a flag it does not know", pack() {
@@ -2544,32 +2617,22 @@ test("crash_reports never keeps a cigo crash on this machine, out of cig's ashtr
   never_says(ash.out, cigo_home(dir))
 })
 
-test("cigo report <run> --send bundles the run with the manifest's shape and files it through cig", pack() {
+test("cigo __report-bundle <run> bundles the run with the manifest's shape, and writes and sends nothing", pack() {
   stick dir = fresh("tests/fixtures/chain")
   stick tracker = dir + "-tracker-report"
   stick failing = tool_in(dir, ["run", "liar"])
   exits(failing, 1)
   stick id = str(last_run(dir).id)
-  # Without --send: the file, and where it is.
-  stick w = tool_home(dir, ["report", id])
+  stick w = tool_home(dir, ["__report-bundle", id])
   exits(w, 0)
-  says(w.out, "reports")
-  stick written = json.load(path.join(cigo_home(dir), "reports", id + ".json"))
-  assert(written.kind == "report" and written.manifest.project != "" and written.cig_report.kind == "cigscript-report", json.stringify(written).slice(0, 300))
+  stick written = json.parse(w.out)
+  assert(written.kind == "report" and written.manifest.project != "" and written.cig_report.kind == "cigscript-report", w.out.slice(0, 300))
   never_says(json.stringify(written.manifest), "echo")
-  # With --send: filed through cig, now.
-  stick s = hop_env(dir, tool_prog("cig"), tool_args(["report", id, "--send"]), {CIGO_HOME: cigo_home(dir), CIG_INTERNAL_TRACKER_DIR: tracker})
-  exits(s, 0)
-  says(s.err, "filed at ")
-  stick filed = fs.glob(path.join(tracker, "otmof-ops__cig-orchestrator", "*.json"))
-  assert(filed.len() == 1, "expected one issue, found ${filed.len()}")
-  stick issue = json.load(filed[0])
-  says(str(issue.title), "report [")
-  says(str(issue.body), "cigscript-report")
-  says(str(issue.body), "\"origin\": \"cig-orchestrator\"")
+  assert(not fs.exists(path.join(cigo_home(dir), "reports")), "a bundle was written")
+  assert(not fs.exists(tracker), "a bundle was filed")
 })
 
-test("cigo report --send carries no name of the person's: not a folder, a file, a task or the project", pack() {
+test("cigo __report-bundle carries no name of the person's: not a folder, a file, a task or the project", pack() {
   stick dir = fresh_at("tests/fixtures/chain", "zqx-clients/ZqxProject")
   edit_manifest(dir, pack(m) {
     m["project"] = "ZqxCorp"
@@ -2580,23 +2643,17 @@ test("cigo report --send carries no name of the person's: not a folder, a file, 
   exits(failing, 1)
   says(failing.err, "zqx-deploy")
   stick id = str(last_run(dir).id)
-  stick s = hop_env(dir, tool_prog("cig"), tool_args(["report", id, "--send"]), {CIGO_HOME: cigo_home(dir), CIG_INTERNAL_TRACKER_DIR: tracker})
+  stick s = tool_home(dir, ["__report-bundle", id])
   exits(s, 0)
-  says(s.err, "filed at ")
-  stick filed = fs.glob(path.join(tracker, "otmof-ops__cig-orchestrator", "*.json"))
-  assert(filed.len() == 1, "expected one issue, found ${filed.len()}")
-  stick issue = json.load(filed[0])
-  stick body = str(issue.body)
+  stick body = s.out
   never_says(body.lower(), "zqx")
-  never_says(str(issue.title).lower(), "zqx")
   # The shape stays: the project and the task as placeholders, the task's
   # keys as the manifest's vocabulary, the error naming the task's placeholder.
   says(body, "\"project\": \"<project>\"")
   says(body, "\"produces\"")
   says(body, "did not produce")
   never_says(body, "echo")
-  stick written = json.load(path.join(cigo_home(dir), "reports", id + ".json"))
-  never_says(json.stringify(written).lower(), "zqx")
+  assert(not fs.exists(tracker), "a bundle was filed")
 })
 
 # ----- 1.2.0: the config model (#66): layers, the floor, locks, presets ------
@@ -4378,7 +4435,7 @@ test("blacklist run: the two warnings; a signed exception skips them; CI refuses
   assert(not there(dir, "fetch.txt"), "the task ran at warning one")
   # With --run-untrusted alone: warning two, still refused.
   stick two = guard_tool(dir, ["run", "fetch", "--run-untrusted=fetch"], l)
-  exits(two, 1)
+  exits(two, 2)
   says(two.err, "E581 last warning")
   says(two.out, "--light-it")
   assert(not there(dir, "fetch.txt"), "the task ran at warning two")
