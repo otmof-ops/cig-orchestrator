@@ -216,6 +216,9 @@ jobs:
           # a child process, so its stderr ([Console]::Error) is captured by 2>&1
           $out = pwsh -NoProfile -File .\install.ps1 2>&1 | Out-String
           if ($LASTEXITCODE -ne 1 -or $out -notmatch 'ciginstaller install stick cigo') { throw "install.ps1: $LASTEXITCODE $out" }
+          # the runner ends a pwsh step with exit $LASTEXITCODE, which is install.ps1's
+          # deliberate 1; every check above passed
+          exit 0
 
   # A tag vX.Y.Z is a release: one tarball, its checksum, a build attestation,
   # and the licence beside them. The installer's manifest reads these.
