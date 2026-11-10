@@ -213,7 +213,8 @@ jobs:
           # From a checkout, update is refused before it looks for the installer.
           $out = cigo update 2>&1 | Out-String
           if ($LASTEXITCODE -ne 2 -or $out -notmatch 'runs from a checkout' -or $out -notmatch 'git pull') { throw "cigo update in a checkout: $LASTEXITCODE $out" }
-          $out = .\install.ps1 2>&1 | Out-String
+          # a child process, so its stderr ([Console]::Error) is captured by 2>&1
+          $out = pwsh -NoProfile -File .\install.ps1 2>&1 | Out-String
           if ($LASTEXITCODE -ne 1 -or $out -notmatch 'ciginstaller install stick cigo') { throw "install.ps1: $LASTEXITCODE $out" }
 
   # A tag vX.Y.Z is a release: one tarball, its checksum, a build attestation,
