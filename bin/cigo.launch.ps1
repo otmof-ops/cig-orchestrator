@@ -76,7 +76,7 @@ if ($i -lt $argsList.Count) { $rest = @($argsList[$i..($argsList.Count - 1)]) }
 $cmd = 'help'
 if ($rest.Count -gt 0) { $cmd = [string]$rest[0] }
 
-$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'crash', 'config', 'blacklist', 'quarantine', 'guard', 'undo', 'run-url', 'agent', 'approve', '--help', '-h', '--version')
+$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'uninstall', 'doctor', 'crash', 'config', 'blacklist', 'quarantine', 'guard', 'undo', 'run-url', 'agent', 'approve', '--help', '-h', '--version')
 # From the home folder itself (or a drive's root), cig would take all of it
 # as the run's pack and watch every file in it around each step: these run
 # from an empty folder of cigo's instead, told where you are.
@@ -101,10 +101,22 @@ if ($leaveDir -notcontains $cmd) {
     if ($dir -and (Test-Path -LiteralPath (Join-Path $dir 'cig-tasks.json')) -and ($dir -ne $startDir)) {
         Set-Location -LiteralPath $dir
     }
+    # The installer asks for `__doctor` from wherever it was run, a home
+    # folder included: with no project above, it runs from cigo's own empty
+    # folder like the commands above.
+    $nowDir = (Get-Location).Path
+    if ($cmd -eq '__doctor' -and -not ($dir -and (Test-Path -LiteralPath (Join-Path $dir 'cig-tasks.json'))) -and (($nowDir -eq $HOME) -or ($nowDir -eq [IO.Path]::GetPathRoot($nowDir)))) {
+        $cigoHome = $env:CIGO_HOME
+        if (-not $cigoHome) { $cigoHome = Join-Path $HOME '.cig-orchestrator' }
+        $neutral = Join-Path $cigoHome 'here'
+        New-Item -ItemType Directory -Force -Path $neutral | Out-Null
+        $env:CIGO_CALLER_DIR = $nowDir
+        Set-Location -LiteralPath $neutral
+    }
 }
 
-# `cigo update` replaces the tool and the launcher where they are installed;
-# `cigo version --json` names them.
+# `cigo version --json` names the tool and the launcher that ran; `cigo
+# __doctor` checks that they agree.
 $env:CIGO_TOOL = $tool
 $env:CIGO_LAUNCHER = $PSCommandPath
 

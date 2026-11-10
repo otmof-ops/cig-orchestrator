@@ -79,7 +79,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "${1:-help}" in
-  adopt|help|version|toolchains|update|crash|config|blacklist|quarantine|guard|undo|run-url|agent|approve|--help|-h|--version)
+  adopt|help|version|toolchains|update|uninstall|doctor|crash|config|blacklist|quarantine|guard|undo|run-url|agent|approve|--help|-h|--version)
     # From the home folder itself (or /), cig would take all of it as the
     # run's pack and watch every file in it around each step: these run
     # from an empty folder of cigo's instead, and the commands that work
@@ -107,11 +107,27 @@ case "${1:-help}" in
     if [ -f "$dir/cig-tasks.json" ] && [ "$dir" != "$PWD" ]; then
       cd "$dir" || exit 1
     fi
+    # The installer asks for `__doctor` from wherever it was run, a home
+    # folder included: with no project above, it runs from cigo's own empty
+    # folder like the commands above.
+    if [ ! -f "$dir/cig-tasks.json" ] && [ "${1:-}" = __doctor ]; then
+      case "$PWD" in
+        "$HOME"|"$HOME/"|/)
+          if [ -n "${HOME:-}" ]; then
+            here="${CIGO_HOME:-$HOME/.cig-orchestrator}/here"
+            if mkdir -p "$here" 2>/dev/null; then
+              CIGO_CALLER_DIR=$PWD
+              export CIGO_CALLER_DIR
+              cd "$here" || exit 1
+            fi
+          fi ;;
+      esac
+    fi
     ;;
 esac
 
-# `cigo update` replaces the tool and the launcher where they are installed;
-# `cigo version --json` names them.
+# `cigo version --json` names the tool and the launcher that ran; `cigo
+# __doctor` checks that they agree.
 CIGO_TOOL=$tool
 CIGO_LAUNCHER=$0
 export CIGO_TOOL CIGO_LAUNCHER

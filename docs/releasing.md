@@ -4,8 +4,9 @@ cig-orchestrator follows semantic versioning and the same release discipline
 as CigScript: every version is a tag `vX.Y.Z` on main, every tag is a GitHub
 release with one tarball, its checksum and a build attestation, releases are
 never deleted and tags never moved, and a version that must not be picked is
-listed in `YANKED` rather than removed. `cigo update` is written against
-exactly this.
+listed in `YANKED` rather than removed. The installer's manifest is written
+against exactly this: it reads the tarball, the `.sha256`, the attestation
+and `YANKED`.
 
 ## The checklist
 
@@ -14,12 +15,12 @@ exactly this.
 2. **The version.** `stick VERSION = "X.Y.Z"` in `orchestrate.cig`; the
    release job refuses a tag that disagrees with it. If the version needs a
    newer cig, raise `CIG_NEEDS` and the `# cig` header beside it, the floor
-   in `bin/cigo` and `install.sh`, `CIG_VERSION` in `.github/workflows/ci.yml`,
-   and the installs in the README and [cigo in CI](ci.md).
+   in `bin/cigo` and `bin/cigo.launch.ps1`, `CIG_VERSION` in `.github/workflows/ci.yml`,
+   and the installer's `manifest/products.toml` entry for cigo.
 3. **The changelog.** The `Unreleased` section becomes `## X.Y.Z — date`,
    one entry per change a user sees, newest version first.
-4. **The docs** say what the version does: the README's install block names
-   the tag, [commands](commands.md) and [the manifest](manifest.md) have
+4. **The docs** say what the version does: the README's install block is
+   still right, [commands](commands.md) and [the manifest](manifest.md) have
    every new flag and key, `TOOLCHAINS.md` is regenerated when the knowledge
    base changed (`bin/cigo run toolchains-doc`).
 5. **The licence gate** passes on the tree (`LICENSE`, `NOTICE`, `LICENSES/`,
@@ -35,24 +36,23 @@ exactly this.
    ```
 
    The `release` job in `ci.yml` runs on the tag after the checks pass: it
-   builds `cig-orchestrator-vX.Y.Z.tar.gz` (the tool, the launcher, the
-   installer, the licences, the README, the changelog, `TOOLCHAINS.md`,
+   builds `cig-orchestrator-vX.Y.Z.tar.gz` (the tool, the launchers, the
+   redirect stubs for `install.sh` and `install.ps1`, the licences, the README, the changelog, `TOOLCHAINS.md`,
    `YANKED`, the docs), writes the `.sha256`, attests the build
    (`actions/attest-build-provenance`), and publishes the release with
    `LICENSE` and `NOTICE` beside the assets.
-8. **Check it as a user would**: `cigo update --check` sees the version,
-   `cigo update` installs it, `gh attestation verify cig-orchestrator-vX.Y.Z.tar.gz
+8. **Check it as a user would**: `ciginstaller update --check` sees the
+   version, `ciginstaller update` installs it, `gh attestation verify cig-orchestrator-vX.Y.Z.tar.gz
    -R otmof-ops/cig-orchestrator` passes.
 
 ## Yanking
 
-A release that must not be installed by `cigo update` is listed in `YANKED`,
+A release that must not be installed by the installer is listed in `YANKED`,
 one version per line with the reason, and the fix is the next patch version.
-The release and its tag stay: `cigo update --to=X.Y.Z` still installs a
+The release and its tag stay: the installer's `--allow-yanked` still installs a
 yanked version for whoever needs that one on purpose.
 
 ## Pre-releases
 
-A tag `vX.Y.Z-rc.1` marked as a pre-release on GitHub is picked only by a
-cigo whose `update_channel` is `prerelease` (`cigo config update_channel
-prerelease`).
+A tag `vX.Y.Z-rc.1` marked as a pre-release on GitHub is picked only on the installer's `beta` channel, or by a cigo whose
+`update_channel` is `prerelease` (`cigo config update_channel prerelease`).

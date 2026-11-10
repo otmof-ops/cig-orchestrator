@@ -67,24 +67,25 @@ Three sections before the dispatch carry the parity with cig itself.
 *Versions* (`version_findings`, `warn_versions`) reads every cig pin the
 project carries as cig reads them (`cig_pin_ok`), asks each pinned tool its
 version once per command (`probe_version`, a hop, so only `run`, `check` and
-`doctor` ask), and reports on stderr; `--strict` turns the report into a
+`__doctor` ask), and reports on stderr; `--strict` turns the report into a
 stop. *Crash reports* wrap the dispatch in a `try`: a runtime or type error
 inside the tool is written as a report through a hop outside the pack
 (`write_outside`), so the rollback that follows leaves it, and the error is
 coughed on so cig rolls the run back; `cigo crash` and `cigo config` manage
-the reports and `~/.cig-orchestrator/config`. *Update* reads the GitHub
-releases (or `CIGO_UPDATE_MANIFEST`), picks the newest the channel allows
-and `YANKED` does not forbid, downloads the tarball and its checksum,
-verifies, asks `gh attestation verify` when it can, and runs the release's
-own `install.sh` into the prefix the launcher names (`CIGO_TOOL`,
-`CIGO_LAUNCHER`).
+the reports and `~/.cig-orchestrator/config`. *Update, uninstall and doctor* are stubs: one function
+(`hand_to_installer`) finds ciginstaller (on `PATH`, then
+`$CIGSCRIPT_HOME/bin`, then `~/.cigscript/bin`), runs it with the mapped
+arguments and passes its exit code through, or says how to get it and exits
+127. The installer's `doctor --tools` reads cigo through the hidden
+`cigo __doctor --json`, which builds the findings (`doctor_findings`) and
+never calls the installer back.
 
 ## The launcher
 
 `bin/cigo` is a few lines of `sh`: it finds the tool, walks up to the
 project root (except for `adopt`, `toolchains`, `help` and `version`), and
-hands cig the flags that are cig's own. `install.sh` copies the tool and a
-launcher that points at it.
+hands cig the flags that are cig's own. ciginstaller copies the tool and a
+launcher that points at it; `install.sh` is a redirect to it.
 
 ## The tests
 

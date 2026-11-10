@@ -5,6 +5,40 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## Unreleased
+
+cigo runs through ciginstaller.
+
+- **`cigo update`, `cigo uninstall` and `cigo doctor` are stubs for
+  ciginstaller.** `cigo update [--check]` runs `ciginstaller update`,
+  `cigo uninstall [--yes]` runs `ciginstaller uninstall cigo`, and `cigo
+  doctor` runs `ciginstaller doctor --tools`. Each finds ciginstaller on
+  `PATH`, then in `$CIGSCRIPT_HOME/bin`, then in `~/.cigscript/bin`, shows what
+  it prints and exits with its code; without it, the stub says whose job the
+  command is now and how to get ciginstaller, and exits 127. `cigo update
+  --to=X.Y.Z` says updates come by carton (`ciginstaller carton list`, then
+  `ciginstaller update --to <carton>`), and a cigo running from a checkout is
+  still told to `git pull`.
+- **`cigo __doctor --json`** is the hidden, read-only entry the installer's
+  `doctor --tools` reads: the cig floor, the launcher and the tool it ran,
+  the guard, what a rehearsal can use, and the project's toolchains and
+  pins, as `{check, severity, found, because, fix}` findings. It never calls
+  ciginstaller. What `cigo doctor` printed is in it, as findings; its exit
+  code (1 on a missing tool) and `--strict` are not: `cigo run --strict` and
+  `cigo check --strict` still stop on a pin.
+- **`install.sh` and `install.ps1` only redirect** to `ciginstaller install
+  stick cigo` and exit 1, for one release. To work on cigo, run `bin/cigo`
+  from a checkout. The release tarball, its `.sha256`, the attestation and
+  `YANKED` are unchanged: they are what the installer reads.
+- **Removed:** the download, checksum, attestation, unpack and install code
+  of `cigo update`, the `CIGO_UPDATE_MANIFEST` and `CIGO_YANKED_FILE`
+  variables, `CIGO_PREFIX`, `CIGO_NAME` and `CIGO_NO_QUESTION` (the
+  installer's), and the `update/` folder under `~/.cig-orchestrator` (a
+  leftover one is safe to delete). `update_channel` and `YANKED` stay.
+- The launchers run `uninstall` and `doctor` from cigo's empty folder when
+  called from your home folder, and `__doctor` does the same where no
+  project is above.
+
 ## 1.18.0 — 2026-11-10
 
 Everything cigo keeps, held by cig's passes; a hook that reads a command

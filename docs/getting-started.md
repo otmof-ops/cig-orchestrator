@@ -5,33 +5,35 @@ every language with one command.
 
 ## 1. Install cig and cigo
 
-cigo is written in [CigScript](https://github.com/otmof-ops/cig-script), so it
-needs the `cig` runtime, 1.20.0 or newer:
+cigo is written in [CigScript](https://github.com/otmof-ops/cig-script), so
+it needs the `cig` runtime, 1.20.0 or newer. [ciginstaller](https://github.com/otmof-ops/cig-installer)
+installs both and checks the floor:
 
 ```sh
-# Review, then run (pinned to a release; never asks for sudo)
-curl -fsSL https://raw.githubusercontent.com/otmof-ops/cig-script/v1.20.0/install.sh -o install.sh
-less install.sh && sh install.sh
-cig --version
-```
-
-Then cigo itself:
-
-```sh
-git clone https://github.com/otmof-ops/cig-orchestrator && cd cig-orchestrator
-./install.sh      # cigo into ~/.local/bin, the tool into ~/.local/share/cig-orchestrator
+ciginstaller install stick cigo
 cigo version
 ```
 
-On Windows, PowerShell: install cig with CigScript's `install.ps1`, then run
-`powershell -ExecutionPolicy Bypass -File .\install.ps1` from the extracted
-cig-orchestrator release (or the checkout); `cigo` then works from PowerShell
-and cmd through the `cigo.cmd` shim, whatever the execution policy. Git Bash
-and WSL get the `sh` launcher from `install.sh`.
+No ciginstaller yet? Its [install section](https://github.com/otmof-ops/cig-installer#install)
+says how to get it today. Once ciginstaller has a release, that is its bootstrap
+script: download it, check it, read it, then run it (it asks before it changes
+anything; it never uses sudo):
+
+```sh
+gh release download -R otmof-ops/cig-installer -p install.sh -p install.sh.sha256
+sha256sum -c install.sh.sha256
+less install.sh        # read it, then run it
+sh install.sh
+```
+
+On Windows, ciginstaller's bootstrap is `install.ps1` from the same release.
+`cigo update` and `cigo uninstall` run `ciginstaller update` and
+`ciginstaller uninstall cigo`. To work on cigo itself, run `bin/cigo` from a
+checkout (see [CONTRIBUTING](../CONTRIBUTING.md)).
 
 cigo runs the tools your project already uses (`npm`, `cargo`, `uv`,
-`go`...), so those need to be installed as they are today. `cigo doctor`
-tells you which ones it can't find.
+`go`...), so those need to be installed as they are today.
+`ciginstaller doctor --tools` tells you which ones it can't find.
 
 ## 2. Try the example
 
@@ -86,7 +88,7 @@ looks right, save it:
 ```sh
 cigo adopt --write     # cig-tasks.json
 cigo check             # nothing runs; problems and warnings, each with what to do
-cigo doctor            # each toolchain: found or not, which version, against your pins
+ciginstaller doctor --tools   # each toolchain: found or not, which version, against your pins
 ```
 
 A warning that a tool is not on `PATH` only matters for the stages that use

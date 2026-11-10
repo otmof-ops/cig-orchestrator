@@ -31,7 +31,7 @@ a flag.
 - [cigo in CI](ci.md): the same chain on GitHub Actions and GitLab CI.
 - [Troubleshooting](troubleshooting.md): what a message means and what to
   type next.
-- [Releasing](releasing.md): how a version is cut, and what `cigo update`
+- [Releasing](releasing.md): how a version is cut, and what the installer
   expects of it.
 
 **Under the hood**

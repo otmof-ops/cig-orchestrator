@@ -69,7 +69,7 @@ documentation, so the docs build and test with everything else:
 
 Because it has `detect`, `cigo adopt` now finds every `book.toml` in the
 project on its own. `cigo run build` builds the book with everything else,
-`cigo run docs:serve` serves it, and `cigo doctor` checks `mdbook` is
+`cigo run docs:serve` serves it, and `ciginstaller doctor --tools` checks `mdbook` is
 installed.
 
 ## Everything a toolchain can say
@@ -92,11 +92,11 @@ installed.
 | `scripts` | a script table to read, like `{"file": "package.json", "key": "scripts", "run": ["npm", "run"]}` |
 | `targets` | a task runner's file to read: `make`, `just`, `taskfile`, `rake`, `earthly` or `scripts` |
 | `targets_run` | how to run a target, `{target}` marking where its name goes |
-| `tools` | programs `cigo check` and `cigo doctor` look for on `PATH` |
+| `tools` | programs `cigo check` and `ciginstaller doctor --tools` look for on `PATH` |
 | `versions` | per tool, the command that prints its version |
 | `pins` | per tool, where the project keeps the version it wants (below) |
 | `install` | where to get the tools, printed when one is missing |
-| `note` | one line `cigo doctor` and TOOLCHAINS.md show |
+| `note` | one line `ciginstaller doctor --tools` and TOOLCHAINS.md show |
 
 ### Conditions
 
@@ -175,7 +175,7 @@ not go through a shell to expand a glob:
 
 ### Pins
 
-`pins` tells `cigo doctor` where a project keeps the version it wants, as
+`pins` tells `ciginstaller doctor --tools` where a project keeps the version it wants, as
 `{"node": [".nvmrc", ".tool-versions:nodejs", "mise.toml:node"]}`. Each
 source is tried in turn:
 
