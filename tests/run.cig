@@ -4452,7 +4452,7 @@ test("blacklist run: the two warnings; a signed exception skips them; CI refuses
   assert(not there(dir, "fetch.txt"), "the task ran at warning one")
   # With --run-untrusted alone: warning two, still refused.
   stick two = guard_tool(dir, ["run", "fetch", "--run-untrusted=fetch"], l)
-  exits(two, 2)
+  exits(two, 1)
   says(two.err, "E581 last warning")
   says(two.out, "--light-it")
   assert(not there(dir, "fetch.txt"), "the task ran at warning two")
