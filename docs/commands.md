@@ -132,19 +132,24 @@ then in `~/.cigscript/bin`, shows what it prints and exits with its code. With
 none of them it says whose job the command is now and how to get
 ciginstaller, and exits 127.
 
-**`cigo crash`** is cigo's own crash reports: `list`, `show <id>`, `send
-<id>` (through cig), `delete <id>` (or `--all`). See [crash
-reports](#crash-reports).
+**`cigo crash [list|show|send|delete] ...`** runs `ciginstaller crash` with
+the same words: `list`, `show <id>`, `send <id>` (or `--all`, `--via`),
+`delete <id>` (or `--all`), `--json` passed on as typed. With no word it
+lists. The ashtray it reads is cig's, with every tool's reports in it, cigo's
+included. See [crash reports](#crash-reports).
 
-**`cigo report <run> [--send]`** bundles a run for an issue: cig's own
-report for it (plan, journal, diagnostic, doctor's diagnosis, every path a
-placeholder) with the manifest's shape beside it: a placeholder for the
-project and for every component and task (`<project>`, `c1`, `t1`), the keys
-each uses when the manifest's vocabulary has them, the toolchains cigo
-knows; never a name, a value, a command, an argument, a path or a glob. A
-task the run's error names in backticks gets the same placeholder. Written
-under `~/.cig-orchestrator/reports/<run>.json`; `--send` files it through
-cig's ashtray as a report on `issues_repo`.
+**`cigo report [<run>] [--send]`** is the short way in to `ciginstaller bug`,
+the one way to report anything. `cigo report <run>` runs `ciginstaller bug
+--run <run> --part cigo`, and `cigo report` with no run runs `ciginstaller bug
+cigo`; `--send` is passed on. The installer writes the report up, shows
+exactly what would be sent before anything is saved, and files it only under
+the one consent.
+
+These two find ciginstaller the way the three above do, show what it prints,
+exit with its code, and without it say whose job the command is now and how to
+get ciginstaller, and exit 127. Until you have it, an issue on the repository
+is the way to report something: the [bug
+form](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=bug-report.yml).
 
 **`cigo config`** is every setting, read through layers, each later one
 winning: the built-in default, the preset, the administrator's
@@ -1020,8 +1025,13 @@ goes; cig redacts it again, files one issue per bug on cigo's `issues_repo`
 with a live stats block, waits out a lost network, and tells you on `cig
 update --check` when a release fixed it. cigo's own `crash_reports` keeps
 one word: `never` keeps the report on this machine and never hands it over;
-`always` asks cig to send it in this process. `cigo crash show <id>` is what
-cigo saved; `cig crash show <id>` is exactly what travels.
+`always` asks cig to send it in this process. Saving and handing over stay
+cigo's own, so a crash is queued whether or not ciginstaller is installed;
+reading, sending and deleting what is queued is `ciginstaller crash list|show|
+send|delete` (`cigo crash` runs it). The ashtray gives the report its own id,
+so `ciginstaller crash list` is where to find it; cigo's copy stays under
+`~/.cig-orchestrator/crashes/` and its path is in what cigo printed. To report
+something yourself: `ciginstaller bug cigo`.
 
 The report holds cigo's and cig's versions, OS and architecture, the command
 line (token-, secret-, URL- and path-looking values redacted), the project
@@ -1090,7 +1100,7 @@ holds the before-bytes of what a task's `touches` named) under
 | `osv/` | OSV's answers and the advisories read (online), and one database per ecosystem (`cigo audit --update-db`) |
 | `blacklist/` | the last signed copy of each blacklist, which still counts when the list itself is changed by hand |
 | `rehearsals/` | the kept verdicts, each signed, by what was rehearsed (`cigo rehearse --fresh` ignores them) |
-| `crashes/<id>.json` | crash reports, yours until you send them (`cigo crash`) |
+| `crashes/<id>.json` | cigo's copy of each crash report, yours until you send the ashtray's (`ciginstaller crash`) |
 | `shims/` | the level 2 shims (`cigo guard scope dev --yes`; `cigo guard uninstall` removes them) |
 | `guard/` | the guard's level and what it installed (`state.json`), its log (`log.jsonl`), a pause or off switch, the Enter-key hooks (`hook.bash`, `hook.zsh`), and the first copy of each startup file it gave a block (`before/`) |
 | `quarantine/` | what `cigo run-url` downloaded, by its sha256 |

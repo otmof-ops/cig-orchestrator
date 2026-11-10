@@ -41,10 +41,16 @@ body:
     id: versions
     attributes:
       label: Versions and platform
-      description: "`cigo version`, `cig --version`, `ciginstaller status`, and your operating system."
+      description: "`cigo version`, `cig --version`, the output of `ciginstaller status`, and your operating system."
       placeholder: cig-orchestrator 1.18.0, cig 1.20.0, Linux x86_64
     validations:
       required: true
+  - type: textarea
+    id: bug
+    attributes:
+      label: "`ciginstaller bug cigo` output"
+      description: "Run `ciginstaller bug cigo` (or `cigo report <run>` for a run that went wrong): it writes up the versions, the doctor's findings and the run, and shows what it would send. Paste what it printed. Without ciginstaller, leave this blank."
+      render: text
   - type: textarea
     id: log
     attributes:

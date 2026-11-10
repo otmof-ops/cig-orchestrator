@@ -81,7 +81,7 @@ would have run and the chain would have put back what it created.
 | the tools themselves | `ciginstaller doctor --tools` (`cigo doctor` runs it) shows each toolchain's tools and versions against the pins you already keep; every command warns where a version disagrees, the installed cig against the project's pins included, and `--strict` stops on one. `cigo versions switch` runs tasks on the pinned versions through the version manager already on the machine (mise, asdf, rustup, uv, fnm...), per task, never your default |
 | what a task rewrites | on Linux every task runs in cig's box, over a copy-on-write layer on the project: a task that cannot start leaves nothing, and every change one that ran made comes back on rollback, named or not. Elsewhere a format stage's sources and a setup stage's lockfiles are kept in the tin before the task runs; `touches` names a task's own, `touches_sealed` what to keep encrypted |
 | every package manager, guarded | `cigo guard scope dev` puts `npm install`, `npx`, `pip install`, `cargo build` and the rest behind the same guard as a task, in any folder: your blacklist, OSV and the static read, then on Linux a rehearsal in cig's contained box, with `cigo undo last` after. `npm test` and the other calls that run nothing new pass straight through. `curl ... | sh` typed at the prompt is cancelled, and `cigo run-url` rehearses the script first. At level 4 every shell command your AI agent runs is read, boxed and undoable (`cigo agent undo`), and the risky ones wait for you (`cigo approve`) |
-| cigo itself | its own bugs reported through cig's ashtray under cig's one consent setting, never a task's failure; `cigo report <run> --send` for a run that went wrong; installed, updated and removed by ciginstaller (`cigo update` and `cigo uninstall` hand over to it), `cigo version --json` |
+| cigo itself | its own bugs reported through cig's ashtray under cig's one consent setting, never a task's failure; `cigo report [<run>]` and `cigo crash` (list, show, send, delete) hand over to ciginstaller (`ciginstaller bug cigo`, `ciginstaller crash`); installed, updated and removed by ciginstaller (`cigo update` and `cigo uninstall` hand over to it), `cigo version --json` |
 
 ## One stage, every language
 
@@ -154,7 +154,7 @@ your sanity.
 | get unstuck bringing a project over | [a guidance request](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=guidance-request.yml) |
 | have cigo know a language or tool it doesn't | [a toolchain request](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=toolchain-request.yml) |
 | get something your other tool does better | [a quality-of-life request](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=qol-request.yml) |
-| report something that went wrong | [a bug report](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=bug-report.yml) |
+| report something that went wrong | `ciginstaller bug cigo`, or without it [a bug report](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=bug-report.yml) |
 | report a problem in the language itself | [CigScript's issues](https://github.com/otmof-ops/cig-script/issues) |
 | report a security problem | [SECURITY.md](SECURITY.md), never a public issue |
 | send a fix or a toolchain | [CONTRIBUTING.md](CONTRIBUTING.md) |

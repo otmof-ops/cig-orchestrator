@@ -19,6 +19,20 @@ cigo runs through ciginstaller.
   --to=X.Y.Z` says updates come by carton (`ciginstaller carton list`, then
   `ciginstaller update --to <carton>`), and a cigo running from a checkout is
   still told to `git pull`.
+- **`cigo crash` and `cigo report` are stubs for ciginstaller.** `cigo
+  crash [list|show|send|delete] ...` runs `ciginstaller crash` with the same
+  words (`--all`, `--via`, `--json` as typed). `cigo report <run> [--send]`
+  runs `ciginstaller bug --run <run> --part cigo [--send]`, and `cigo report`
+  with no run runs `ciginstaller bug cigo`: `ciginstaller bug` is the one way
+  to report anything. Both find ciginstaller as the stubs above do, and
+  without it say whose job the command is now and exit 127. Capture stays
+  cigo's: a crash is still saved, redacted, and handed to cig's ashtray
+  (`cig crash submit`) with no installer on the machine, and cigo's report
+  bundle (the manifest's shapes, placeholders for names) stays behind the
+  hidden `cigo __report-bundle <run>`, which writes and sends nothing. Every
+  message that asks for a report names `ciginstaller bug cigo`, with the
+  issues form as the way in until ciginstaller is installed; the bug form
+  asks for the `ciginstaller status` and `ciginstaller bug cigo` output.
 - **`cigo __doctor --json`** is the hidden, read-only entry the installer's
   `doctor --tools` reads: the cig floor, the launcher and the tool it ran,
   the guard, what a rehearsal can use, and the project's toolchains and

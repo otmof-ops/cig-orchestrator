@@ -3968,8 +3968,9 @@ pull do_help() {
   exhale "  cigo update [--check]       ciginstaller update: the installer checks, verifies and installs the new carton"
   exhale "  cigo uninstall [--yes]      ciginstaller uninstall cigo"
   exhale "  cigo crash [list|show|send|delete <id>]"
-  exhale "                              cigo's own crash reports; sent through cig's ashtray when cig's `reports` setting says so"
-  exhale "  cigo report <run> [--send]  a run's bundle (cig's report, the manifest's shape) for an issue; --send files it through cig"
+  exhale "                              ciginstaller crash: the ashtray's reports, from every tool; cigo's own crashes join it through cig"
+  exhale "  cigo report [<run>] [--send]"
+  exhale "                              ciginstaller bug --run <run> --part cigo (no run: ciginstaller bug cigo): write up a bug, see what is sent first"
   exhale "  cigo config [<key> [<value>|--unset]]"
   exhale "                              every setting through its layers (cigo config explain <key>)"
   exhale ""
@@ -12447,31 +12448,6 @@ pull crash_path(r) {
   snuff path.join(CRASHES, r.id + ".json")
 }
 
-pull crash_reports() {
-  roll out = []
-  if fs.is_dir(CRASHES) {
-    for f in fs.glob(path.join(CRASHES, "*.json")) {
-      try {
-        out.push(json.load(f))
-      } ashtray e {
-        log.warn("${f}: not a crash report (${e.message})")
-      }
-    }
-  }
-  snuff out.sort_by(pack(r) => str(r.get("id", "")))
-}
-
-pull crash_find(id) {
-  stick all = crash_reports().filter(pack(r) => str(r.get("id", "")).starts_with(id))
-  if all.len() == 1 {
-    snuff all[0]
-  }
-  if all.is_empty() {
-    fail("no crash report starts with `${id}`; `cigo crash list` shows them")
-  }
-  fail("`${id}` matches ${all.len()} reports: ${all.map(pack(r) => r.id).join(", ")}")
-}
-
 pull issue_title(r) {
   snuff "crash [${r.fingerprint}]: ${str(r.panic_message).slice(0, 60)} (cigo ${r.version}, cig ${r.cig}, ${r.os})"
 }
@@ -12588,69 +12564,33 @@ pull report_crash(e) {
     # From here it is cig's: the report joins cig's ashtray, and cig's own
     # `reports` setting (ask once, always, never) says whether it goes, to
     # github.com/${issues_repo}, one issue per bug, redacted again.
-    log.error("Handing it to cig's ashtray; `cig config reports` says whether reports go (cigo crash show ${r.id} reads it, cigo crash send ${r.id} files it now).")
+    log.error("Handing it to cig's ashtray; `cig config reports` says whether reports go (`ciginstaller crash list` shows it there, `ciginstaller crash send <id>` files it now).")
     crash_submit(r, c.crash_reports == "always")
   }
+  log.error("To report it yourself: ${report_how()}")
 }
 
+# Where a person is told to report a bug: ciginstaller's one way in, with the
+# issues form as the way in until ciginstaller is on the machine.
+pull report_how() {
+  snuff "`ciginstaller bug cigo` (without ciginstaller: https://github.com/${config().issues_repo}/issues/new?template=bug-report.yml)"
+}
+
+# `cigo crash [list|show|send|delete] ...` -> `ciginstaller crash <sub> ...`,
+# every word after the sub passed on as typed (`--all`, `--via`, `--out`,
+# `--json`). Capture stays here: a crash is saved and handed to cig's ashtray
+# (`cig crash submit`, above) whether or not ciginstaller is installed.
 pull do_crash() {
-  expect_flags(["--json", "--all"])
-  stick what = targets.get(0, "list")
-  if what == "list" {
-    stick all = crash_reports()
-    if flags.contains("--json") {
-      exhale json.stringify(all)
-      snuff
-    }
-    if all.is_empty() {
-      log.info("no crash reports saved (that is good)")
-      snuff
-    }
-    exhale "${"report".pad_right(24)} ${"version".pad_right(10)} ${"sent".pad_right(8)} where"
-    for r in all {
-      exhale "${str(r.id).pad_right(24)} ${str(r.version).pad_right(10)} ${pick(r.get("sent", null) != null, "yes", "no").pad_right(8)} ${r.panic_location}"
-    }
-    exhale "cigo crash show <id> to read one, cigo crash send <id> to file it, cigo crash delete <id> to remove it"
-    snuff
+  roll what = words.get(0, "list")
+  roll rest = words.slice(1)
+  if what.starts_with("--") {
+    what = "list"
+    rest = words
   }
-  if what == "delete" and flags.contains("--all") {
-    roll n = 0
-    for r in crash_reports() {
-      if remove_outside(crash_path(r)) {
-        n += 1
-      }
-    }
-    log.info("deleted ${n} crash report" + pick(n == 1, "", "s"))
-    snuff
+  if not ["list", "show", "send", "delete"].contains(what) {
+    fail("`cigo crash` takes list, show <id>, send <id> or delete <id>|--all; they run `ciginstaller crash`")
   }
-  stick id = targets.get(1, "")
-  if id == "" {
-    fail("`cigo crash ${what}` needs a report id; `cigo crash list` shows them")
-  }
-  stick r = crash_find(id)
-  if what == "show" {
-    if not flags.contains("--json") {
-      exhale "crash report ${r.id}"
-      exhale "this is exactly what `cigo crash send` would file, inside a JSON block:"
-      exhale ""
-    }
-    exhale json.stringify(r, 2)
-  } else if what == "send" {
-    if config().crash_reports == "never" {
-      fail("crash_reports is \"never\" in ${tilde(CONFIG_FILE)}; `cigo config crash_reports ask`, then send it again")
-    }
-    if not crash_submit(r, true) {
-      exit(1)
-    }
-  } else if what == "delete" {
-    if remove_outside(crash_path(r)) {
-      log.info("deleted ${r.id}")
-    } else {
-      fail("could not delete ${crash_path(r)}")
-    }
-  } else {
-    fail("`cigo crash` takes list, show <id>, send <id> or delete <id>|--all")
-  }
+  hand_to_installer("`cigo crash ${what}`", ["crash", what] + rest)
 }
 
 # The manifest with nothing of the person's in it: shapes, no names and no
@@ -12732,15 +12672,16 @@ pull with_placeholders(textv, names) {
   snuff out
 }
 
-# `cigo report <run> [--send]`: the run's bundle as cig makes it (plan,
-# journal, diagnostic, doctor's diagnosis, redacted), with the manifest's
-# shape beside it, written under ~/.cig-orchestrator/reports/; `--send`
-# hands it to cig's ashtray as a report, the way a crash goes.
-pull do_report() {
-  expect_flags(["--send"])
+# `cigo __report-bundle <run>`: hidden and read-only. The run's bundle as cig
+# makes it (plan, journal, diagnostic, doctor's diagnosis, redacted), with the
+# manifest's shape beside it, as JSON on stdout. Nothing is written or sent,
+# and ciginstaller is not called: it is the bundle builder `report` and `bug`
+# can embed.
+pull do_report_bundle() {
+  expect_flags([])
   stick id = targets.get(0, "")
   if id == "" {
-    fail("report which run? `cigo report <run>`; `cig runs` lists them")
+    fail("__report-bundle which run? `cig runs` lists them")
   }
   roll got = null
   burn {
@@ -12762,7 +12703,7 @@ pull do_report() {
   stick scrubbed = json.parse(with_placeholders(json.stringify(inner), ms.names))
   stick run = scrubbed.get("run", {})
   stick what = pick(run.get("error", null) != null, str(run.get("error", "")), "run ${str(run.get("id", id))} finished ${str(run.get("status", "?"))}")
-  stick bundle = {
+  exhale json.stringify({
     kind: "report",
     title: "cigo run: " + what,
     location: "cig-orchestrator report",
@@ -12773,33 +12714,22 @@ pull do_report() {
     manifest: ms.summary,
     cig_report: scrubbed,
     note: "The manifest travels as shapes only: placeholders for the project, the components and the tasks, keys the manifest's vocabulary has, toolchains cigo knows; cig's bundle is anonymised as cig anonymises it, with the manifest's names in it given the same placeholders; file contents are never included.",
+  }, 2)
+}
+
+# `cigo report [<run>] [--send]`, the short way in: `ciginstaller bug --run
+# <run> --part cigo [--send]`, or `ciginstaller bug cigo` with no run. The
+# installer writes the report up, shows what would be sent and files it under
+# the one consent.
+pull do_report() {
+  expect_flags(["--send"])
+  if targets.len() > 1 {
+    fail("`cigo report` takes one run; `cig runs` lists them")
   }
-  stick file = path.join(CIGO_HOME, "reports", str(run.get("id", id)) + ".json")
-  if not write_outside(file, json.stringify(bundle, 2) + "\n") {
-    fail("could not write ${tilde(file)}")
-  }
-  if not flags.contains("--send") {
-    exhale tilde(file)
-    log.info("read it, then `cigo report ${id} --send` files it through cig, or attach it to an issue on github.com/${config().issues_repo}")
-    snuff
-  }
-  if config().crash_reports == "never" {
-    fail("crash_reports is \"never\" in ${tilde(CONFIG_FILE)}; the bundle stays at ${tilde(file)}")
-  }
-  stick repo = config().issues_repo
-  roll sent = null
-  burn {
-    sent = proc.run("cig", ["crash", "submit", "--origin", "cig-orchestrator", "--repo", repo, "--file", file, "--now"], {timeout_ms: 600000})
-  }
-  stick said = (str(sent.err) + str(sent.out)).trim()
-  for line in said.lines() {
-    if line.trim() != "" {
-      log.info(line)
-    }
-  }
-  if sent.code != 0 {
-    exit(1)
-  }
+  stick send = flags.filter(pack(f) => f == "--send")
+  stick id = targets.get(0, "")
+  stick mapped = pick(id == "", ["bug", "cigo"], ["bug", "--run", id, "--part", "cigo"])
+  hand_to_installer("`cigo report`", mapped + send)
 }
 
 pull do_config() {
@@ -17257,6 +17187,8 @@ pull dispatch() {
     do_crash()
   } else if command == "report" {
     do_report()
+  } else if command == "__report-bundle" {
+    do_report_bundle()
   } else if command == "config" {
     do_config()
   } else if command == "toolchains" {
