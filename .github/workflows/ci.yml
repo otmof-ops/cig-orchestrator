@@ -205,11 +205,14 @@ jobs:
       - name: the stubs without ciginstaller
         run: |
           if (Get-Command ciginstaller -ErrorAction SilentlyContinue) { throw 'ciginstaller is on this runner; the missing-installer check needs it absent' }
-          foreach ($c in @('update', 'uninstall', 'doctor')) {
+          foreach ($c in @('uninstall', 'doctor')) {
             $out = cigo $c 2>&1 | Out-String
             if ($LASTEXITCODE -ne 127) { throw "cigo $c exited $LASTEXITCODE, wanted 127" }
             if ($out -notmatch "is ciginstaller's job now") { throw "cigo ${c}: $out" }
           }
+          # From a checkout, update is refused before it looks for the installer.
+          $out = cigo update 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 2 -or $out -notmatch 'runs from a checkout' -or $out -notmatch 'git pull') { throw "cigo update in a checkout: $LASTEXITCODE $out" }
           $out = .\install.ps1 2>&1 | Out-String
           if ($LASTEXITCODE -ne 1 -or $out -notmatch 'ciginstaller install stick cigo') { throw "install.ps1: $LASTEXITCODE $out" }
 
