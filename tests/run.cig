@@ -1384,6 +1384,24 @@ pull write_fake_installer(dir) {
   snuff bindir
 }
 
+# cigo as a carton lays it down: the tool under share/ and the launcher under
+# bin/, no .git and no bin/ beside the tool. The suite itself may be running
+# from a checkout, through the launcher, so CIGO_TOOL is always set here, never
+# inherited.
+pull carton_env(dir) {
+  stick prefix = dir + "-carton"
+  stick share = path.join(prefix, "share", "cig-orchestrator")
+  burn {
+    fs.mkdir(prefix)
+    fs.mkdir(path.join(prefix, "bin"))
+    fs.mkdir(path.join(prefix, "share"))
+    fs.mkdir(share)
+    fs.cp(tool, path.join(share, "orchestrate.cig"))
+    fs.cp(launcher, path.join(prefix, "bin", "cigo"))
+  }
+  snuff {CIGO_TOOL: path.join(share, "orchestrate.cig"), CIGO_LAUNCHER: path.join(prefix, "bin", "cigo")}
+}
+
 # No ciginstaller anywhere: PATH holds the stubs alone, and the folders the
 # stub also looks in are empty ones.
 pull no_installer_env(dir) {
@@ -1401,7 +1419,7 @@ test("update, uninstall and doctor hand over to ciginstaller: the arguments and 
   stick dir = fresh("tests/fixtures/chain")
   stick bindir = write_fake_installer(dir)
   stick log = dir + "-installer.log"
-  stick more = {PATH: bindir + path_sep + env.get("PATH", ""), FAKE_INSTALLER_LOG: log, FAKE_EXIT: "5"}
+  stick more = {PATH: bindir + path_sep + env.get("PATH", ""), FAKE_INSTALLER_LOG: log, FAKE_EXIT: "5"}.merge(carton_env(dir))
   for c in [["update"], ["update", "--check"], ["uninstall"], ["uninstall", "--yes"], ["doctor"], ["doctor", "--json"]] {
     stick r = hop_env(dir, tool_prog("cig"), tool_args(c), more)
     exits(r, 5)
@@ -1424,7 +1442,7 @@ test("the stubs find ciginstaller in CIGSCRIPT_HOME/bin when it is not on PATH",
     fs.mv(bindir, path.join(csh, "bin"))
   }
   stick log = dir + "-installer.log"
-  stick r = hop_env(dir, tool_prog(proc.which("cig")), tool_args(["update", "--check"]), no_installer_env(dir).merge({CIGSCRIPT_HOME: csh, FAKE_INSTALLER_LOG: log, FAKE_EXIT: "3"}))
+  stick r = hop_env(dir, tool_prog(proc.which("cig")), tool_args(["update", "--check"]), no_installer_env(dir).merge(carton_env(dir)).merge({CIGSCRIPT_HOME: csh, FAKE_INSTALLER_LOG: log, FAKE_EXIT: "3"}))
   exits(r, 3)
   says(r.out, "fake-installer-says-hello")
   says(fs.read_text(log), "update --check")
@@ -1436,21 +1454,21 @@ test("without ciginstaller the stubs say whose job it is, how to get it, and exi
   }
   stick dir = fresh("tests/fixtures/chain")
   for c in [["update", "`cigo update` is ciginstaller's job now: ciginstaller update"], ["uninstall", "`cigo uninstall` is ciginstaller's job now: ciginstaller uninstall cigo"], ["doctor", "`cigo doctor` is ciginstaller's job now: ciginstaller doctor --tools"]] {
-    stick r = hop_env(dir, tool_prog(proc.which("cig")), tool_args([c[0]]), no_installer_env(dir))
+    stick r = hop_env(dir, tool_prog(proc.which("cig")), tool_args([c[0]]), no_installer_env(dir).merge(carton_env(dir)))
     exits(r, 127)
     says(r.err, c[1])
     says(r.err, "get ciginstaller: https://github.com/otmof-ops/cig-installer#install")
   }
 })
 
-test("update names no cigo version, and a checkout is updated with git pull", pack() {
+test("update names no cigo version, and refuses a flag it does not know", pack() {
   if on_windows {
     snuff
   }
   stick dir = fresh("tests/fixtures/chain")
   stick bindir = write_fake_installer(dir)
   stick log = dir + "-installer.log"
-  stick more = {PATH: bindir + path_sep + env.get("PATH", ""), FAKE_INSTALLER_LOG: log}
+  stick more = {PATH: bindir + path_sep + env.get("PATH", ""), FAKE_INSTALLER_LOG: log}.merge(carton_env(dir))
   stick to = hop_env(dir, tool_prog("cig"), tool_args(["update", "--to=9.0.0"]), more)
   exits(to, 2)
   says(to.err, "updates come by carton")
@@ -1459,14 +1477,32 @@ test("update names no cigo version, and a checkout is updated with git pull", pa
   stick spaced = hop_env(dir, tool_prog("cig"), tool_args(["update", "--to", "9.0.0"]), more)
   exits(spaced, 2)
   says(spaced.err, "updates come by carton")
-  stick co = hop_env(dir, tool_prog("cig"), tool_args(["update"]), more.merge({CIGO_TOOL: tool}))
-  exits(co, 2)
-  says(co.err, "runs from a checkout")
-  says(co.err, "`git pull` there updates it")
   exits(hop_env(dir, tool_prog("cig"), tool_args(["update", "--frob"]), more), 2)
   assert(not fs.exists(log), "ciginstaller was run for a call the stub refuses")
   # The download, checksum and attestation code is gone with its test hook.
   never_says(fs.read_text(tool), "CIGO_UPDATE_MANIFEST")
+})
+
+test("only update refuses in a checkout, and tells you to git pull; uninstall and doctor hand over", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick bindir = write_fake_installer(dir)
+  stick log = dir + "-installer.log"
+  # CIGO_TOOL is this checkout's own tool, as the launcher sets it.
+  stick more = {PATH: bindir + path_sep + env.get("PATH", ""), FAKE_INSTALLER_LOG: log, FAKE_EXIT: "5", CIGO_TOOL: tool}
+  for c in [["update"], ["update", "--check"]] {
+    stick co = hop_env(dir, tool_prog("cig"), tool_args(c), more)
+    exits(co, 2)
+    says(co.err, "runs from a checkout")
+    says(co.err, "`git pull` there updates it")
+  }
+  assert(not fs.exists(log), "ciginstaller was run for an update from a checkout")
+  for c in [["uninstall"], ["doctor"]] {
+    exits(hop_env(dir, tool_prog("cig"), tool_args(c), more), 5)
+  }
+  assert(fs.read_text(log).lines() == ["uninstall cigo", "doctor --tools"], fs.read_text(log))
 })
 
 test("the launcher refuses a cig older than the tool's floor, and names the tool", pack() {
