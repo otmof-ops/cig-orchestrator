@@ -3,6 +3,13 @@
 The chain you run locally is the chain CI runs: install `cig` and `cigo`
 with ciginstaller, then `cigo run ci`. The job file stops being a second copy of your build.
 
+The recipes below use ciginstaller's bootstrap script, which comes with
+ciginstaller's first release. Until that release exists
+([how to get ciginstaller today](https://github.com/otmof-ops/cig-installer#install)),
+install `cig` from its own release, the binary for the runner and its `.sha256`,
+and run `cigo` from its release tarball, as this repository's own
+[CI](../.github/workflows/ci.yml) does.
+
 ## GitHub Actions
 
 ```yaml
