@@ -1509,6 +1509,25 @@ test("crash and report refuse what they do not know before ciginstaller is asked
   assert(not fs.exists(log), "ciginstaller was run for a call the stub refuses")
 })
 
+# cig's ashtray under `cighome`, read as files. The ashtray is the family's interface
+# (ciginstaller reads it the same way), and `cig crash list` hands over to ciginstaller in a cig
+# that has the family's stubs, so these tests never ask cig for it.
+pull ashtray_origins(cighome) {
+  roll origins = []
+  for f in fs.glob(path.join(cighome, "ashtray", "*.json")) {
+    origins.push(str(json.load(f).origin))
+  }
+  snuff origins
+}
+
+pull ashtray_text(cighome) {
+  roll all = []
+  for f in fs.glob(path.join(cighome, "ashtray", "*.json")) {
+    all.push(fs.read_text(f))
+  }
+  snuff all.join("\n")
+}
+
 test("a cigo crash is still saved and queued in cig's ashtray with no ciginstaller on the machine", pack() {
   if on_windows {
     snuff
@@ -1527,8 +1546,8 @@ test("a cigo crash is still saved and queued in cig's ashtray with no ciginstall
   says(r.err, "A crash report was saved locally:")
   says(r.err, "Handing it to cig's ashtray")
   assert(fs.glob(path.join(cigo_home(dir), "crashes", "*.json")).len() == 1, "cigo's copy was not saved")
-  stick ash = hop_env(dir, proc.which("cig"), ["--json", "crash", "list"], bare)
-  says(ash.out, "\"origin\":\"cig-orchestrator\"")
+  stick origins = ashtray_origins(bare.CIGSCRIPT_HOME)
+  assert(origins.len() == 1 and origins[0] == "cig-orchestrator", "cig's ashtray holds: ${origins.join(", ")}")
   # and the stub for reading it says what is missing
   stick l = hop_env(dir, tool_prog(proc.which("cig")), tool_args(["crash", "list"]), bare)
   exits(l, 127)
@@ -2600,8 +2619,7 @@ test("a bug inside cigo is handed to cig's ashtray and filed under cigo's reposi
   says(str(issue.body), "\"origin\": \"cig-orchestrator\"")
   # cigo's own copy stays where it was, and cig's ashtray knows the origin.
   assert(fs.glob(path.join(cigo_home(dir), "crashes", "*.json")).len() == 1, "cigo's copy is gone")
-  stick ash = cig(dir, ["--json", "crash", "list"])
-  says(ash.out, "\"origin\":\"cig-orchestrator\"")
+  says(ashtray_origins(home).join(" "), "cig-orchestrator")
 })
 
 test("crash_reports never keeps a cigo crash on this machine, out of cig's ashtray", pack() {
@@ -2613,8 +2631,7 @@ test("crash_reports never keeps a cigo crash on this machine, out of cig's ashtr
   says(r.err, "crash_reports is \"never\"")
   never_says(r.err, "Handing it to cig")
   assert(not fs.exists(tracker), "a report was filed")
-  stick ash = cig(dir, ["--json", "crash", "list"])
-  never_says(ash.out, cigo_home(dir))
+  never_says(ashtray_text(home), cigo_home(dir))
 })
 
 test("cigo __report-bundle <run> bundles the run with the manifest's shape, and writes and sends nothing", pack() {
