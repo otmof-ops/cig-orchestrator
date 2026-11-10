@@ -22,7 +22,7 @@ CigScript](https://github.com/otmof-ops/cig-script#install), then check
 
 Only the stages that use that tool are affected. Install it (the message
 says where from), remove the component, or turn its stages off with
-`"stages": {"test": false}`. `cigo doctor` lists every tool at once.
+`"stages": {"test": false}`. `ciginstaller doctor --tools` lists every tool at once.
 
 **`` toolchain `rustt` is not one this knows; did you mean rust-cargo? ``**
 
@@ -128,7 +128,7 @@ and setup stages carry their language's sources and lockfiles already;
 A `.cig-version` file, the manifest's `cig` key or a script's `# cig` header
 asks for a cig the installed one does not satisfy. For a script, cig itself
 hands the run to a matching version from its humidor when it has one (`cig
-versions`); for the project, change the pin or `cig update`. `cigo doctor`
+versions`); for the project, change the pin or `cig update`. `ciginstaller doctor --tools`
 prints every version side by side; `--strict` on `run` and `check` makes a
 disagreement a stop, and `CIGO_VERSIONS=0` keeps the warning quiet.
 

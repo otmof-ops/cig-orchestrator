@@ -78,24 +78,35 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Is this the home folder itself (or /)? Compared as the system names the
+# folders, not as they are spelled: a temp folder reads /var/... in $HOME and
+# /private/var/... in the working directory on macOS, and a home behind a
+# symlink reads differently in each too.
+in_home() {
+  case "$PWD" in "$HOME"|"$HOME/"|/) return 0 ;; esac
+  [ -n "${HOME:-}" ] || return 1
+  here_p=$(pwd -P 2>/dev/null) || return 1
+  home_p=$(CDPATH='' cd -- "$HOME" 2>/dev/null && pwd -P) || return 1
+  [ "$here_p" = "$home_p" ] || [ "$here_p" = / ]
+}
+
 case "${1:-help}" in
-  adopt|help|version|toolchains|update|crash|config|blacklist|quarantine|guard|undo|run-url|agent|approve|--help|-h|--version)
+  adopt|help|version|toolchains|update|uninstall|doctor|crash|config|blacklist|quarantine|guard|undo|run-url|agent|approve|--help|-h|--version)
     # From the home folder itself (or /), cig would take all of it as the
     # run's pack and watch every file in it around each step: these run
     # from an empty folder of cigo's instead, and the commands that work
     # where you are (a guarded call, an agent's command, run-url) are told
     # where that is.
-    case "$PWD" in
-      "$HOME"|"$HOME/"|/)
-        if [ "${1:-help}" != adopt ] && [ -n "${HOME:-}" ]; then
-          here="${CIGO_HOME:-$HOME/.cig-orchestrator}/here"
-          if mkdir -p "$here" 2>/dev/null; then
-            CIGO_CALLER_DIR=$PWD
-            export CIGO_CALLER_DIR
-            cd "$here" || exit 1
-          fi
-        fi ;;
-    esac ;;
+    if in_home; then
+      if [ "${1:-help}" != adopt ] && [ -n "${HOME:-}" ]; then
+        here="${CIGO_HOME:-$HOME/.cig-orchestrator}/here"
+        if mkdir -p "$here" 2>/dev/null; then
+          CIGO_CALLER_DIR=$PWD
+          export CIGO_CALLER_DIR
+          cd "$here" || exit 1
+        fi
+      fi
+    fi ;;
   *)
     dir=$PWD
     # Up to the root, or until dirname stops changing (// on MSYS stays //).
@@ -107,11 +118,24 @@ case "${1:-help}" in
     if [ -f "$dir/cig-tasks.json" ] && [ "$dir" != "$PWD" ]; then
       cd "$dir" || exit 1
     fi
+    # The installer asks for `__doctor` from wherever it was run, a home
+    # folder included: with no project above, it runs from cigo's own empty
+    # folder like the commands above.
+    if [ ! -f "$dir/cig-tasks.json" ] && [ "${1:-}" = __doctor ]; then
+      if in_home && [ -n "${HOME:-}" ]; then
+        here="${CIGO_HOME:-$HOME/.cig-orchestrator}/here"
+        if mkdir -p "$here" 2>/dev/null; then
+          CIGO_CALLER_DIR=$PWD
+          export CIGO_CALLER_DIR
+          cd "$here" || exit 1
+        fi
+      fi
+    fi
     ;;
 esac
 
-# `cigo update` replaces the tool and the launcher where they are installed;
-# `cigo version --json` names them.
+# `cigo version --json` names the tool and the launcher that ran; `cigo
+# __doctor` checks that they agree.
 CIGO_TOOL=$tool
 CIGO_LAUNCHER=$0
 export CIGO_TOOL CIGO_LAUNCHER

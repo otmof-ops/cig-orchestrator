@@ -144,31 +144,41 @@ jobs:
           install -m 755 "cig-$CIG_VERSION-linux-x86_64" /usr/local/bin/cig
       - run: bin/cigo --no-rollback run ci
 
-  # The two PowerShell installers in the order docs/ci.md gives them, on a
-  # Windows runner: CigScript's from its newest release, cig-orchestrator's
-  # from this checkout; then the launcher from PATH, as a user would have it.
+  # The cmd shim and the PowerShell launcher, on a Windows runner: cig from its
+  # release (checked against its .sha256), cigo from this checkout's bin (cigo is
+  # installed by ciginstaller now; this job tests the launcher it lays down, from
+  # PATH as a user would have it), and the installer stubs.
   ci-windows-installers:
     name: installers (windows)
     runs-on: windows-latest
+    env:
+      CIG_VERSION: v1.20.0
     defaults:
       run:
         shell: pwsh
     steps:
       - uses: actions/checkout@v7
-      - name: Install cig and cigo the way docs/ci.md says
-        env:
-          CIG_NO_MODIFY_PATH: '1'
+      - name: Install cig, and put this checkout's cigo on PATH
         run: |
-          irm https://raw.githubusercontent.com/otmof-ops/cig-script/main/install.ps1 | iex
-          $env:Path = "$env:LOCALAPPDATA\Programs\cig;$env:Path"
-          .\install.ps1
-          echo "$env:LOCALAPPDATA\Programs\cig;$env:LOCALAPPDATA\cig-orchestrator\bin" >> $env:GITHUB_PATH
+          $dir = "$env:RUNNER_TEMP\cig"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $name = "cig-$env:CIG_VERSION-windows-x86_64.exe"
+          $base = "https://github.com/otmof-ops/cig-script/releases/download/$env:CIG_VERSION"
+          Invoke-WebRequest "$base/$name" -OutFile "$dir\$name"
+          Invoke-WebRequest "$base/$name.sha256" -OutFile "$dir\$name.sha256"
+          $want = ((Get-Content "$dir\$name.sha256" -Raw).Trim() -split '\s+')[0].ToLower()
+          $got = (Get-FileHash "$dir\$name" -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) { throw "cig $env:CIG_VERSION sha256 mismatch: $got, wanted $want" }
+          Move-Item "$dir\$name" "$dir\cig.exe"
+          $env:Path = "$dir;$env:Path"
+          echo "$dir;$PWD\bin" >> $env:GITHUB_PATH
+          cig --version
       - run: choco install shellcheck -y --no-progress
       # The suite's fixtures run sort and printf as a Git Bash user has
       # them, first on PATH; Windows' own sort.exe is another program.
       - run: echo "C:\Program Files\Git\usr\bin" >> $env:GITHUB_PATH
       - run: cigo version --json
-      - run: cigo doctor
+      - run: cigo __doctor --json
       - run: cigo check
       - run: cigo --no-rollback run ci
       # `cigo` at a PowerShell prompt is the cmd shim (the launcher is
@@ -200,32 +210,28 @@ jobs:
           # becomes an error record, and the step's Stop preference throws it.
           $out = cigo run say -- --tag v2 | Out-String
           if ($out -notmatch 'got --tag v2') { throw "5.1: the task did not get -- --tag v2: $out" }
-      # `cigo update` from a PowerShell install puts back a PowerShell
-      # install: a fake 9.0.0 release, as the release job builds one.
-      - name: cigo update through the PowerShell launcher
+      # update, uninstall and doctor are ciginstaller's now: without it on
+      # PATH each says so and exits 127; install.ps1 only redirects.
+      - name: the stubs without ciginstaller
         run: |
-          $rel = Join-Path $env:RUNNER_TEMP 'rel'
-          $n = 'cig-orchestrator-v9.0.0'
-          New-Item -ItemType Directory -Force -Path "$rel\$n\bin" | Out-Null
-          Copy-Item orchestrate.cig,install.sh,install.ps1,LICENSE,NOTICE,README.md,CHANGELOG.md,TOOLCHAINS.md,YANKED "$rel\$n\"
-          Copy-Item bin\cigo,bin\cigo.launch.ps1,bin\cigo.cmd "$rel\$n\bin\"
-          Copy-Item -Recurse LICENSES,docs "$rel\$n\"
-          $src = Get-Content -Raw "$rel\$n\orchestrate.cig"
-          if ($src -notmatch 'stick VERSION = "') { throw 'no VERSION line' }
-          [IO.File]::WriteAllText("$rel\$n\orchestrate.cig", ($src -replace 'stick VERSION = "[0-9.]+"', 'stick VERSION = "9.0.0"'))
-          & "$env:SystemRoot\System32\tar.exe" -C $rel -czf "$rel\$n.tar.gz" $n
-          "$((Get-FileHash -Algorithm SHA256 "$rel\$n.tar.gz").Hash.ToLower())  $n.tar.gz" | Set-Content "$rel\$n.tar.gz.sha256"
-          $r = @(@{tag_name = 'v9.0.0'; draft = $false; prerelease = $false; html_url = 'https://example.invalid'; published_at = '2026-10-28T00:00:00Z'; assets = @(@{name = "$n.tar.gz"; browser_download_url = "file://$rel\$n.tar.gz"}, @{name = "$n.tar.gz.sha256"; browser_download_url = "file://$rel\$n.tar.gz.sha256"})})
-          ConvertTo-Json -InputObject $r -Depth 5 | Set-Content "$rel\releases.json"
-          $env:CIGO_UPDATE_MANIFEST = "$rel\releases.json"
-          cigo update
-          $v = cigo version --json | ConvertFrom-Json
-          if ($v.version -ne '9.0.0') { throw "cigo version says $($v.version) after the update" }
-          if (-not (Test-Path -LiteralPath "$env:LOCALAPPDATA\cig-orchestrator\bin\cigo.launch.ps1")) { throw 'the PowerShell launcher is gone' }
-          if (Test-Path -LiteralPath "$env:LOCALAPPDATA\cig-orchestrator\bin\cigo.ps1") { throw 'a cigo.ps1 was written' }
+          if (Get-Command ciginstaller -ErrorAction SilentlyContinue) { throw 'ciginstaller is on this runner; the missing-installer check needs it absent' }
+          foreach ($c in @('uninstall', 'doctor')) {
+            $out = cigo $c 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 127) { throw "cigo $c exited $LASTEXITCODE, wanted 127" }
+            if ($out -notmatch "is ciginstaller's job now") { throw "cigo ${c}: $out" }
+          }
+          # From a checkout, update is refused before it looks for the installer.
+          $out = cigo update 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 2 -or $out -notmatch 'runs from a checkout' -or $out -notmatch 'git pull') { throw "cigo update in a checkout: $LASTEXITCODE $out" }
+          # a child process, so its stderr ([Console]::Error) is captured by 2>&1
+          $out = pwsh -NoProfile -File .\install.ps1 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 1 -or $out -notmatch 'ciginstaller install stick cigo') { throw "install.ps1: $LASTEXITCODE $out" }
+          # the runner ends a pwsh step with exit $LASTEXITCODE, which is install.ps1's
+          # deliberate 1; every check above passed
+          exit 0
 
   # A tag vX.Y.Z is a release: one tarball, its checksum, a build attestation,
-  # and the licence beside them. `cigo update` reads these.
+  # and the licence beside them. The installer's manifest reads these.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [ci, ci-alpine, ci-windows-installers]
@@ -236,7 +242,7 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v7
-      - name: the tarball and its checksum (matches orchestrate.cig's `cigo update`)
+      - name: the tarball and its checksum (the assets the installer's manifest reads)
         run: |
           tag="$GITHUB_REF_NAME"
           grep -q "^stick VERSION = \"${tag#v}\"" orchestrate.cig || { echo "orchestrate.cig says another version than $tag" >&2; exit 1; }

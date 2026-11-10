@@ -8,7 +8,7 @@ because the tooling does most of the checking.
 - **Something went wrong?** Open a [bug
   report](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=bug-report.yml)
   with the manifest (or the part that matters), the command, the full
-  output, and `cigo version` and `cig --version`.
+  output, and `cigo version`, `cig --version` and `ciginstaller status`.
 - **A language or tool cigo doesn't know?** A [toolchain
   request](https://github.com/otmof-ops/cig-orchestrator/issues/new?template=toolchain-request.yml)
   is enough to get it built with you; a pull request is even better.
@@ -33,8 +33,11 @@ bin/cigo run ci           # cig check on every .cig file, shellcheck, then the s
 ```
 
 `bin/cigo` runs this checkout's `orchestrate.cig`, so your changes are live.
-(`./install.sh` copies the tool instead; run it again after a change if you
-use the installed `cigo`.)
+There is no install step from a checkout: `install.sh` only points at
+ciginstaller. To type `cigo` for the checkout, link the launcher, which
+follows the link back to the checkout (`ln -s "$PWD/bin/cigo"
+~/.local/bin/cigo-dev`); the installed `cigo` stays the one ciginstaller
+manages.
 The suite takes a few seconds; `cig run tests/run.cig -- <words>` runs just
 the tests whose names contain them.
 `CIGO_TEST_BINARY=<program>` runs the same suite against cigo compiled to a

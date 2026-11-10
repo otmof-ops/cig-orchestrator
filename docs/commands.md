@@ -7,7 +7,7 @@ cigo run <task>... [--only] [--force] [-- <args for the last task named>]
 cigo plan [<task>...] [--only]
 cigo show <task>
 cigo check
-cigo doctor
+cigo doctor                      (runs `ciginstaller doctor --tools`)
 cigo outputs [<task>...]
 cigo toolchains [<name>] [--markdown]
 cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | stats | cache [stats | clear] | uninstall [--yes]]
@@ -86,19 +86,21 @@ of each task's `touches`, the conditions, alternatives and vars of the
 project's own toolchains, and every version disagreement (below) as a
 warning. `--strict` makes a disagreement an error. It changes nothing.
 
-**`cigo doctor`** looks at each toolchain the project uses: whether its tools
-are on `PATH`, which versions they are, and whether those match the pins the
-project keeps (`.nvmrc`, `.python-version`, `.tool-versions`, `mise.toml`,
-`rust-toolchain.toml`, `global.json`, and the minimums in `go.mod` and
-`build.zig.zon`, among others), naming the version manager that would run
-tasks on a pinned version; then the cig this runs under against the range
-cigo supports and every cig pin the project carries; then the guard; then
-what `cigo rehearse` can use here: whether cig's contained box is there (the
-rehearsal's isolation), whether Docker or Podman is (their backends are not
-built yet), the tool each registry's rehearsal installs with (`npm`; `uv`,
-`pip3` or `pip`; `cargo`) or where to get it, and how many verdicts and
-quarantined rehearsals are kept. It exits 1 when a tool is missing, and with
-`--strict` when a version disagrees.
+**`cigo doctor`** runs `ciginstaller doctor --tools`, which shows what the
+installer owns and, for cigo, the findings of `cigo __doctor --json`, a
+hidden, read-only entry that never calls ciginstaller. Each finding is
+`{check, severity: ok|note|action, found, because, fix}`. It looks at the cig
+this runs under against the range cigo supports; the launcher and the tool it
+started; the guard (its level, the shims, the startup-file blocks, whether
+the shims come first on this PATH, the agent hook); what `cigo rehearse` can
+use here (whether cig's contained box is there, whether Docker or Podman is,
+the tool each registry's rehearsal installs with, and how many verdicts and
+quarantined rehearsals are kept); and, in a project, each toolchain's tools
+on `PATH` and each version against the pins the project keeps (`.nvmrc`,
+`.python-version`, `.tool-versions`, `mise.toml`, `rust-toolchain.toml`,
+`global.json`, and the minimums in `go.mod` and `build.zig.zon`, among
+others), naming the version manager that would run tasks on a pinned
+version, and every cig pin the project carries. It changes nothing.
 
 **`cigo versions`** lists each language's pin against this machine: the
 pinned version and where it is pinned, the installed one, and the version
@@ -112,14 +114,23 @@ runs them. See [version checks](#version-checks-on-every-command).
 the range of cig it supports, whether the installed cig is inside it, and
 where the tool is installed.
 
-**`cigo update`** installs the newest release over this one: it reads the
-releases, downloads `cig-orchestrator-vX.Y.Z.tar.gz` and its `.sha256`,
-refuses a checksum that does not match, checks the build attestation when
-`gh` is installed, and runs the release's own `install.sh` into the same
-prefix. `--check` only says whether there is one. `--to=X.Y.Z` installs that
-version, a yanked one included (`cigo update` on its own never picks a
-version listed in the repository's `YANKED` file). A cigo running from a git
-checkout is updated with `git pull` instead, and `update` says so.
+**`cigo update`** runs `ciginstaller update`, which checks, verifies and
+installs the next carton; `--check` only says whether there is one. Updates
+come by carton, so there is no cigo version to name: `ciginstaller carton
+list` shows them and `ciginstaller update --to <carton>` moves to one. A
+cigo running from a git checkout is updated with `git pull` instead, and
+`update` says so. The setting `update_channel` (`stable` or `prerelease`)
+says which releases cigo's own are considered, and a release listed in the
+repository's `YANKED` file is never picked.
+
+**`cigo uninstall`** runs `ciginstaller uninstall cigo`, which first runs
+`cigo guard uninstall --yes` when the guard is installed. Your settings and
+reports under `~/.cig-orchestrator` stay.
+
+Each of the three finds ciginstaller on `PATH`, then in `$CIGSCRIPT_HOME/bin`,
+then in `~/.cigscript/bin`, shows what it prints and exits with its code. With
+none of them it says whose job the command is now and how to get
+ciginstaller, and exits 127.
 
 **`cigo crash`** is cigo's own crash reports: `list`, `show <id>`, `send
 <id>` (through cig), `delete <id>` (or `--all`). See [crash
@@ -185,7 +196,7 @@ says, on stderr, where they disagree:
   them: `1.2` is any 1.2.x, `1.2.0` exactly that, `>=1.2.0` that or newer);
 - each toolchain's installed version against the pins the project keeps
   (`.nvmrc`, `.python-version`, `go.mod`, `rust-toolchain.toml` and the rest
-  of the list under `cigo doctor`).
+  of the list under `cigo __doctor`).
 
 The cig pins are files, so `list`, `plan` and `show` read them on every call.
 Asking a tool its version is a process, which cig journals as a hop, so
@@ -561,7 +572,7 @@ guarded call (`CIGO_GUARDED` is set for it) gets the real one.
 Where it does not reach, said plainly: a program called by its full path
 skips its shim, and a version manager that puts its own folder first on
 `PATH` at every prompt (`mise activate`) can come before the shims;
-`cigo guard` and `cigo doctor` say whether the shims come first in the
+`cigo guard` and `ciginstaller doctor --tools` say whether the shims come first in the
 shell you are in. Level 2's shims are `sh` scripts, so on Windows they come
 later; `cigo run` stays guarded there.
 
@@ -805,7 +816,7 @@ same change again); text rated critical is denied; a write in the project
 goes ahead, and one elsewhere in your home goes ahead and is logged under
 the agent's session. An entry from an older cigo is brought up to date in
 place. cigo keeps its word on the hook in the tin as well: `cigo guard`,
-`cigo doctor` and every guarded call check the entry is still there, and say
+`ciginstaller doctor --tools` and every guarded call check the entry is still there, and say
 so when it was taken out or changed (`E897`); `cigo guard scope agents
 --agents=claude-code --yes` puts it back. Claude Code then checks its own permission rules against the
 rewritten command, so allow and deny rules written for plain commands
@@ -1080,7 +1091,6 @@ holds the before-bytes of what a task's `touches` named) under
 | `blacklist/` | the last signed copy of each blacklist, which still counts when the list itself is changed by hand |
 | `rehearsals/` | the kept verdicts, each signed, by what was rehearsed (`cigo rehearse --fresh` ignores them) |
 | `crashes/<id>.json` | crash reports, yours until you send them (`cigo crash`) |
-| `update/<tag>/` | the last release `cigo update` downloaded and verified |
 | `shims/` | the level 2 shims (`cigo guard scope dev --yes`; `cigo guard uninstall` removes them) |
 | `guard/` | the guard's level and what it installed (`state.json`), its log (`log.jsonl`), a pause or off switch, the Enter-key hooks (`hook.bash`, `hook.zsh`), and the first copy of each startup file it gave a block (`before/`) |
 | `quarantine/` | what `cigo run-url` downloaded, by its sha256 |
@@ -1097,11 +1107,9 @@ holds the before-bytes of what a task's `touches` named) under
 | `CIG_PLAIN=1` | the same as `--plain` |
 | `CIG_DOCTOR=0` | the same as `--no-doctor` |
 | `CIGSCRIPT_HOME` | where cig keeps run records, instead of `~/.cigscript` |
-| `CIGO_HOME` | where cigo keeps its config, crash reports and downloads, instead of `~/.cig-orchestrator` |
-| `CIGO_PREFIX`, `CIGO_NAME` | for `install.sh`: the install root (`~/.local`) and the command's name (`cigo`); `install.ps1` takes `-Prefix` and `-Name` |
+| `CIGO_HOME` | where cigo keeps its config and crash reports, instead of `~/.cig-orchestrator` |
 | `CIGO_VERSIONS=0` | no version warnings |
 | `CIGO_BOX=0`, `CIGO_BOX=1` | tasks on the tin, or in the box, where the manifest and the task say nothing (the default is the box on Linux and the tin elsewhere) |
-| `CIGO_UPDATE_MANIFEST`, `CIGO_YANKED_FILE` | a local releases list and YANKED file for `cigo update`, instead of GitHub's (the suite uses them) |
 | `CIGO_BLACKLIST_DIR` | where your blacklists live, instead of `~/.config/cigscript/blacklist.d` (the suite uses it) |
 | `CIGO_OSV_API`, `CIGO_OSV_DUMPS` | another OSV to ask (`https://api.osv.dev`) and another place for its dumps (`https://osv-vulnerabilities.storage.googleapis.com`): a mirror, or a fixture (the suite uses them) |
 | `CIGO_ACCEPT_RISK=1` | a guarded call held at medium or high runs this once, at a terminal |
@@ -1110,7 +1118,6 @@ holds the before-bytes of what a task's `touches` named) under
 | `CIGO_GUARD_HOOK=0` | the Enter-key hook lets every line through in that shell |
 | `CIGO_CALLER_DIR` | set by the launchers when they move to `here/`: the folder cigo was called from |
 | `CIGO_AGENT`, `CIGO_AGENT_SESSION` | the agent and session `cigo agent run` tags its run with (`--agent`, `--session` win); set for the command it runs, and `cigo approve` refuses under it |
-| `CIGO_NO_QUESTION=1` | `install.sh` does not print the guard's question (`cigo update` sets it) |
 | `CIGO_LAUNCHER` | the `cigo` the shims call (the launcher sets it; the suite points it at a stub) |
 | `CIGO_INTERNAL_PANIC=<command>` | crash on purpose at that command (`mid-run` for inside a run), for the suite |
 
@@ -1122,9 +1129,8 @@ is installed, else Windows PowerShell, with the execution policy bypassed),
 which splits cig's flags, walks up to the manifest and checks the cig it
 hands the tool to, the same as the `sh` launcher. The launcher is not named
 `cigo.ps1` on purpose: PowerShell would run that in-process before the shim
-and eat the task's `--`. `install.ps1` installs both with the tool into
-`%LOCALAPPDATA%\cig-orchestrator` (`-Prefix`, `-Name`) and adds its `bin`
-to the user PATH. Under Git Bash and
+and eat the task's `--`. ciginstaller lays both down with the tool and puts their folder on the
+user PATH. Under Git Bash and
 MSYS2 the `sh` launcher works too, and keeps a task's arguments as typed
 (`MSYS2_ARG_CONV_EXCL`). The checkout carries a `.gitattributes`, so scripts
 are LF and the Windows files CRLF whatever `core.autocrlf` says.

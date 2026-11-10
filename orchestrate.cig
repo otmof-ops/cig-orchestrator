@@ -49,7 +49,7 @@ stick SETTINGS = {
   issues_repo: {values: null, default: REPO, floor: false, presets: {},
     doc: "GitHub repository that receives crash reports (owner/name)"},
   update_channel: {values: ["prerelease", "stable"], default: "stable", floor: false, presets: {},
-    doc: "which releases `cigo update` considers: stable, or prerelease"},
+    doc: "which releases an update of cigo considers (the installer reads it): stable, or prerelease"},
   versions: {values: ["off", "never", "ask", "always"], default: "ask", floor: true, presets: {chill: "never", ci: "never", paranoid: "always"},
     doc: "when a toolchain's installed version disagrees with the project's pin: ask (print the question and the commands that answer it; never in CI), always (run tasks on the pinned version through the version manager found), never (warn only), off (do not look)"},
   install: {values: ["never", "ask", "always"], default: "ask", floor: false, presets: {ci: "never"},
@@ -1305,7 +1305,14 @@ stick targets = words.filter(pack(w) => not w.starts_with("--"))
 
 # ----- small helpers ----------------------------------------------------------
 
+# `cigo __doctor` turns a usage error into a throw (FAIL_THROWS), so it can
+# still answer in its one JSON shape.
+roll FAIL_THROWS = false
+
 pull fail(message) {
+  if FAIL_THROWS {
+    cough message
+  }
   log.error(message)
   exit(2)
 }
@@ -3950,7 +3957,7 @@ pull do_help() {
   exhale "  cigo trust [<task>|list|show <task>|revoke <task>|revoke --all]"
   exhale "                              approve a task as it is now (signed with the tin's key), or see and drop approvals"
   exhale "  cigo check [--strict]       the manifest, checked before anything runs"
-  exhale "  cigo doctor [--strict]      each toolchain: installed, which version, against the project's pins"
+  exhale "  cigo doctor                 ciginstaller doctor --tools: each tool's findings, cigo's toolchains and pins included"
   exhale "  cigo versions [switch|keep|install [--yes]]"
   exhale "                              each language's pin against this machine, and whether tasks run on"
   exhale "                              the pinned version through mise, asdf, rustup, uv, fnm... (never your default)"
@@ -3958,8 +3965,8 @@ pull do_help() {
   exhale "  cigo toolchains [<name>] [--markdown]"
   exhale "                              the toolchains this knows"
   exhale "  cigo version [--json]       this cigo and the cig it runs on"
-  exhale "  cigo update [--check] [--to=X.Y.Z]"
-  exhale "                              install the newest release, checksum and attestation verified"
+  exhale "  cigo update [--check]       ciginstaller update: the installer checks, verifies and installs the new carton"
+  exhale "  cigo uninstall [--yes]      ciginstaller uninstall cigo"
   exhale "  cigo crash [list|show|send|delete <id>]"
   exhale "                              cigo's own crash reports; sent through cig's ashtray when cig's `reports` setting says so"
   exhale "  cigo report <run> [--send]  a run's bundle (cig's report, the manifest's shape) for an issue; --send files it through cig"
@@ -5495,13 +5502,79 @@ pull tools_named(alts) {
   snuff out
 }
 
-pull do_doctor(g) {
-  expect_flags(["--strict"])
-  expect_no_targets()
-  stick comps = g.components
-  if comps.is_empty() {
-    exhale "no components in ${MANIFEST}, so no toolchains to look at; `cigo check` looks over the tasks"
+# ----- the self-check the installer reads: `cigo __doctor --json` ----------------------
+#
+# One hidden, read-only entry that never calls ciginstaller (the installer's
+# `doctor --tools` calls this, so a call back would loop): the cig floor, the
+# launcher and the tool it runs, the guard, what a rehearsal can use, and the
+# project's toolchains against its pins. Each finding is
+# {check, severity: ok|note|action, found, because, fix: string|null}.
+
+pull doctor_finding(check, severity, found, because, fix) {
+  snuff {check: check, severity: severity, found: found, because: because, fix: fix}
+}
+
+pull doctor_cig() {
+  stick have = cig.version()
+  stick ok = cig_pin_ok(CIG_NEEDS, have)
+  if ok == false {
+    snuff [doctor_finding("cig-floor", "action", "cig ${have}", "cigo ${VERSION} needs cig ${CIG_NEEDS}", "ciginstaller update")]
   }
+  if ok == null {
+    snuff [doctor_finding("cig-floor", "note", "cig ${have}", "the version could not be compared with cigo's floor, ${CIG_NEEDS}", null)]
+  }
+  snuff [doctor_finding("cig-floor", "ok", "cig ${have}", "cigo ${VERSION} needs cig ${CIG_NEEDS}", null)]
+}
+
+# The launcher and the tool it started, as the launcher exports them.
+pull doctor_launcher() {
+  stick tool = env.get("CIGO_TOOL", "")
+  stick launcher = env.get("CIGO_LAUNCHER", "")
+  if tool == "" or launcher == "" {
+    snuff [doctor_finding("launcher", "note", "cigo was not started through its launcher", "it was run as `cig run orchestrate.cig`, so the launcher and the installed tool were not looked at", null)]
+  }
+  roll out = []
+  stick checkout = fs.is_dir(path.join(path.dir(tool), ".git")) or fs.is_file(path.join(path.dir(tool), "bin", "cigo"))
+  if not fs.is_file(tool) {
+    out.push(doctor_finding("tool-file", "action", "${tilde(tool)} is missing", "the launcher started cigo from a tool file that is not there", "ciginstaller install stick cigo"))
+  } else if checkout {
+    out.push(doctor_finding("tool-file", "note", "cigo runs from a checkout at ${tilde(path.dir(tool))}", "a checkout is updated with `git pull`, not by the installer", null))
+  } else {
+    out.push(doctor_finding("tool-file", "ok", tilde(tool), "the tool file the launcher runs", null))
+  }
+  # A launcher named by a relative path is read from where it was started,
+  # and the launcher has moved to the project since: not found is not a fault.
+  stick absolute = launcher.starts_with("/") or text.matches(launcher, '^[A-Za-z]:[\\/]')
+  if not fs.is_file(launcher) {
+    out.push(doctor_finding("launcher", pick(absolute, "action", "note"), "${tilde(launcher)} could not be read", "the launcher cigo was started by", pick(absolute, "ciginstaller install stick cigo", null)))
+    snuff out
+  }
+  stick lower = launcher.lower()
+  roll named = null
+  if not lower.ends_with(".ps1") and not lower.ends_with(".cmd") {
+    stick m = text.captures(fs.read_text(launcher).replace("\r\n", "\n"), "(?m)^tool='(.*)'$")
+    if m != null {
+      named = m[1].replace("'\\''", "'")
+    }
+  }
+  if named != null and not fs.is_file(named) and not checkout {
+    out.push(doctor_finding("launcher", "action", "${tilde(launcher)} names ${tilde(named)}, which is gone", "a launcher left from an older install points at a tool file that was removed", "ciginstaller install stick cigo"))
+  } else if named != null and named.replace("\\", "/") != tool.replace("\\", "/") {
+    out.push(doctor_finding("launcher", "note", "${tilde(launcher)} names ${tilde(named)}, and cigo is running ${tilde(tool)}", "two copies of cigo are installed; the one the launcher names is not the one that ran", null))
+  } else {
+    out.push(doctor_finding("launcher", "ok", tilde(launcher), "the launcher and the tool agree", null))
+  }
+  snuff out
+}
+
+# The project's toolchains against its pins, and the cig it pins.
+pull doctor_project() {
+  if not fs.is_file(MANIFEST) {
+    snuff [doctor_finding("project", "note", "no ${MANIFEST} in ${tilde(ROOT)}", "there are no project toolchains or version pins to look at here", "cigo adopt")]
+  }
+  stick g = build_graph(load())
+  roll out = []
+  stick comps = g.components
   roll by_tc = {}
   for name in comps {
     stick id = to_text(comps[name].toolchain)
@@ -5510,29 +5583,23 @@ pull do_doctor(g) {
     }
     by_tc[id].push(name)
   }
-  roll missing = 0
-  roll mismatched = 0
   for id in by_tc {
     if not g.kb.has(id) {
-      exhale "${id}: not a toolchain this knows (${by_tc[id].join(", ")})"
-      missing += 1
+      out.push(doctor_finding("toolchain:${id}", "action", "${id} is not a toolchain cigo knows (${by_tc[id].join(", ")})", "the manifest names it", "cigo toolchains lists the ones it knows"))
       continue
     }
     stick tc = g.kb[id]
     stick first = comps[by_tc[id].first()]
-    exhale "${id} (${tc.get("language", "")}): ${by_tc[id].join(", ")}"
+    stick where = "${id} (${tc.get("language", "")}): ${by_tc[id].join(", ")}"
+    stick install_fix = pick(tc.has("install"), str(tc.get("install", "")), null)
+    roll all_found = true
     for tool in as_list(tc.get("tools", [])) {
-      stick at = which(str(tool))
-      if at == null {
-        missing += 1
-        exhale "    missing  ${tool}" + pick(tc.has("install"), "   install: ${tc.get("install", "")}", "")
-      } else {
-        exhale "    found    ${tool}  ${at}"
+      if which(str(tool)) == null {
+        all_found = false
+        out.push(doctor_finding("tool:${id}:${tool}", "action", "${tool} is not on PATH", "${where} needs it", install_fix))
       }
     }
     stick vars = vars_for(first.dir, tc, first.name)
-    # A var that picks a program (python3, python or py) is a tool too:
-    # the one it settled on has to be on PATH, or nothing it runs can.
     stick defs = tc.get("vars", {})
     for vname in defs {
       stick wanted = tools_named(defs[vname])
@@ -5540,64 +5607,80 @@ pull do_doctor(g) {
         continue
       }
       stick program = program_of(vars.get(vname, null))
-      stick at = pick(program == "", null, which(program))
-      if at == null {
-        missing += 1
-        exhale "    missing  ${vname}: none of ${wanted.join(", ")} is on PATH" + pick(tc.has("install"), "   install: ${tc.get("install", "")}", "")
-      } else {
-        exhale "    found    ${program}  ${at}"
+      if program == "" or which(program) == null {
+        all_found = false
+        out.push(doctor_finding("tool:${id}:${vname}", "action", "none of ${wanted.join(", ")} is on PATH", "${where} needs one of them as ${vname}", install_fix))
       }
+    }
+    if all_found {
+      out.push(doctor_finding("toolchain:${id}", "ok", where, "every tool it needs is on PATH", null))
     }
     stick versions = tc.get("versions", {})
     for vname in versions {
       stick v = probe_version(fill(versions[vname], vars))
-      exhale "    version  ${vname} ${v ?? "unknown"}"
       for cname in by_tc[id] {
         stick pin = pin_of(tc, vname, comps[cname].dir)
-        if pin != null {
-          stick ok = pin_matches(pin.value, v, pin.minimum)
-          if ok == false {
-            mismatched += 1
+        if pin == null {
+          continue
+        }
+        stick ok = pin_matches(pin.value, v, pin.minimum)
+        stick what = pick(pin.minimum, "needs at least", "pins")
+        stick found = "${vname} ${v ?? "unknown"}"
+        stick because = "${pin.from} ${what} ${pin.value}"
+        if ok == null {
+          out.push(doctor_finding("pin:${id}:${vname}", "note", found, because + ": not a version number, not compared", null))
+        } else if ok {
+          out.push(doctor_finding("pin:${id}:${vname}", "ok", found, because, null))
+        } else {
+          stick how = switch_for(tc, vname, pin.value)
+          roll fix = "install ${managers_for(vname).join(" or ")}, then cigo versions switch"
+          if how != null {
+            fix = pick(manager_has(how), "cigo versions switch", "cigo versions install")
           }
-          stick what = pick(pin.minimum, "needs at least", "pinned")
-          exhale "    pin      ${vname} ${what} ${pin.value} (${pin.from})" + pick(ok == null, ": not a version number, not compared", pick(ok, ": satisfied by ${v}", ": does not match ${v ?? "unknown"}"))
-          if ok == false {
-            stick how = switch_for(tc, vname, pin.value)
-            if how == null {
-              exhale "    manager  none found for ${vname}; ${managers_for(vname).join(" or ")} would let cigo run tasks on ${pin.value} (cigo versions)"
-            } else {
-              exhale "    manager  ${vname}: ${how.manager}" + pick(manager_has(how), " has ${pin.value}", " does not have ${pin.value} (cigo versions install)") + "; cigo versions switch runs tasks on it"
-            }
-          }
+          out.push(doctor_finding("pin:${id}:${vname}", "action", found, because + ": does not match", fix))
         }
       }
     }
-    if tc.has("note") {
-      exhale "    note     ${tc.note}"
-    }
-  }
-  stick have = cig.version()
-  exhale "cig (CigScript): the cig this runs under"
-  exhale "    version  cig ${have}"
-  stick needs_ok = cig_pin_ok(CIG_NEEDS, have)
-  exhale "    pin      cig-orchestrator ${VERSION} needs ${CIG_NEEDS}: " + pick(needs_ok == false, "not satisfied by ${have}", "satisfied by ${have}")
-  if needs_ok == false {
-    mismatched += 1
   }
   for p in cig_pins(g) {
+    stick have = cig.version()
     stick ok = cig_pin_ok(p.pin, have)
-    if ok == false {
-      mismatched += 1
+    stick because = "${p.from} pins cig ${p.pin}"
+    if ok == null {
+      out.push(doctor_finding("pin:cig", "note", "cig ${have}", because + ": not a version pin, not compared", null))
+    } else if ok {
+      out.push(doctor_finding("pin:cig", "ok", "cig ${have}", because, null))
+    } else {
+      out.push(doctor_finding("pin:cig", "action", "cig ${have}", because + ": does not match", "ciginstaller update"))
     }
-    exhale "    pin      ${p.from} pins cig ${p.pin}" + pick(ok == null, ": not a version pin, not compared", pick(ok, ": satisfied by ${have}", ": does not match ${have}"))
   }
-  doctor_guard()
-  doctor_rehearse()
-  exhale ""
-  exhale "${missing} missing tool(s), ${mismatched} version mismatch(es)"
-  if missing > 0 or (mismatched > 0 and flags.contains("--strict")) {
-    exit(1)
+  snuff out
+}
+
+# Every finding, in the order a person reads them. A check that cannot finish
+# is a finding too: the entry always answers in the shape.
+pull doctor_findings() {
+  roll out = doctor_cig()
+  for part in [pack() => doctor_launcher(), pack() => doctor_guard_findings(), pack() => doctor_rehearse_findings(), pack() => doctor_project()] {
+    try {
+      out = out + part()
+    } ashtray e {
+      out.push(doctor_finding("self-check", "action", "a check stopped: ${str(e.get("message", e))}", "cigo could not finish looking at itself", "cigo check"))
+    }
   }
+  snuff out
+}
+
+# `cigo __doctor --json`: read-only, and it never calls ciginstaller.
+pull do_self_doctor() {
+  expect_flags(["--json"])
+  expect_no_targets()
+  # A usage error deep in a check throws here instead of ending the process,
+  # so the answer is still the one JSON document.
+  FAIL_THROWS = true
+  stick findings = doctor_findings()
+  FAIL_THROWS = false
+  exhale json.stringify({tool: "cigo", version: VERSION, findings: findings})
 }
 
 pull do_outputs() {
@@ -12844,143 +12927,55 @@ pull write_setting(key, value) {
   }
 }
 
-# ----- version and update: the same release discipline as cig ------------------------
+# ----- version, and the commands the installer owns now ------------------------------
 #
-# Releases are tags `vX.Y.Z` with one asset, cig-orchestrator-vX.Y.Z.tar.gz,
-# its .sha256 beside it and a build attestation. `cigo update` reads the
-# releases, downloads the newest the channel allows, refuses a checksum that
-# does not match, checks the attestation when gh is here, and installs it
-# over this one with the tarball's own install.sh. YANKED in the repository
-# lists versions it must not pick.
+# ciginstaller installs, updates, removes and checks every tool of the
+# family, cigo included, so `cigo update`, `cigo uninstall` and `cigo doctor`
+# are stubs: each hands the work to ciginstaller with the mapped arguments,
+# shows what it prints and exits with its code. A machine without
+# ciginstaller gets two lines and exit 127. Release assets stay as they are
+# (the tarball, its .sha256, the attestation, YANKED): they are what the
+# installer's manifest reads.
 
-pull version_newer(a, b) {
-  stick x = version_parts(a)
-  stick y = version_parts(b)
-  if x == null or y == null {
-    snuff false
+stick INSTALLER_BOOTSTRAP = "https://github.com/otmof-ops/cig-installer#install"
+
+# ciginstaller: on PATH first, then $CIGSCRIPT_HOME/bin, then ~/.cigscript/bin.
+pull installer_path() {
+  stick found = which("ciginstaller")
+  if found != null {
+    snuff found
   }
-  for i in 0..3 {
-    if x[i] != y[i] {
-      snuff x[i] > y[i]
+  stick homes = [env.get("CIGSCRIPT_HOME", ""), path.join(fs.home(), ".cigscript")].filter(pack(h) => h != "")
+  for h in homes {
+    for name in ["ciginstaller", "ciginstaller.exe"] {
+      stick p = path.join(h, "bin", name)
+      if fs.is_file(p) {
+        snuff p
+      }
     }
   }
-  snuff false
+  snuff null
 }
 
-pull fetch_text(url, what) {
+# The one place a stub runs ciginstaller: `what` is what the person typed,
+# `words` the arguments it maps to. Stdio is shown as it comes, the exit
+# code is ciginstaller's own, and a machine without it hears how to get it.
+pull hand_to_installer(what, words) {
+  stick at = installer_path()
+  if at == null {
+    log.error("${what} is ciginstaller's job now: ciginstaller ${words.join(" ")}")
+    log.error("get ciginstaller: ${INSTALLER_BOOTSTRAP}")
+    exit(127)
+  }
   roll r = null
   burn {
-    if which("gh") != null and url.starts_with("https://api.github.com/") {
-      r = proc.run("gh", ["api", url.slice("https://api.github.com/".len())], {timeout_ms: 60000})
-      # gh installed but not logged in (a fresh machine, a CI runner):
-      # curl reads a public repository just as well.
-      if r.code != 0 and which("curl") != null {
-        r = proc.run("curl", ["-sS", "-f", "-L", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "--retry", "3", "--max-time", "120", "-H", "Accept: application/vnd.github+json", url], {timeout_ms: 130000})
-      }
-    } else if which("curl") != null {
-      r = proc.run("curl", ["-sS", "-f", "-L", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "--retry", "3", "--max-time", "120", "-H", "Accept: application/vnd.github+json", url], {timeout_ms: 130000})
-    } else {
-      fail("`cigo update` needs gh or curl to read ${what}")
-    }
+    r = proc.run(at, words, {timeout_ms: 3600000, stream: true})
   }
   if r.get("simulated", false) {
-    fail("`cigo update` does not dry-run")
+    fail("${what} does not dry-run; `ciginstaller ${words.join(" ")} --dry-run` shows what it would change")
   }
   if r.code != 0 {
-    fail("could not read ${what}: ${r.err.trim()}")
-  }
-  snuff r.out
-}
-
-pull releases() {
-  # `pick` is a function, so both arms would run: the fetch stays behind an if.
-  stick local = env.get("CIGO_UPDATE_MANIFEST", "")
-  roll textv = "[]"
-  if local != "" {
-    if fs.is_file(local) {
-      textv = fs.read_text(local)
-    }
-  } else {
-    textv = fetch_text("https://api.github.com/repos/${REPO}/releases?per_page=20", "the releases of ${REPO}")
-  }
-  roll items = []
-  try {
-    items = json.parse(textv)
-  } ashtray e {
-    fail("the releases response is not JSON: ${e.message}")
-  }
-  if type_of(items) != "list" {
-    fail("the releases response is not a list")
-  }
-  snuff items
-}
-
-pull yanked() {
-  stick local = env.get("CIGO_YANKED_FILE", "")
-  roll textv = ""
-  if local != "" {
-    if fs.is_file(local) {
-      textv = fs.read_text(local)
-    }
-  } else if env.get("CIGO_UPDATE_MANIFEST", "") == "" and which("curl") != null {
-    roll r = null
-    burn {
-      try {
-        r = proc.run("curl", ["-sS", "-f", "-L", "--proto", "=https", "--tlsv1.2", "--max-time", "30", "https://raw.githubusercontent.com/${REPO}/main/YANKED"], {timeout_ms: 40000})
-      } ashtray e {
-        r = {code: -1, out: ""}
-      }
-    }
-    if r.code == 0 {
-      textv = r.out
-    } else {
-      log.warn("the list of yanked releases could not be read (${str(r.get("err", "")).trim().slice(0, 120)}); going on without it")
-    }
-  }
-  snuff textv.lines().map(pack(l) => l.trim()).filter(pack(l) => l != "" and not l.starts_with("#")).map(pack(l) => l.split(" ")[0].split("\t")[0].replace("v", ""))
-}
-
-# The newest release the channel allows, as {version, tag, url, asset, sha, published}.
-pull latest_release() {
-  stick prerelease_ok = config().update_channel == "prerelease"
-  stick gone = yanked()
-  roll best = null
-  for it in releases() {
-    if it.get("draft", false) or (it.get("prerelease", false) and not prerelease_ok) {
-      continue
-    }
-    stick tag = str(it.get("tag_name", ""))
-    stick v = version_parts(tag)
-    if v == null or not text.matches(tag, '^v?\d+\.\d+\.\d+$') or gone.contains(tag.replace("v", "")) {
-      continue
-    }
-    stick version = "${v[0]}.${v[1]}.${v[2]}"
-    stick assets = as_list(it.get("assets", []))
-    stick tarball = assets.filter(pack(a) => str(a.get("name", "")) == "cig-orchestrator-${tag}.tar.gz").get(0, null)
-    stick sha = assets.filter(pack(a) => str(a.get("name", "")) == "cig-orchestrator-${tag}.tar.gz.sha256").get(0, null)
-    if tarball == null or sha == null {
-      continue
-    }
-    if best == null or version_newer(version, best.version) {
-      best = {version: version, tag: tag, url: str(it.get("html_url", "")), asset: str(tarball.browser_download_url), sha: str(sha.browser_download_url), published: str(it.get("published_at", "")).slice(0, 10)}
-    }
-  }
-  snuff best
-}
-
-pull download(url, dest) {
-  roll r = null
-  burn {
-    if url.starts_with("file://") {
-      r = proc.run("cp", ["--", url.slice(7), dest], {timeout_ms: 30000})
-    } else if which("curl") != null {
-      r = proc.run("curl", ["-sS", "-f", "-L", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "--retry", "3", "--max-time", "300", "-o", dest, url], {timeout_ms: 310000})
-    } else {
-      fail("`cigo update` needs curl to download ${url}")
-    }
-  }
-  if r.code != 0 {
-    fail("download failed: ${r.err.trim()}")
+    exit(r.code)
   }
 }
 
@@ -12995,156 +12990,35 @@ pull do_version() {
   exhale "cig-orchestrator ${VERSION} (cig ${cig.version()})"
 }
 
+# `cigo update [--check]` -> `ciginstaller update [--check]`. Updates come by
+# carton now, so a cigo version (--to) is explained, not looked up. A cigo
+# running from a checkout is still the checkout's to update.
 pull do_update() {
-  expect_flags(["--check", "--to"])
-  if not targets.is_empty() {
-    fail("`cigo update` takes --to=X.Y.Z, with the equals sign; got ${targets.join(", ")}")
-  }
-  stick wanted = flag_value("--to", "")
-  roll rel = null
-  if wanted != "" {
-    stick w = version_parts(wanted)
-    if w == null {
-      fail("`--to` takes a version like 0.3.1")
-    }
-    stick want = "${w[0]}.${w[1]}.${w[2]}"
-    for it in releases() {
-      if version_parts(str(it.get("tag_name", ""))) != null and "${version_parts(str(it.tag_name))[0]}.${version_parts(str(it.tag_name))[1]}.${version_parts(str(it.tag_name))[2]}" == want {
-        stick tag = str(it.tag_name)
-        stick assets = as_list(it.get("assets", []))
-        stick tarball = assets.filter(pack(a) => str(a.get("name", "")) == "cig-orchestrator-${tag}.tar.gz").get(0, null)
-        stick sha = assets.filter(pack(a) => str(a.get("name", "")) == "cig-orchestrator-${tag}.tar.gz.sha256").get(0, null)
-        if tarball != null and sha != null {
-          rel = {version: want, tag: tag, url: str(it.get("html_url", "")), asset: str(tarball.browser_download_url), sha: str(sha.browser_download_url), published: str(it.get("published_at", "")).slice(0, 10)}
-        }
-      }
-    }
-    if rel == null {
-      fail("no release ${want} with a cig-orchestrator-v${want}.tar.gz asset in ${REPO}")
-    }
-  } else {
-    rel = latest_release()
-    if rel == null {
-      fail("no release of ${REPO} fits the ${config().update_channel} channel")
-    }
-  }
-  stick newer = version_newer(rel.version, VERSION)
-  if flags.contains("--check") {
-    if newer {
-      exhale "cig-orchestrator ${rel.version} is available (released ${rel.published}); this is ${VERSION}. `cigo update` installs it."
-    } else {
-      exhale "cig-orchestrator ${VERSION} is current" + pick(rel.version == VERSION, "", " (${rel.version} is the newest release)")
-    }
-    snuff
-  }
-  if not newer and wanted == "" {
-    exhale "cig-orchestrator ${VERSION} is current; `cigo update --to ${rel.version}` reinstalls it"
-    snuff
-  }
+  expect_flags(["--check", "--to", "--json"])
   stick tool = env.get("CIGO_TOOL", "")
-  stick launcher = env.get("CIGO_LAUNCHER", "")
-  if tool == "" or launcher == "" {
-    fail("`cigo update` needs the launcher: run it as `cigo update`, not through `cig run`")
-  }
-  if fs.is_dir(path.join(path.dir(tool), ".git")) or fs.is_file(path.join(path.dir(tool), "bin", "cigo")) {
+  if tool != "" and (fs.is_dir(path.join(path.dir(tool), ".git")) or fs.is_file(path.join(path.dir(tool), "bin", "cigo"))) {
     fail("this cigo runs from a checkout at ${tilde(path.dir(tool))}; `git pull` there updates it")
   }
-  # ~/.local/share/cig-orchestrator/orchestrate.cig -> ~/.local
-  stick prefix = path.dir(path.dir(path.dir(tool)))
-  stick name = path.base(launcher)
-  # The PowerShell launcher (cigo.launch.ps1, or cigo.ps1 from 0.4.0) is
-  # put back by the release's install.ps1 under its stem; the sh launcher
-  # by install.sh under its name.
-  stick on_powershell = name.lower().ends_with(".ps1")
-  stick stem = pick(name.lower().ends_with(".launch.ps1"), name.slice(0, name.len() - 11), pick(on_powershell, name.slice(0, name.len() - 4), name))
-  if which("sh") == null and powershell() == null {
-    fail("`cigo update` needs sh, or PowerShell on Windows, to unpack and install the release")
+  if flags.any(pack(f) => f == "--to" or f.starts_with("--to=")) or not targets.is_empty() {
+    fail("`cigo update` has no cigo version to name: updates come by carton. `ciginstaller carton list` shows them, then `ciginstaller update --to <carton>`")
   }
-  if which("tar") == null {
-    fail("`cigo update` needs tar on PATH to unpack the release")
-  }
-  stick work = path.join(CIGO_HOME, "update", rel.tag)
-  stick tarball = path.join(work, "cig-orchestrator-${rel.tag}.tar.gz")
-  stick sidecar = tarball + ".sha256"
-  burn {
-    if which("sh") != null {
-      proc.run("sh", ["-c", 'rm -rf -- "$1" && mkdir -p -- "$1"', "sh", work], {timeout_ms: 10000})
-    } else {
-      proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "if (Test-Path -LiteralPath $env:CIGO_DIR) { Remove-Item -Recurse -Force -LiteralPath $env:CIGO_DIR }; New-Item -ItemType Directory -Force -Path $env:CIGO_DIR | Out-Null"], {env: {CIGO_DIR: work}, timeout_ms: 20000})
-    }
-  }
-  download(rel.asset, tarball)
-  download(rel.sha, sidecar)
-  stick expected = fs.read_text(sidecar).split(" ").get(0, "").trim().lower()
-  stick actual = hash.sha256_file(tarball)
-  if expected == "" or expected != actual {
-    remove_outside(tarball)
-    fail("checksum mismatch for ${rel.tag}: expected ${expected}, got ${actual}; nothing installed")
-  }
-  roll trust = "verified"
-  if which("gh") != null and env.get("CIGO_UPDATE_MANIFEST", "") == "" {
-    roll att = null
-    burn {
-      att = proc.run("gh", ["attestation", "verify", tarball, "-R", REPO], {timeout_ms: 60000})
-    }
-    if att.code == 0 {
-      trust = "attested"
-    } else {
-      if att.err.contains("unknown command") {
-        log.warn("the build attestation for ${rel.tag} was not checked: this gh has no `gh attestation` (gh 2.49 or later does); the checksum matched")
-      } else {
-        log.warn("the build attestation for ${rel.tag} could not be verified (${att.err.trim().slice(0, 120)}); the checksum matched. `gh auth login` lets gh check it")
-      }
-    }
-  }
-  roll r = null
-  burn {
-    # By name, from inside work: GNU tar reads the D: of a Windows path as
-    # a host. Through sh where there is one, so the hop starts in the
-    # project, as every write to cigo's own folder does: started in work,
-    # cig would watch work and call the unpacked files writes outside the
-    # pack it cannot undo (E752), which they are meant to be.
-    if which("sh") != null {
-      r = proc.run("sh", ["-c", 'cd "$1" && exec tar -xzf "$2"', "sh", work, path.base(tarball)], {timeout_ms: 120000})
-    } else {
-      r = proc.run("tar", ["-xzf", path.base(tarball)], {cwd: work, timeout_ms: 120000})
-    }
-  }
-  if r.code != 0 {
-    fail("could not unpack ${path.base(tarball)}: ${r.err.trim()}")
-  }
-  stick unpacked = fs.list(work).filter(pack(p) => fs.is_dir(p) and path.base(p).starts_with("cig-orchestrator-"))
-  if unpacked.len() != 1 {
-    fail("the tarball unpacked into ${unpacked.len()} cig-orchestrator-* directories, not one")
-  }
-  stick unpacked_dir = unpacked.first()
-  roll inst = null
-  burn {
-    if on_powershell {
-      inst = proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "install.ps1", "-Prefix", prefix, "-Name", stem], {cwd: unpacked_dir, timeout_ms: 120000})
-    } else {
-      # CIGO_PREFIX as well as PREFIX: under Termux install.sh reads only
-      # the first (PREFIX is the system's own there).
-      inst = proc.run("sh", ["./install.sh"], {cwd: unpacked_dir, env: {CIGO_PREFIX: prefix, PREFIX: prefix, CIGO_NAME: stem, CIGO_NO_QUESTION: "1"}, timeout_ms: 120000})
-    }
-  }
-  if inst.code != 0 {
-    fail("the release's installer failed: ${(inst.out + inst.err).trim()}")
-  }
-  # An agent reading the output of a `cigo update` it ran reads the release's
-  # installer output with it: if what the installer printed holds text
-  # addressed to AI agents or invisible Unicode, fence it the way `cigo
-  # agent run` fences a command's output.
-  if in_agent() {
-    stick note = fence_note(inst.out + inst.err)
-    if note != null {
-      log.warn(note)
-    }
-  }
-  for line in inst.out.trim_end().lines() {
-    exhale "  " + line
-  }
-  exhale "updated: cig-orchestrator ${VERSION} -> ${rel.version} (${trust}); the release notes are at ${rel.url}"
+  hand_to_installer("`cigo update`", ["update"] + flags.filter(pack(f) => f == "--check" or f == "--json"))
+}
+
+# `cigo uninstall` -> `ciginstaller uninstall cigo`. The installer runs
+# `cigo guard uninstall --yes` first, when the guard is installed.
+pull do_uninstall() {
+  expect_flags(["--yes", "--json"])
+  expect_no_targets()
+  hand_to_installer("`cigo uninstall`", ["uninstall", "cigo"] + flags)
+}
+
+# `cigo doctor` -> `ciginstaller doctor --tools`, which shows cigo's own
+# findings (`cigo __doctor --json`, below) beside the installer's.
+pull do_doctor_stub() {
+  expect_flags(["--json"])
+  expect_no_targets()
+  hand_to_installer("`cigo doctor`", ["doctor", "--tools"] + flags)
 }
 
 # ----- the guard's reach: guard_scope (#57) ---------------------------------------------
@@ -16833,13 +16707,19 @@ pull keep_hook_word(word) {
 
 # Is the hook still where cigo put it? Said (E897) when it was taken out or
 # changed: by the setting, or, when the setting was lost too, by the tin.
-pull claude_hook_check(deep) {
+# Is the agent hook missing from Claude Code's settings where the guard's
+# level says it should be there? Says nothing; `claude_hook_check` says it.
+pull claude_hook_gone(deep) {
   roll want = str(config().guard_agents).split(",").map(pack(a) => a.trim()).contains("claude-code") and guard_level_number(config().guard_scope) >= 4
   if not want and deep {
     stick kept = hook_kept()
     want = kept != null and kept != "removed"
   }
-  if want and not claude_hook_current(claude_settings()) {
+  snuff want and not claude_hook_current(claude_settings())
+}
+
+pull claude_hook_check(deep) {
+  if claude_hook_gone(deep) {
     log.warn("E897 the hook was taken out of " + tilde(claude_settings()) + " (or changed): your agent's commands are not guarded until cigo guard scope agents --agents=claude-code --yes puts it back")
     snuff false
   }
@@ -17253,39 +17133,44 @@ pull do_undo() {
   guard_note({kind: "undo", thing: str(ev.run)})
 }
 
-# doctor's guard block: the level, whether each piece is in place, and the
+# The guard's findings: the level, whether each piece is in place, and the
 # one command that fixes what is not.
-pull doctor_guard() {
-  claude_hook_check(true)
+pull doctor_guard_findings() {
+  roll out = []
   stick level = config().guard_scope
   stick st = guard_state()
-  exhale "guard: level ${guard_level_number(level)} (${level})"
-  roll broken = 0
-  if guard_level_number(level) >= 2 {
+  stick n = guard_level_number(level)
+  out.push(doctor_finding("guard-level", "ok", "level ${n} (${level})", "how much of this machine goes through the guard", null))
+  if n >= 2 {
     stick tools = guard_tools()
     stick missing = tools.filter(pack(t) => not fs.is_file(path.join(SHIMS_DIR, t)) or fs.read_text(path.join(SHIMS_DIR, t)) != shim_text(t))
     if missing.is_empty() {
-      exhale "    shims    ${tools.len()} in ${tilde(SHIMS_DIR)}"
+      out.push(doctor_finding("guard-shims", "ok", "${tools.len()} shims in ${tilde(SHIMS_DIR)}", "level ${n} puts a shim first for each package manager", null))
     } else {
-      broken += 1
-      exhale "    shims    missing or out of date: ${missing.join(" ")}; cigo guard scope dev --yes writes them"
+      out.push(doctor_finding("guard-shims", "action", "missing or out of date: ${missing.join(" ")}", "level ${n} puts a shim first for each package manager", "cigo guard scope dev --yes"))
     }
     stick blocks = profile_targets().filter(pack(p) => has_block(p.file))
     if blocks.is_empty() {
-      broken += 1
-      exhale "    PATH     no startup file puts the shims first; cigo guard scope dev --yes adds the block"
+      out.push(doctor_finding("guard-path", "action", "no startup file puts the shims first", "the shims only guard a call when they come first on PATH", "cigo guard scope dev --yes"))
     } else {
-      exhale "    PATH     " + blocks.map(pack(p) => tilde(p.file)).join(", ")
+      out.push(doctor_finding("guard-path", "ok", blocks.map(pack(p) => tilde(p.file)).join(", "), "the startup files that put the shims first", null))
     }
-    exhale "    here     " + pick(shims_first(), "the shims come first on this PATH", "not first on this PATH: open a new shell, or move the cigo block below anything else that changes PATH")
+    if shims_first() {
+      out.push(doctor_finding("guard-here", "ok", "the shims come first on this PATH", "this shell is guarded", null))
+    } else {
+      out.push(doctor_finding("guard-here", "note", "the shims are not first on this PATH", "this shell is not guarded yet", "open a new shell, or move the cigo block below anything else that changes PATH"))
+    }
   } else if st.get("asked", null) == null {
-    exhale "    cigo guard setup asks how much more of this machine to guard"
+    out.push(doctor_finding("guard-setup", "note", "the guard's scope has not been chosen", "level 1 guards only cigo's own runs", "cigo guard setup"))
+  }
+  if claude_hook_gone(true) {
+    out.push(doctor_finding("guard-agent-hook", "action", "the hook was taken out of ${tilde(claude_settings())} (or changed)", "your agent's commands are not guarded without it", "cigo guard scope agents --agents=claude-code --yes"))
   }
   stick br = guard_break()
   if br != null {
-    exhale "    " + pick(br.off, "off: cigo guard on", "paused until ${local_clock(br.until)}")
+    out.push(doctor_finding("guard-break", "note", pick(br.off, "the guard is off", "the guard is paused until ${local_clock(br.until)}"), "someone paused it", "cigo guard on"))
   }
-  snuff broken
+  snuff out
 }
 
 # What `cigo rehearse` can use here (#56): the isolation this machine has,
@@ -17296,26 +17181,27 @@ stick REHEARSE_TOOLS = [
   {registry: "crates.io", tools: ["cargo"], install: "https://rustup.rs"},
 ]
 
-pull doctor_rehearse() {
-  exhale "rehearse:"
+pull doctor_rehearse_findings() {
+  roll out = []
   if not rehearsal_possible() {
-    exhale "    box      no: the rehearsal needs cig 1.12.0 or later on Linux (this is cig ${cig.version()} on ${cig.os()})"
+    out.push(doctor_finding("rehearse-box", "note", "no contained box: the rehearsal needs cig 1.12.0 or later on Linux (this is cig ${cig.version()} on ${cig.os()})", "`cigo rehearse` installs a package in cig's box first", null))
   } else if contain_possible() {
-    exhale "    box      yes: cig's contained box (the rehearsal's isolation here)"
+    out.push(doctor_finding("rehearse-box", "ok", "cig's contained box is available", "the rehearsal's isolation here", null))
   } else {
-    exhale "    box      no: " + clip(CONTAIN_WHY, 160)
+    out.push(doctor_finding("rehearse-box", "note", "no contained box: " + clip(CONTAIN_WHY, 160), "`cigo rehearse` installs a package in cig's box first", null))
   }
   stick engines = ["docker", "podman"].filter(pack(t) => which(t) != null)
-  exhale "    other    " + pick(engines.is_empty(), "no Docker or Podman; container, gVisor and VM backends are not built yet (#56)", engines.join(" and ") + " found; container, gVisor and VM backends are not built yet (#56)")
+  out.push(doctor_finding("rehearse-other", "note", pick(engines.is_empty(), "no Docker or Podman", engines.join(" and ") + " found"), "container, gVisor and VM backends are not built yet (#56)", null))
   for r in REHEARSE_TOOLS {
     stick found = r.tools.map(pack(t) => {name: t, at: which(t)}).filter(pack(x) => x.at != null)
     if found.is_empty() {
-      exhale "    ${r.registry}" + " ".repeat(10 - r.registry.len()) + "missing  ${r.tools.join(" or ")}   install: ${r.install}"
+      out.push(doctor_finding("rehearse-${r.registry}", "note", "${r.tools.join(" or ")} is missing", "the rehearsal of ${r.registry} packages installs with it", "install: ${r.install}"))
     } else {
-      exhale "    ${r.registry}" + " ".repeat(10 - r.registry.len()) + "found    ${found.first().name}  ${found.first().at}"
+      out.push(doctor_finding("rehearse-${r.registry}", "ok", "${found.first().name}  ${found.first().at}", "the rehearsal of ${r.registry} packages installs with it", null))
     }
   }
-  exhale "    kept     ${entries_in(VERDICT_DIR)} verdict(s) in ${tilde(VERDICT_DIR)}, ${entries_in(QUARANTINE)} in the quarantine (${tilde(QUARANTINE)})"
+  out.push(doctor_finding("rehearse-kept", "ok", "${entries_in(VERDICT_DIR)} verdict(s) in ${tilde(VERDICT_DIR)}, ${entries_in(QUARANTINE)} in the quarantine (${tilde(QUARANTINE)})", "what the rehearsal and run-url keep", null))
+  snuff out
 }
 
 # How many entries a folder holds; none when it is not there.
@@ -17361,6 +17247,12 @@ pull dispatch() {
     do_version()
   } else if command == "update" {
     do_update()
+  } else if command == "uninstall" {
+    do_uninstall()
+  } else if command == "doctor" {
+    do_doctor_stub()
+  } else if command == "__doctor" {
+    do_self_doctor()
   } else if command == "crash" {
     do_crash()
   } else if command == "report" {
@@ -17394,7 +17286,7 @@ pull dispatch() {
   } else if command == "audit" and flags.contains("--update-db") {
     expect_flags(["--update-db"])
     do_update_db(pick(fs.is_file(path.join(ROOT, MANIFEST)), pack() => build_graph(load()), pack() => null)())
-  } else if ["list", "show", "plan", "check", "doctor", "run", "versions", "audit", "trust"].contains(command) {
+  } else if ["list", "show", "plan", "check", "run", "versions", "audit", "trust"].contains(command) {
     stick g = build_graph(load())
     if command == "list" {
       do_list(g)
@@ -17410,8 +17302,6 @@ pull dispatch() {
       do_plan(g, targets)
     } else if command == "check" {
       do_check(g)
-    } else if command == "doctor" {
-      do_doctor(g)
     } else {
       maybe_crash("mid-run")
       do_run(g, targets)

@@ -78,10 +78,10 @@ would have run and the chain would have put back what it created.
 | an undo for what cig cannot see | a task's `undo` (a deploy's teardown, say) runs on rollback and on `cig unburn` |
 | nothing done twice | a task with `inputs` is skipped while its files, and the values it was handed, are unchanged |
 | checked first | `cigo check` finds loops, typos, unknown toolchains, missing programs and broken templates before anything runs |
-| the tools themselves | `cigo doctor` finds each toolchain's tools and versions and compares them with the pins you already keep; every command warns where a version disagrees, the installed cig against the project's pins included, and `--strict` stops on one. `cigo versions switch` runs tasks on the pinned versions through the version manager already on the machine (mise, asdf, rustup, uv, fnm...), per task, never your default |
+| the tools themselves | `ciginstaller doctor --tools` (`cigo doctor` runs it) shows each toolchain's tools and versions against the pins you already keep; every command warns where a version disagrees, the installed cig against the project's pins included, and `--strict` stops on one. `cigo versions switch` runs tasks on the pinned versions through the version manager already on the machine (mise, asdf, rustup, uv, fnm...), per task, never your default |
 | what a task rewrites | on Linux every task runs in cig's box, over a copy-on-write layer on the project: a task that cannot start leaves nothing, and every change one that ran made comes back on rollback, named or not. Elsewhere a format stage's sources and a setup stage's lockfiles are kept in the tin before the task runs; `touches` names a task's own, `touches_sealed` what to keep encrypted |
 | every package manager, guarded | `cigo guard scope dev` puts `npm install`, `npx`, `pip install`, `cargo build` and the rest behind the same guard as a task, in any folder: your blacklist, OSV and the static read, then on Linux a rehearsal in cig's contained box, with `cigo undo last` after. `npm test` and the other calls that run nothing new pass straight through. `curl ... | sh` typed at the prompt is cancelled, and `cigo run-url` rehearses the script first. At level 4 every shell command your AI agent runs is read, boxed and undoable (`cigo agent undo`), and the risky ones wait for you (`cigo approve`) |
-| cigo itself | its own bugs reported through cig's ashtray under cig's one consent setting, never a task's failure; `cigo report <run> --send` for a run that went wrong; `cigo update` to a checksum- and attestation-verified release, `cigo version --json` |
+| cigo itself | its own bugs reported through cig's ashtray under cig's one consent setting, never a task's failure; `cigo report <run> --send` for a run that went wrong; installed, updated and removed by ciginstaller (`cigo update` and `cigo uninstall` hand over to it), `cigo version --json` |
 
 ## One stage, every language
 
@@ -163,31 +163,42 @@ your sanity.
 
 ## Install
 
-Needs `cig` 1.20.0 or newer on `PATH` ([install CigScript](https://github.com/otmof-ops/cig-script#install)).
+Needs `cig` 1.20.0 or newer. cigo is installed by
+[ciginstaller](https://github.com/otmof-ops/cig-installer), which also
+installs and checks the `cig` it runs on. With ciginstaller on the machine:
 
 ```sh
-tag=v1.9.0
-base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
-curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz" && curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
-sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256" && tar -xzf "cig-orchestrator-$tag.tar.gz"
-"cig-orchestrator-$tag/install.sh"      # orchestrate.cig into ~/.local/share/cig-orchestrator, cigo into ~/.local/bin
+ciginstaller install stick cigo
 cigo version
 ```
 
-On Windows, PowerShell: extract the same tarball and run
-`powershell -ExecutionPolicy Bypass -File .\install.ps1` (`-Prefix`,
-`-Name`); it installs the `cigo.cmd` shim, which `cigo` resolves to, and the
-`cigo.launch.ps1` it runs into `%LOCALAPPDATA%\cig-orchestrator\bin` and
-puts that on your PATH. Git Bash and WSL use `install.sh` as above.
+No ciginstaller yet? Its [install section](https://github.com/otmof-ops/cig-installer#install)
+says how to get it today. Once ciginstaller has a release, that is its bootstrap
+script: download it, check it, read it, then run it:
 
-From then on `cigo update` installs the next release, checksum and build
-attestation verified, and `cigo update --check` only says whether there is
-one. `CIGO_PREFIX=/opt/cig ./install.sh` installs elsewhere (`PREFIX` works
-too, except under Termux, whose `PREFIX` is its own); `CIGO_NAME=orch
-./install.sh` names the command something else. From a checkout, `git clone
-https://github.com/otmof-ops/cig-orchestrator && cd cig-orchestrator &&
-./install.sh`, and `git pull` updates it. Without the launcher, the tool is
-one file: `cig run path/to/orchestrate.cig -- run ci`.
+```sh
+gh release download -R otmof-ops/cig-installer -p install.sh -p install.sh.sha256
+sha256sum -c install.sh.sha256
+less install.sh        # read it, then run it
+sh install.sh
+```
+
+The installer updates, checks and removes cigo as well: `ciginstaller update`
+(`--check` only looks), `ciginstaller doctor --tools` (it shows cigo's own
+findings: the cig floor, the launcher, the guard, what a rehearsal can use,
+and each toolchain against the project's pins) and `ciginstaller uninstall
+cigo` (it takes the guard's shims and startup-file blocks out first). `cigo
+update`, `cigo doctor` and `cigo uninstall` run those for you. The release
+tarball, its `.sha256` and its build attestation are what the installer
+reads; `gh attestation verify cig-orchestrator-vX.Y.Z.tar.gz -R
+otmof-ops/cig-orchestrator` checks one by hand. `install.sh` and
+`install.ps1` in the tarball and the repository only say this, for one
+release.
+
+To work on cigo, run it from a checkout: `git clone
+https://github.com/otmof-ops/cig-orchestrator && cd cig-orchestrator`, then
+`bin/cigo run ci` ([CONTRIBUTING.md](CONTRIBUTING.md)). Without the launcher,
+the tool is one file: `cig run path/to/orchestrate.cig -- run ci`.
 
 ## Where it runs
 

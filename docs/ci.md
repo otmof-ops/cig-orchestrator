@@ -1,7 +1,14 @@
 # cigo in CI
 
-The chain you run locally is the chain CI runs: install `cig` and `cigo`,
-then `cigo run ci`. The job file stops being a second copy of your build.
+The chain you run locally is the chain CI runs: install `cig` and `cigo`
+with ciginstaller, then `cigo run ci`. The job file stops being a second copy of your build.
+
+The recipes below use ciginstaller's bootstrap script, which comes with
+ciginstaller's first release. Until that release exists
+([how to get ciginstaller today](https://github.com/otmof-ops/cig-installer#install)),
+install `cig` from its own release, the binary for the runner and its `.sha256`,
+and run `cigo` from its release tarball, as this repository's own
+[CI](../.github/workflows/ci.yml) does.
 
 ## GitHub Actions
 
@@ -24,28 +31,20 @@ jobs:
           node-version-file: web/.nvmrc
       - uses: astral-sh/setup-uv@v6
 
-      - name: Install cig
-        run: |
-          mkdir -p "$HOME/.local/bin" && cd "$RUNNER_TEMP"
-          base=https://github.com/otmof-ops/cig-script/releases/download/v1.20.0
-          curl -fsSLO "$base/cig-v1.20.0-linux-x86_64"
-          curl -fsSLO "$base/cig-v1.20.0-linux-x86_64.sha256"
-          sha256sum -c cig-v1.20.0-linux-x86_64.sha256
-          install -m 755 cig-v1.20.0-linux-x86_64 "$HOME/.local/bin/cig"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      - name: Install cigo
+      # cig and cigo come from ciginstaller (the carton holds both). Its
+      # bootstrap script is checked against its checksum before it runs;
+      # `--yes` answers its questions.
+      - name: Install cig and cigo
         run: |
           cd "$RUNNER_TEMP"
-          tag=v1.9.0
-          base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
-          curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz"
-          curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
-          sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256"
-          tar -xzf "cig-orchestrator-$tag.tar.gz"
-          "cig-orchestrator-$tag/install.sh"
+          gh release download -R otmof-ops/cig-installer -p install.sh -p install.sh.sha256
+          sha256sum -c install.sh.sha256
+          sh install.sh --yes carton
+          echo "$HOME/.cigscript/bin" >> "$GITHUB_PATH"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
-      - run: cigo doctor
+      - run: ciginstaller doctor --tools
       - run: cigo --no-rollback run ci
 
       - name: Keep the logs
@@ -56,29 +55,26 @@ jobs:
           path: .cig-orchestrator/
 ```
 
-The checksum lines refuse a download that isn't the published binary or
-tarball. Pin the CigScript and cig-orchestrator releases you tested with, and
-bump them on purpose; `cigo doctor` in the job prints every version side by
-side, and `cigo --no-rollback run ci --strict` stops on a pin the runner does
-not satisfy.
+The bootstrap script is checked before it runs, and ciginstaller verifies
+every build it installs. Pin the carton you tested with (`ciginstaller
+install carton --carton <version>`) and bump it on purpose;
+`ciginstaller doctor --tools` in the job prints every version side by side,
+and `cigo --no-rollback run ci --strict` stops on a pin the runner does not
+satisfy.
 
 ## GitLab CI
 
-Use the image your project already builds in, and add the two installs:
+Use the image your project already builds in, and install cig and cigo with ciginstaller:
 
 ```yaml
 ci:
   image: your-build-image
   before_script:
-    - mkdir -p "$HOME/.local/bin" && export PATH="$HOME/.local/bin:$PATH"
-    - base=https://github.com/otmof-ops/cig-script/releases/download/v1.20.0
-    - curl -fsSLO "$base/cig-v1.20.0-linux-x86_64" && curl -fsSLO "$base/cig-v1.20.0-linux-x86_64.sha256"
-    - sha256sum -c cig-v1.20.0-linux-x86_64.sha256 && install -m 755 cig-v1.20.0-linux-x86_64 "$HOME/.local/bin/cig"
-    - tag=v1.9.0; base="https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
-    - curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz" && curl -fsSLO "$base/cig-orchestrator-$tag.tar.gz.sha256"
-    - sha256sum -c "cig-orchestrator-$tag.tar.gz.sha256" && tar -xzf "cig-orchestrator-$tag.tar.gz" && "cig-orchestrator-$tag/install.sh"
+    - gh release download -R otmof-ops/cig-installer -p install.sh -p install.sh.sha256
+    - sha256sum -c install.sh.sha256 && sh install.sh --yes carton
+    - export PATH="$HOME/.cigscript/bin:$PATH"
   script:
-    - cigo doctor
+    - ciginstaller doctor --tools
     - cigo --no-rollback run ci
   artifacts:
     when: on_failure
@@ -87,34 +83,25 @@ ci:
 
 ## GitHub Actions on Windows and macOS
 
-The same two installs, with the shell each runner has. macOS has no
-`sha256sum`: use `shasum -a 256 -c`. On Windows, PowerShell runs CigScript's
-`install.ps1` and then cig-orchestrator's. Each adds its directory to the
-user PATH, which a running job never sees, so the step puts `cig` on its own
-`$env:Path` before the second installer looks for it, tells the first not to
-ask about PATH (`CIG_NO_MODIFY_PATH`; a job cannot answer a prompt), and
-writes both directories to `GITHUB_PATH` for the steps that follow:
+The same install, with the shell each runner has. macOS has no `sha256sum`:
+use `shasum -a 256 -c`. On Windows, PowerShell runs ciginstaller's
+`install.ps1` from the same release instead (check its release notes for the
+Windows build), and the job writes the folder it installs into to
+`GITHUB_PATH` for the steps that follow. The macOS job:
 
 ```yaml
-  windows:
-    runs-on: windows-latest
+  macos:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - shell: pwsh
+      - run: |
+          gh release download -R otmof-ops/cig-installer -p install.sh -p install.sh.sha256
+          shasum -a 256 -c install.sh.sha256
+          sh install.sh --yes carton
+          echo "$HOME/.cigscript/bin" >> "$GITHUB_PATH"
         env:
-          CIG_NO_MODIFY_PATH: '1'
-        run: |
-          irm https://raw.githubusercontent.com/otmof-ops/cig-script/main/install.ps1 | iex
-          $env:Path = "$env:LOCALAPPDATA\Programs\cig;$env:Path"
-          $tag = 'v1.9.0'
-          $base = "https://github.com/otmof-ops/cig-orchestrator/releases/download/$tag"
-          irm "$base/cig-orchestrator-$tag.tar.gz" -OutFile cigo.tar.gz
-          irm "$base/cig-orchestrator-$tag.tar.gz.sha256" -OutFile cigo.tar.gz.sha256
-          if ((Get-FileHash cigo.tar.gz -Algorithm SHA256).Hash.ToLower() -ne ((Get-Content cigo.tar.gz.sha256) -split '\s+')[0].ToLower()) { throw 'checksum mismatch' }
-          tar -xzf cigo.tar.gz
-          & ".\cig-orchestrator-$tag\install.ps1"
-          echo "$env:LOCALAPPDATA\Programs\cig;$env:LOCALAPPDATA\cig-orchestrator\bin" >> $env:GITHUB_PATH
-      - run: cigo doctor
+          GH_TOKEN: ${{ github.token }}
+      - run: ciginstaller doctor --tools
       - run: cigo --no-rollback run ci
 ```
 
@@ -161,7 +148,7 @@ itself exits `0` and leaves that to the report.
   created. In CI you usually want the opposite: keep the coverage report,
   the test results and the build output so they can be uploaded. The runner
   is thrown away afterwards anyway.
-- **`cigo doctor` first.** It prints each tool's version and checks it
+- **`ciginstaller doctor --tools` first.** It prints each tool's version and checks it
   against the pins the repository keeps, so a version mismatch shows up as
   its own line instead of as a strange test failure.
 - **Plan on pull requests.** `cigo --dry-run run release` in a pull request

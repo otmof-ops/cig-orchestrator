@@ -73,7 +73,7 @@ yours.
 ```sh
 cigo adopt --write    # cig-tasks.json
 cigo check            # the manifest, checked before anything runs
-cigo doctor           # the tools each toolchain needs, their versions, your pins
+ciginstaller doctor --tools   # the tools each toolchain needs, their versions, your pins
 ```
 
 ## Tuning what it found
