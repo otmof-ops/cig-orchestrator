@@ -35,14 +35,85 @@ needs_major=1
 needs_minor=20
 needs_patch=0
 
-if ! command -v cig >/dev/null 2>&1; then
+cig_bin=$(command -v cig 2>/dev/null)
+if [ -z "$cig_bin" ]; then
   echo "cigo: cig is not on PATH; install CigScript first: https://github.com/otmof-ops/cig-script" >&2
   exit 127
 fi
 
-version=$(cig --version 2>/dev/null | awk '{print $2}')
+# The cig a `cig --version` subprocess would reach: this file, followed
+# through symlinks hop by hop (no readlink -f). The floor cache keys on it.
+cig_real=$cig_bin
+while [ -h "$cig_real" ]; do
+  link=$(readlink -- "$cig_real")
+  case "$link" in
+    /*) cig_real=$link ;;
+    *) cig_real=$(dirname -- "$cig_real")/$link ;;
+  esac
+done
+
+# The launcher floor cache (#117 W3): CIGO_HOME/cig-floor, one line
+# `<abs cig path>|<size>|<mtime>|<version>`. One stat (GNU `-c`, else
+# BSD/macOS `-f`). A hit (path, size, mtime match) reuses the kept version
+# and runs no subprocess; a miss asks `cig --version` and writes the cache
+# atomically. An unwritable CIGO_HOME is the no-cache case: the fork runs
+# every call. A failure is never cached, so `too_old` is recomputed on
+# every call and a `needs_*` bump still refuses an old cig.
+# `CIGO_FLOOR_CACHE=off` disables both the read and the write: the suite
+# sets it so one test's writes do not land on another test's home.
+floor_cache_on=1
+case "${CIGO_FLOOR_CACHE:-on}" in
+  off|0|no|false) floor_cache_on=0 ;;
+esac
+stat_line=""
+stat_size=""
+stat_mtime=""
+if [ -n "$cig_real" ]; then
+  stat_line=$(stat -c '%s %Y' -- "$cig_real" 2>/dev/null)
+  if [ -z "$stat_line" ]; then
+    stat_line=$(stat -f '%z %m' -- "$cig_real" 2>/dev/null)
+  fi
+  case "$stat_line" in
+    [0-9]*' '[0-9]*)
+      stat_size=${stat_line% *}
+      stat_mtime=${stat_line##* } ;;
+    *)
+      stat_line="" ;;
+  esac
+fi
+cigo_home=${CIGO_HOME:-$HOME/.cig-orchestrator}
+cig_floor_cache=$cigo_home/cig-floor
+version=""
+cig_floor_hit=0
+if [ "$floor_cache_on" -eq 1 ] && [ -n "$stat_line" ] && [ -f "$cig_floor_cache" ]; then
+  cached_line=$(cat -- "$cig_floor_cache" 2>/dev/null)
+  expect_prefix="$cig_real|$stat_size|$stat_mtime|"
+  case "$cached_line" in
+    "$expect_prefix"[0-9]*.[0-9]*.[0-9]*)
+      cached_version=${cached_line#"$expect_prefix"}
+      # A `[0-9]*.[0-9]*.[0-9]*` glob lets `1abc.2.3` through; the
+      # version must be digits and dots and nothing else. A bad cached
+      # line is dropped, no hit.
+      case "$cached_version" in
+        *[!0-9.]*|*..*|.*|*.) ;;
+        *)
+          version=$cached_version
+          cig_floor_hit=1 ;;
+      esac ;;
+  esac
+fi
+if [ "$cig_floor_hit" -eq 0 ]; then
+  version=$(cig --version 2>/dev/null | awk '{print $2}')
+fi
 case "$version" in
   [0-9]*.[0-9]*.[0-9]*)
+    # Reject a version with anything but digits and dots: an awk split
+    # on whitespace could pick up `1.2.3-abc` or stray punctuation.
+    case "$version" in
+      *[!0-9.]*|*..*|.*|*.)
+        echo "cigo: could not read the version of cig (\`cig --version\` said: $version)" >&2
+        exit 2 ;;
+    esac
     major=${version%%.*}; rest=${version#*.}; minor=${rest%%.*}; patch=${rest#*.}; patch=${patch%%[!0-9]*}
     too_old=0
     if [ "$major" -lt "$needs_major" ]; then too_old=1
@@ -52,6 +123,14 @@ case "$version" in
     if [ "$too_old" -eq 1 ]; then
       echo "cigo: cig $version is too old; cig-orchestrator needs $needs_major.$needs_minor.$needs_patch or newer (cig update)" >&2
       exit 2
+    fi
+    if [ "$floor_cache_on" -eq 1 ] && [ "$cig_floor_hit" -eq 0 ] && [ -n "$stat_line" ] && mkdir -p -- "$cigo_home" 2>/dev/null; then
+      cig_floor_tmp=$cig_floor_cache.$$.tmp
+      if printf '%s\n' "$cig_real|$stat_size|$stat_mtime|$version" >"$cig_floor_tmp" 2>/dev/null; then
+        mv -- "$cig_floor_tmp" "$cig_floor_cache" 2>/dev/null || rm -f -- "$cig_floor_tmp" 2>/dev/null
+      else
+        rm -f -- "$cig_floor_tmp" 2>/dev/null
+      fi
     fi ;;
   *)
     echo "cigo: could not read the version of cig (\`cig --version\` said: $version)" >&2
@@ -102,7 +181,7 @@ in_home() {
 }
 
 case "${1:-help}" in
-  adopt|help|version|toolchains|update|uninstall|doctor|crash|config|blacklist|quarantine|guard|undo|run-url|agent|approve|--help|-h|--version)
+  adopt|help|version|toolchains|update|uninstall|doctor|crash|config|blacklist|quarantine|guard|undo|run-url|agent|approve|__dump-rules|--help|-h|--version)
     # From the home folder itself (or /), cig would take all of it as the
     # run's pack and watch every file in it around each step: these run
     # from an empty folder of cigo's instead, and the commands that work

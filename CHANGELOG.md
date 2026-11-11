@@ -53,6 +53,40 @@ repository root lists versions it must not pick.
     (cig-script `errors/registry.toml`) is pending the cig-script side.
     E797 is reserved for the W25 restore and is not emitted in this
     release.
+- **A hook that gets faster the more it's used: launcher floor cache, rules as
+  data, verdict-cache key (#117, #90).**
+  - `bin/cigo` keeps `cig --version`'s answer in `CIGO_HOME/cig-floor`, one
+    line, keyed by the cig binary's path, size and mtime. A hit reuses the
+    kept version and runs no subprocess; a miss asks `cig --version` and
+    writes the cache atomically. The too-old check runs on every call, so
+    a floor bump still refuses an old cig. The PowerShell launcher does
+    the same. `CIGO_FLOOR_CACHE=off` disables it so the suite does not
+    scribble on the operator's home.
+  - `rules/tier-matrix.json`, `rules/static-reads.json` and
+    `rules/packages.json` hold the tier matrix, the static-read rule list
+    and the typosquat top-names lists as canonical JSON, schema
+    `cigo-rules-1`. `scripts/gen-rules.cig` regenerates them from
+    orchestrate.cig through the hidden `cigo __dump-rules <name>` command,
+    and the suite's `hook_program_rules_equal_orchestrate_rules` fails if
+    they are out of date, naming the generator. `static-reads.json`
+    writes weights as decimal strings and `packages.json` sorts the
+    lists alphabetically (not by rank); both facts are stated in each
+    file's `notes`.
+  - The verdict cache's key hashes only what feeds the scan: the
+    command's canonical form (runs of whitespace flatten to one space
+    only outside quotes, so `ls  -la` and `ls -la` share an entry but
+    `echo "a  b"` and `echo "a b"` do not), a once-per-process sha256
+    of every rule table and constant the scan reads (RULES, TIER_MATRIX,
+    the typosquat top lists, the decoder's budget and depth, and the
+    named regexes NET_RE / DOTPACK_RE / CODE_RAWIP_RE / URL_HOST_RE /
+    ASSIGN_RE / UPLOAD_RE), the cigo version, and `v: cigo-verdict-3`.
+    Nothing read from outside the tool (an env value, a cwd, a file on
+    disk) enters the key. A rule change with VERSION unchanged misses
+    at once. `cigo config verdict_cache off` (the paranoid preset)
+    bypasses both the lookup and the store.
+  - `cigo guard stats` gains a per-day hit-rate column (hits over hits +
+    misses on that day; a dash for a day with no lookups), reusing
+    `--since`.
 
 - **`cig bench` measures cigo: `bench/bench.toml`, the corpus score and cigo's
   phases (#112).**
