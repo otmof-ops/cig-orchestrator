@@ -177,15 +177,17 @@ anyway, if the old content is what you want.
 
 **`cigo self verify` refuses with `E796`**
 
-`cigo self verify` saw the MAC or a file's sha256 disagree with the signed
-record of cigo's own install. The file it names has changed since the
-record was signed (a file picked up an edit outside an install) or the
-record itself has been altered. Fix one of two ways: `cigo self build`
-re-signs the record if the live tree is the one you want, and
-`cigo self restore` writes the recorded bytes back if they are. The MAC is
-checked before any path in the record is trusted, so a forged record is
-caught first. The registry entry for E796 (cig's errors/registry.toml) is
-pending the cig-script side.
+`cigo self verify` saw the MAC or a file's sha256 disagree with the
+signed record of cigo's own install. The file it names has changed since
+the record was signed (a file picked up an edit outside an install) or
+the record itself has been altered. If the live tree is the one you
+want, `cigo self build` re-signs the record. If a file has drifted and
+you want the recorded bytes back, `ciginstaller repair` reinstalls
+cigo from the carton and `cigo self verify` against it; `cigo self
+restore` ships with W25. The MAC is checked before any path in the
+record is trusted, so a forged record is caught first. The registry
+entry for E796 (cig's errors/registry.toml) is pending the cig-script
+side.
 
 **`cigo self restore` says it is not in this release**
 

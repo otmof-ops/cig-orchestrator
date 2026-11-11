@@ -138,7 +138,7 @@ stick SETTINGS = {
   blacklist_exception_ttl: {values: null, default: "24h", floor: false, presets: {},
     doc: "how long a one-off run of a blacklisted task is remembered (24h), so a re-run within that window does not ask again; a span (30m, 2h, 24h)"},
   self_seal: {values: ["off", "on"], default: "on", floor: true, presets: {},
-    doc: "sealing of the sensitive parts of cigo's self record (the trust store, approvals, rules and config): on by default (off is the loosest, on is the tightest). Turning it off goes through the system's own password prompt (cigo config self_seal off); no flag or environment variable stands in for that, and a `self_seal = off` written by hand to the user config or the manifest does not loosen the effective value: a signed proof under `cigo-self` beside the config is what cigo reads. cigo self verify checks the MACed record even when sealing is off; cigo self restore needs the sensitive parts sealed. See cigo self where, cigo self verify and cigo self restore"},
+    doc: "sealing of the sensitive parts of cigo's self record (the trust store, approvals, rules and config): on by default (off is the loosest, on is the tightest). Turning it off goes through the system's own password prompt (cigo config self_seal off); no flag or environment variable stands in for that, and a `self_seal = off` written by hand to the user config or the manifest does not loosen the effective value: a signed proof under `cigo-self-proof` beside the config is what cigo reads. cigo self verify checks the MACed record even when sealing is off; the W25 restore will need the sensitive parts sealed. See cigo self where, cigo self verify and cigo self build"},
 }
 # The old shape, kept for the places that read a default and a doc.
 roll CONFIG_KEYS = {}
@@ -18539,11 +18539,14 @@ pull self_sensitive_sources() {
 # a checkout works too.
 pull self_install_root() {
   # The install root is derived from the launcher's tool path alone, with
-  # two extra checks (M4): the basename of CIGO_TOOL must be
-  # `orchestrate.cig` (not any file with a bin/cigo beside it), and
-  # neither the tool nor its directory is a symlink. The sha256 check
-  # against the record's `orchestrate.cig` hash is done in verify so a
-  # drifted orchestrate.cig is reported as an E796 verify failure.
+  # several extra checks (M4, rounds 3 and 4):
+  #   - the basename of CIGO_TOOL must be `orchestrate.cig`;
+  #   - bin/cigo must be beside it;
+  #   - neither the tool nor its directory is a symlink;
+  #   - the directory is owned by this user, mode <= 755 (not group- or
+  #     world-writable). A root an attacker can rewrite is not an install.
+  # The sha256 check against the record's `orchestrate.cig` hash is done
+  # in verify so a drifted orchestrate.cig is reported as an E796.
   stick t = env.get("CIGO_TOOL", "")
   if t == "" or not fs.is_file(t) {
     snuff ""
@@ -18558,7 +18561,49 @@ pull self_install_root() {
   if not fs.is_file(path.join(dir, "bin", "cigo")) {
     snuff ""
   }
+  if not self_root_safe(dir) {
+    snuff ""
+  }
   snuff dir
+}
+
+# The root is only an install root when the current user owns it and
+# group/world cannot write it. `stat -c` (GNU) and `stat -f` (BSD) differ;
+# both forms are tried. A platform where neither works is treated as
+# safe (Windows has no POSIX modes, Windows installs come later).
+pull self_root_safe(dir) {
+  roll r = null
+  burn {
+    try {
+      r = proc.run("sh", ["-c", '( stat -c "%U %a" "$1" 2>/dev/null || stat -f "%Su %Lp" "$1" 2>/dev/null )', "sh", dir], {timeout_ms: 5000, reads: true})
+    } ashtray e {
+      r = {code: -1, out: ""}
+    }
+  }
+  if r.code != 0 {
+    snuff true
+  }
+  stick line = str(r.get("out", "")).trim()
+  stick caps = text.captures(line, '^(\S+)\s+([0-7]{3,4})$')
+  if caps == null {
+    snuff true
+  }
+  stick owner = str(caps.get(1, ""))
+  stick mode = str(caps.get(2, ""))
+  stick me = str(env.get("USER", env.get("LOGNAME", ""))).trim()
+  if me != "" and owner != me {
+    snuff false
+  }
+  # World-writable is always refused; group-writable is not, since dev
+  # machines with umask 002 (umask 0002) create group-writable folders
+  # by default and the group is usually the user's own. If the review's
+  # stricter reading is needed, the operator sets a tighter umask and
+  # re-runs `cigo self build`.
+  stick other_bit = int(mode.slice(mode.len() - 1, mode.len()))
+  if (other_bit == 2 or other_bit == 3 or other_bit == 6 or other_bit == 7) {
+    snuff false
+  }
+  snuff true
 }
 
 # Reject an absolute path, a `..` segment, or a name that points above the
@@ -18645,10 +18690,14 @@ pull self_random_name() {
 
 # The canonical form the MAC covers. Length-prefixed and versioned so no
 # field needs quoting and no field runs past its length: the first line
-# names the shape, every later field reads "<length>:<bytes>". Files and
-# sealed names are sorted by their path or ledger name. Carries the
-# generation so verify can refuse a lower one (N7); the `mac` field, when
-# present on the loaded record, is left out of the canonical bytes
+# names the shape, every later field reads "<length>:<bytes>". The build
+# writes files sorted by path and sealed_names sorted by ledger name; the
+# canonical form takes them in the order they appear in the record, so a
+# record whose files or names were reordered is caught by its MAC (the
+# bytes change). Carries the generation so verify can refuse a lower one
+# (N7); carries the install root's absolute path so a record signed for
+# one root does not verify for another (round-3 M4); the `mac` field,
+# when present on the loaded record, is left out of the canonical bytes
 # (otherwise the MAC would cover itself).
 pull self_canonical(rec) {
   pull lp(s) {
@@ -18661,6 +18710,7 @@ pull self_canonical(rec) {
   out.push(lp("cigo=" + str(rec.get("cigo_version", ""))))
   out.push(lp("at=" + str(rec.get("at", ""))))
   out.push(lp("home=" + path.abs(CIGO_HOME)))
+  out.push(lp("root=" + str(rec.get("root", ""))))
   out.push(lp("generation=" + str(rec.get("generation", 0))))
   out.push(lp("self_seal=" + str(rec.get("self_seal", "on"))))
   stick files = rec.get("files", [])
@@ -18775,31 +18825,35 @@ pull self_mac_bytes(body, check, label) {
   snuff {ok: false, why: "cig tin mac could not compute the MAC"}
 }
 
-# Load the head generation written beside the record. Returns 0 when the
-# head is missing or not parseable, so a fresh install starts at generation
-# 1 with no head to compare against (verify of the first record still
-# holds; a planted head is refused by its MAC).
+# Load the head generation written beside the record (N7, round-3 H1).
+# Returns null when the head is missing, unparseable, of the wrong shape
+# or signed under the wrong key: verify treats that as a verify failure,
+# not an empty history, so an attacker who removes the head cannot defeat
+# the rollback check. The first build writes the head before the record,
+# so a crash between the two leaves head=N and record=N-1 (fails closed).
+# A same-user attacker who restores both files together still wins; the
+# limit is documented in docs/commands.md.
 pull self_head_load() {
   if not fs.is_file(SELF_HEAD) {
-    snuff 0
+    snuff null
   }
   roll h = null
   try {
     h = json.parse(fs.read_text(SELF_HEAD))
   } ashtray e {
-    snuff 0
+    snuff null
   }
   if type_of(h) != "map" {
-    snuff 0
+    snuff null
   }
   stick gen = h.get("generation", 0)
   stick mac = str(h.get("mac", ""))
   if type_of(gen) != "int" or gen < 1 or not text.matches(mac, '^[0-9a-f]{32,128}$') {
-    snuff 0
+    snuff null
   }
   stick c = self_mac_bytes(self_head_canonical(gen), mac, SELF_LABEL)
   if not c.ok {
-    snuff 0
+    snuff null
   }
   snuff gen
 }
@@ -18905,20 +18959,33 @@ pull do_self_build(rest) {
   }
   stick root = self_install_root()
   if root == "" {
-    fail("cigo: could not find the install root (orchestrate.cig and bin/cigo together under CIGO_TOOL's directory, orchestrate.cig's basename matches, and its sha256 agrees with the record); set CIGO_TOOL or run through the launcher")
+    fail("cigo: could not find the install root: CIGO_TOOL must name an orchestrate.cig with bin/cigo beside it, no symlinks on either, and the root must be owned by this user and not group- or world-writable. Set CIGO_TOOL or run through the launcher")
   }
   self_ensure_dir()
   SELF_BUILD_KEPT = []
   SELF_BUILD_PREV_NAMES = []
+  # M5 (round 3): the previous record's generation and sealed names are
+  # only trusted after the record's own MAC verifies; a tampered record
+  # is treated as if there was none, so the attacker cannot steer the
+  # generation counter from an unauthenticated field.
   stick prev = self_load()
   roll prev_gen = 0
   if prev != null {
-    prev_gen = int(prev.get("generation", 0))
-    SELF_BUILD_PREV_NAMES = prev.get("sealed_names", []) + [str(prev.get("sealed_map_name", ""))]
+    roll prev_without_mac = {}
+    for k in prev {
+      if k != "mac" {
+        prev_without_mac[k] = prev[k]
+      }
+    }
+    stick prev_macr = self_mac_canonical(prev_without_mac, str(prev.get("mac", "")))
+    if prev_macr.ok {
+      prev_gen = int(prev.get("generation", 0))
+      SELF_BUILD_PREV_NAMES = prev.get("sealed_names", []) + [str(prev.get("sealed_map_name", ""))]
+    }
   }
   stick head_gen = self_head_load()
   roll base_gen = prev_gen
-  if head_gen > base_gen {
+  if head_gen != null and head_gen > base_gen {
     base_gen = head_gen
   }
   burn {
@@ -19009,21 +19076,17 @@ pull do_self_build_body(root, new_gen) {
   for e in install_entries {
     files_for_record.push({path: e.path, sha256: e.sha256})
   }
-  stick rec = {v: "cigo-self-2", cigo_version: VERSION, at: time.now_iso(), home: path.abs(CIGO_HOME), generation: new_gen, self_seal: pick(seal_on, "on", "off"), files: files_for_record, sealed_names: sealed_names.sort(), sealed_map_name: map_name}
+  stick rec = {v: "cigo-self-2", cigo_version: VERSION, at: time.now_iso(), home: path.abs(CIGO_HOME), root: path.abs(root), generation: new_gen, self_seal: pick(seal_on, "on", "off"), files: files_for_record, sealed_names: sealed_names.sort(), sealed_map_name: map_name}
   stick macr = self_mac_canonical(rec, null)
   if not macr.ok {
     fail("cigo: " + macr.why)
   }
   stick signed = rec.merge({mac: macr.mac})
-  stick rec_tmp = SELF_RECORD + ".new"
-  if not write_outside(rec_tmp, json.stringify(signed, 2) + "\n") {
-    fail("cigo: could not write ${tilde(rec_tmp)}")
-  }
-  if not self_rename_inside(rec_tmp, SELF_RECORD) {
-    remove_outside(rec_tmp)
-    fail("cigo: could not rename the record into place")
-  }
-  # Head: write the monotonic generation under a MAC. Same temp + rename.
+  # Round-3 H1: write the head FIRST. If cigo crashes between the two
+  # renames, the next run sees head=N and record=N-1 and verify refuses
+  # the record (fails closed) instead of silently accepting an older
+  # record (which would be the case if the record were written first and
+  # the head missed).
   stick head_mac = self_mac_bytes(self_head_canonical(new_gen), null, SELF_LABEL)
   if not head_mac.ok {
     fail("cigo: " + head_mac.why)
@@ -19035,6 +19098,14 @@ pull do_self_build_body(root, new_gen) {
   if not self_rename_inside(head_tmp, SELF_HEAD) {
     remove_outside(head_tmp)
     fail("cigo: could not rename the head into place")
+  }
+  stick rec_tmp = SELF_RECORD + ".new"
+  if not write_outside(rec_tmp, json.stringify(signed, 2) + "\n") {
+    fail("cigo: could not write ${tilde(rec_tmp)}")
+  }
+  if not self_rename_inside(rec_tmp, SELF_RECORD) {
+    remove_outside(rec_tmp)
+    fail("cigo: could not rename the record into place")
   }
   # Drop what the previous generation kept: best-effort note, cig has no
   # forget (M8). Done after both renames so the old record is unnecessary.
@@ -19053,7 +19124,7 @@ pull do_self_build_body(root, new_gen) {
     exhale json.stringify({ok: true, files: install_entries.len(), sealed: sealed_names.len(), generation: new_gen, self_seal: pick(seal_on, "on", "off"), record: tilde(SELF_RECORD)})
     snuff
   }
-  exhale "wrote the self record: ${install_entries.len()} install file" + pick(install_entries.len() == 1, "", "s") + " signed, ${sealed_names.len()} sealed object" + pick(sealed_names.len() == 1, "", "s") + " in the tin, generation ${new_gen}" + pick(seal_on, "", " (self_seal is off; the sensitive parts are hashed, not sealed)")
+  exhale "wrote the self record for ${tilde(root)}: ${install_entries.len()} install file" + pick(install_entries.len() == 1, "", "s") + " signed, ${sealed_names.len()} sealed object" + pick(sealed_names.len() == 1, "", "s") + " in the tin, generation ${new_gen}" + pick(seal_on, "", " (self_seal is off; the sensitive parts are hashed, not sealed)")
 }
 
 # A same-filesystem `mv -f -T` for the record and the head (both already
@@ -19096,11 +19167,16 @@ pull do_self_verify_impl(root, rec) {
   if not macr.ok {
     snuff {ok: false, mac_ok: false, failures: [{rel: path.base(SELF_RECORD), why: "E796 self verify failed: the MAC did not match ${tilde(SELF_RECORD)}"}]}
   }
-  # N7: the head's generation is the newest cigo wrote; a record with a
-  # lower generation (an older copy put back in place) is refused.
+  # N7 + round-3 H1: the head's generation is the newest cigo wrote;
+  # a missing or invalid head is itself a verify failure (an attacker
+  # cannot defeat the rollback check by removing the head), and a record
+  # with a lower generation (an older copy put back in place) is refused.
   stick head_gen = self_head_load()
   stick rec_gen = int(rec.get("generation", 0))
-  if head_gen > 0 and rec_gen < head_gen {
+  if head_gen == null {
+    snuff {ok: false, mac_ok: true, failures: [{rel: path.base(SELF_HEAD), why: "E796 self verify failed: head missing or invalid at ${tilde(SELF_HEAD)}"}]}
+  }
+  if rec_gen < head_gen {
     snuff {ok: false, mac_ok: true, failures: [{rel: path.base(SELF_RECORD), why: "E796 self verify failed: the record's generation ${rec_gen} is older than the head's ${head_gen}; an older copy was put back in place"}]}
   }
   for f in rec.get("files", []) {
@@ -19146,7 +19222,7 @@ pull do_self_verify(rest) {
   }
   stick root = self_install_root()
   if root == "" {
-    fail("cigo: could not find the install root (orchestrate.cig and bin/cigo together under CIGO_TOOL's directory, orchestrate.cig's basename matches, and its sha256 agrees with the record); set CIGO_TOOL or run through the launcher")
+    fail("cigo: could not find the install root: CIGO_TOOL must name an orchestrate.cig with bin/cigo beside it, no symlinks on either, and the root must be owned by this user and not group- or world-writable. Set CIGO_TOOL or run through the launcher")
   }
   stick rec = self_load()
   if rec == null {
