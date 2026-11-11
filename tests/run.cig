@@ -3459,7 +3459,7 @@ test("looser_setting_under_ci_is_refused", pack() {
   assert(text.matches(after.out, '(?m)^osv +online +\(default\)'), "osv is not online (default):\n" + after.out)
 })
 
-test("eof_at_a_loosening_prompt_writes_nothing", pack() {
+test("a_loosening_with_no_os_authentication_available_writes_nothing", pack() {
   # SEC-004: when the system's OS-auth prompt would run but the caller
   # is on a pipe with no terminal, the gate takes the safe default
   # (refuse). Here EOF stands in for a user who closes the prompt
@@ -3467,6 +3467,18 @@ test("eof_at_a_loosening_prompt_writes_nothing", pack() {
   # has no pty of its own, so this is EOF on a pipe; a true
   # pty-driven test that types Enter at the real OS prompt needs the
   # actual system prompt and is left to a hand-run on a desktop.
+  # The real OS prompt is asked here, so the test runs only where none can
+  # appear and the call fails at once: a headless Linux (CI, the VM). macOS
+  # puts up a real password dialog (osascript), and a Linux desktop session
+  # has a polkit agent that answers it; both step aside.
+  if fs.is_file("/usr/bin/osascript") {
+    exhale "      (skipped on macOS: the system's password dialog would appear and wait for a person)"
+    snuff
+  }
+  if env.get("DISPLAY", "") != "" or env.get("WAYLAND_DISPLAY", "") != "" {
+    exhale "      (skipped in a desktop session: its polkit agent would answer the system's prompt)"
+    snuff
+  }
   stick dir = fresh("tests/fixtures/chain")
   # Tighten first so there is a looser direction to try from.
   exits(tool_layers(dir, ["config", "preset", "strict"], {}), 0)
@@ -3488,7 +3500,7 @@ test("eof_at_a_loosening_prompt_writes_nothing", pack() {
   assert(after.out.trim() == "strict", "the refused prompt wrote to the file: preset is now `" + after.out.trim() + "`")
 })
 
-test("config_event_carries_from_and_to_for_every_floor_key", pack() {
+test("a_tightening_write_records_from_and_to_in_its_config_event", pack() {
   # L4 part two (SEC-004): the config event in the guard log names the
   # `from` and `to` of the change for every floored key, not only
   # guard_scope. This covers two paths: a tightening write (no
@@ -3628,7 +3640,15 @@ test("digest_strips_control_characters_and_caps_fields", pack() {
   # not blow up or time out on it.
   stick big = parsed.filter(pack(e) => str(e.get("question", "")).len() > 2000)
   assert(big.len() == 1, "the 10 kB entry is missing or truncated in the digest: ${big.len()}")
+  # What a person sees is cleaned and clipped even for entries written by
+  # hand: no control byte but the newlines between lines, no line longer
+  # than the question's cap and its frame.
+  assert(text.find_all(d.out, "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f]").is_empty(), "cigo digest printed a control byte:\n" + json.stringify(d.out))
+  for l in d.out.split("\n") {
+    assert(l.len() <= 2100, "cigo digest printed a ${l.len()}-character line")
+  }
 })
+
 
 test("prompt_budget_is_counted_from_the_guard_log", pack() {
   # The log carries ask-tier events that the user did not start; the
@@ -7507,6 +7527,67 @@ test("agent: a command rated high waits for a person (E894); an approval from an
   stick again = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=s2", "--", line], ttyenv)
   exits(again, 2)
   says(again.err, "E894")
+})
+
+test("agent: an over-budget run stores and shows only clean, clipped text (M1)", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick ch = path.join(guard_home(dir), ".cig-orchestrator")
+  # The day's prompt budget (3) is spent, so the next ask goes through
+  # digest_append and the pending file, as a real over-budget run does.
+  burn {
+    stick g = path.join(ch, "guard")
+    fs.mkdir(g)
+    stick lf = path.join(g, "log.jsonl")
+    roll old = ""
+    if fs.is_file(lf) {
+      old = fs.read_text(lf)
+    }
+    roll lines = []
+    for i in [1, 2, 3] {
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: false, thing: "seed-${i}"}))
+    }
+    fs.write_text(lf, old + lines.join("\n") + "\n")
+  }
+  # Everything the agent supplies carries a terminal-title escape, a bell
+  # and CR/LF, and the command is over 10 kB.
+  stick evil = "\u{1b}]0;PWNED\u{07}"
+  roll filler = ""
+  for i in [1, 2, 3, 4, 5] {
+    filler = filler + "x" * 1000 + evil + "y" * 1000 + "\r\nfake line\r\n"
+  }
+  stick line = "echo 'export AGENT_WAS_HERE=1' >> ~/.bashrc # " + filler
+  stick r = agent_cmd(dir, ["agent", "run", "--agent=ev" + evil + "il\r\nfake", "--session=s" + evil + "1", "--", line], {})
+  exits(r, 2)
+  says(r.err, "E894")
+  assert(not r.err.contains(evil) and not r.err.contains("\r\nfake"), "an agent's control bytes reached the terminal:\n" + json.stringify(r.err))
+  stick bad = "[\\x00-\\x08\\x0a-\\x1f\\x7f-\\x9f]"
+  stick rows = fs.read_text(path.join(ch, "guard", "digest.jsonl")).trim().split("\n")
+  stick e = json.parse(rows[rows.len() - 1])
+  for k in ["question", "command", "agent", "session", "cwd", "id"] {
+    stick v = str(e.get(k, ""))
+    assert(text.find_all(v, bad).is_empty(), "the digest's ${k} kept a control byte: " + json.stringify(v))
+    assert(v.len() <= 2003, "the digest's ${k} was not clipped: ${v.len()} characters")
+  }
+  stick pdir = path.join(ch, "agent", "pending")
+  stick pend = fs.list(pdir)
+  assert(not pend.is_empty(), "the over-budget run wrote no pending file")
+  for pf in pend {
+    stick pj = json.parse(fs.read_text(path.join(pdir, path.base(pf))))
+    for k in ["command", "shown", "agent", "session", "cwd"] {
+      stick v = str(pj.get(k, ""))
+      assert(text.find_all(v, bad).is_empty(), "the pending file's ${k} kept a control byte: " + json.stringify(v))
+      assert(v.len() <= 2003, "the pending file's ${k} was not clipped: ${v.len()} characters")
+    }
+  }
+  stick d = agent_cmd(dir, ["digest"], {})
+  exits(d, 0)
+  says(d.out, "1 thing waited for you")
+  assert(not d.out.contains(evil), "cigo digest printed an agent's control bytes:\n" + json.stringify(d.out))
+  # Nothing ran.
+  assert(read(guard_home(dir), ".bashrc") == GUARD_BASHRC, "the over-budget command ran")
 })
 
 test("agent: critical is refused outright, and output that speaks to agents is redacted with a notice naming an id (#63 step 1)", pack() {

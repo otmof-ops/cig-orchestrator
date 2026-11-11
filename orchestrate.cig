@@ -15313,8 +15313,10 @@ pull sanitise(s, cap) {
   # Tab to space (kept visible, bounded width).
   out = text.replace(out, "\t", " ")
   # Strip C0 (0x00-0x08, 0x0a-0x1f, i.e. every C0 but the tab the line
-  # above converted), DEL (0x7f) and C1 (0x80-0x9f).
-  out = text.replace(out, "[\\x00-\\x08\\x0a-\\x1f\\x7f-\\x9f]", "")
+  # above converted), DEL (0x7f), C1 (0x80-0x9f), the bidirectional
+  # overrides and isolates (U+202A-202E, U+2066-2069) and the line and
+  # paragraph separators (U+2028, U+2029).
+  out = text.replace(out, "[\\x00-\\x08\\x0a-\\x1f\\x7f-\\x9f\\x{202a}-\\x{202e}\\x{2066}-\\x{2069}\\x{2028}\\x{2029}]", "")
   if cap > 0 and src.len() > cap {
     out = out + "..."
   }
@@ -15410,9 +15412,11 @@ pull do_digest() {
   roll i = 0
   for e in entries {
     i += 1
-    stick when = str(e.get("at", "")).slice(0, 16).replace("T", " ")
-    stick question = str(e.get("question", e.get("kind", "ask")))
-    stick safe = str(e.get("safe_default", "no"))
+    # Cleaned on display as well as when stored: the file is the user's
+    # to read, but anything with write access to it can put text there.
+    stick when = sanitise(str(e.get("at", "")).slice(0, 16).replace("T", " "), 32)
+    stick question = sanitise(str(e.get("question", e.get("kind", "ask"))), 2000)
+    stick safe = sanitise(str(e.get("safe_default", "no")), 16)
     exhale "  [${i}] ${when}  ${question}  (safe default: ${safe})"
   }
   exhale "  cigo digest --clear takes them off the list"
@@ -17580,10 +17584,10 @@ pull in_agent() {
 pull agent_name() {
   stick given = guard_flag("--agent")
   if given != null and given != "*" {
-    snuff given
+    snuff sanitise(given, 128)
   }
   if env.get("CIGO_AGENT", "") != "" {
-    snuff env.get("CIGO_AGENT", "")
+    snuff sanitise(env.get("CIGO_AGENT", ""), 128)
   }
   if env.get("CLAUDECODE", "") != "" {
     snuff "claude-code"
@@ -18302,9 +18306,12 @@ pull do_agent_run() {
     fail("cigo agent run [--agent=<name>] [--session=<id>] -- <command>")
   }
   stick agent = agent_name()
-  stick session = str(guard_flag("--session") ?? env.get("CIGO_AGENT_SESSION", ""))
+  stick session = sanitise(str(guard_flag("--session") ?? env.get("CIGO_AGENT_SESSION", "")), 128)
   stick cwd = CALLER_DIR
-  stick shown = clip(redact(line), 200)
+  # M1: everything an agent supplies is cleaned where it is read; the line
+  # itself stays as typed (it is what runs, and the approval id is its
+  # hash) and is only ever shown through `shown`.
+  stick shown = sanitise(clip(redact(line), 200), 0)
   roll findings = []
   if guard_on() {
     findings = line_findings(line, cwd) + line_blacklist(line)
@@ -18316,7 +18323,7 @@ pull do_agent_run() {
   # it decides nothing); without it, this read is the one that counts.
   stick said_cache = guard_flag("--cache")
   stick cache_word = pick(said_cache == "hit" or said_cache == "miss" or said_cache == "none", said_cache ?? "", VERDICT_CACHE)
-  stick base = {kind: "agent", agent: agent, session: session, command: shown, cwd: tilde(cwd), risk: risk, cache: cache_word}
+  stick base = {kind: "agent", agent: agent, session: session, command: shown, cwd: sanitise(tilde(cwd), 1024), risk: risk, cache: cache_word}
   # An agent has no terminal of its own: a gate is refused in the agent's
   # session, since nothing a task runs can answer an OS authentication.
   # Refuse = refused with one line; notice = runs in the box with the note
@@ -18346,7 +18353,7 @@ pull do_agent_run() {
       # digest) still works.
       stick over = budget_over_for(id)
       stick f = approval_files(id)
-      write_outside(f.pending, json.stringify({id: id, agent: agent, session: session, command: sanitise(line, 2000), shown: sanitise(shown, 2000), cwd: cwd, risk: risk, findings: findings, over_budget: over, at: time.now_iso()}, 2) + "\n")
+      write_outside(f.pending, json.stringify({id: id, agent: agent, session: session, command: sanitise(line, 2000), shown: sanitise(shown, 2000), cwd: sanitise(cwd, 1024), risk: risk, findings: findings, over_budget: over, at: time.now_iso()}, 2) + "\n")
       if over {
         digest_append({kind: "agent-ask", question: "approve " + agent + "'s command: " + shown, command: shown, cwd: tilde(cwd), risk: risk, agent: agent, session: session, id: id})
         guard_say_verdict(shown, {risk: risk, findings: findings})
@@ -18611,11 +18618,11 @@ pull agent_run_contained(line, shown, cwd, id, base, risk0, findings0, outcome0,
       exit(2)
     }
     stick f = approval_files(id)
-    write_outside(f.pending, json.stringify({id: id, agent: base.agent, session: base.session, command: line, cwd: cwd, risk: risk, findings: findings, hosts: hosts_refused, at: time.now_iso()}, 2) + "\n")
+    write_outside(f.pending, json.stringify({id: id, agent: base.agent, session: base.session, command: sanitise(line, 2000), cwd: sanitise(cwd, 1024), risk: risk, findings: findings, hosts: hosts_refused, at: time.now_iso()}, 2) + "\n")
     guard_say_verdict(shown, {risk: risk, findings: findings})
     guard_note(base.merge({risk: risk, outcome: "waiting for a person", thing: id, decision: "left"}))
     log.error("E894 your agent's asking for the good stuff. a human has to say yes.")
-    log.error("  ${base.agent} ran: ${shown}   in the box, and nothing of it was applied: " + pick(wait.is_empty(), "it reached for " + hosts_refused.join(", ") + ", which the box does not open", "it wrote " + wait.map(pack(x) => x.path).join(", ")))
+    log.error("  ${base.agent} ran: ${shown}   in the box, and nothing of it was applied: " + sanitise(pick(wait.is_empty(), "it reached for " + hosts_refused.join(", ") + ", which the box does not open", "it wrote " + wait.map(pack(x) => x.path).join(", ")), 2000))
     log.error("  your user approves it on their own terminal with: cigo approve ${id}   (or says no); then run the same command again.")
     exit(2)
   }
@@ -18701,10 +18708,10 @@ pull do_approve() {
   if how == "never" {
     fail("agent_approval = never: high-risk agent commands are refused, not approved")
   }
-  exhale "approve: ${p.agent} wants to run, in ${tilde(p.cwd)}:"
-  exhale "  ${p.command}"
+  exhale "approve: ${sanitise(p.agent, 128)} wants to run, in ${sanitise(tilde(p.cwd), 1024)}:"
+  exhale "  ${sanitise(p.command, 2000)}"
   for x in as_list(p.findings).slice(0, 6) {
-    exhale "  ${x.code}  ${x.cat}: ${x.says}"
+    exhale "  ${sanitise(x.code, 16)}  ${sanitise(x.cat, 64)}: ${sanitise(x.says, 500)}"
   }
   if how == "os-auth" {
     if not os_auth("cigo: approve the command your AI agent wants to run") {
@@ -18724,7 +18731,7 @@ pull do_approve() {
   }
   remove_outside(f.pending)
   guard_note({kind: "approve", thing: id, outcome: "approved (${how})", decision: "yes"})
-  exhale "approved once: ${p.agent} can run it now"
+  exhale "approved once: ${sanitise(p.agent, 128)} can run it now"
 }
 
 # A terminal of the person's own: /dev/tty opens (an agent's commands run
@@ -18809,7 +18816,7 @@ pull do_agent_log() {
     snuff
   }
   for e in evs {
-    exhale str(e.get("at", "")).slice(0, 16).replace("T", " ") + "  ${e.get("agent", "")}" + pick(e.get("session", "") != "", "/" + str(e.get("session", "")).slice(0, 8), "") + "  ${e.get("command", "")}: ${e.get("outcome", "")}" + pick(e.get("risk", "none") != "none", " (rated ${e.get("risk", "")})", "") + pick(e.get("run", null) != null, "  run ${e.get("run", "")}", "")
+    exhale sanitise(str(e.get("at", "")).slice(0, 16).replace("T", " ") + "  ${e.get("agent", "")}" + pick(e.get("session", "") != "", "/" + str(e.get("session", "")).slice(0, 8), "") + "  ${e.get("command", "")}: ${e.get("outcome", "")}" + pick(e.get("risk", "none") != "none", " (rated ${e.get("risk", "")})", "") + pick(e.get("run", null) != null, "  run ${e.get("run", "")}", ""), 0)
   }
 }
 
@@ -18838,7 +18845,7 @@ pull do_agent_undo() {
   runs = runs.reverse()
   exhale "undo, newest first:"
   for e in runs {
-    exhale "  ${e.run}  ${e.get("agent", "")}  ${e.get("command", "")}  in ${e.get("cwd", "")}"
+    exhale sanitise("  ${e.run}  ${e.get("agent", "")}  ${e.get("command", "")}  in ${e.get("cwd", "")}", 0)
   }
   if not flags.contains("--yes") {
     exhale ""
@@ -18908,7 +18915,7 @@ pull do_agent_hook(which_agent) {
     snuff
   }
   stick cwd = str(call.get("cwd", fs.cwd()))
-  stick session = str(call.get("session_id", ""))
+  stick session = sanitise(str(call.get("session_id", "")), 128)
   stick findings = line_findings(line, cwd) + line_blacklist(line)
   phase("read")
   stick risk = risk_of(findings)
@@ -18928,7 +18935,7 @@ pull do_agent_hook(which_agent) {
   stick id = approval_id(line, cwd)
   if tier == "ask" and not approved(id) and not remembered(line) {
     stick f = approval_files(id)
-    write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: line, cwd: cwd, risk: risk, findings: findings, at: time.now_iso()}, 2) + "\n")
+    write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: sanitise(line, 2000), cwd: sanitise(cwd, 1024), risk: risk, findings: findings, at: time.now_iso()}, 2) + "\n")
     guard_note({kind: "agent", agent: "claude-code", session: session, command: clip(redact(line), 200), cwd: tilde(cwd), risk: risk, outcome: "waiting for a person", thing: id, cache: VERDICT_CACHE})
     hook_deny("E894 a human has to say yes: this command is rated high (" + top_finding(findings).code + " " + top_finding(findings).says + "). Nothing ran. Ask your user to approve it on their own terminal with `cigo approve " + id + "` (it asks the system for their password), then run the same command again.")
     snuff
@@ -19058,13 +19065,13 @@ pull hook_file_tool(call) {
   }
   stick input = restored.input
   stick cwd = str(call.get("cwd", fs.cwd()))
-  stick session = str(call.get("session_id", ""))
+  stick session = sanitise(str(call.get("session_id", "")), 128)
   stick target = str(input.get("file_path", input.get("notebook_path", "")))
   if target == "" {
     snuff
   }
   stick at = landing_path(target, cwd)
-  stick shown = name + " " + tilde(at)
+  stick shown = sanitise(name + " " + tilde(at), 0)
   stick base = {kind: "agent", agent: "claude-code", session: session, command: shown, cwd: tilde(cwd)}
   if is_guard_file(at, cwd) {
     guard_note(base.merge({risk: "critical", outcome: "refused: the guard's own files"}))
@@ -19107,7 +19114,7 @@ pull hook_file_tool(call) {
       why = "its new text is rated high (" + top_finding(findings).says + ")"
     }
     stick f = approval_files(id)
-    write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: shown, cwd: cwd, risk: pick(risk == "none", "high", risk), findings: findings, at: time.now_iso()}, 2) + "\n")
+    write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: shown, cwd: sanitise(cwd, 1024), risk: pick(risk == "none", "high", risk), findings: findings, at: time.now_iso()}, 2) + "\n")
     guard_note(base.merge({risk: "high", outcome: "waiting for a person", thing: id, decision: "left"}))
     hook_deny("E894 a human has to say yes: " + why + ". Nothing was written. Ask your user to approve it on their own terminal with `cigo approve " + id + "`, then make the same change again.")
     snuff
@@ -19320,10 +19327,10 @@ pull guard_say_verdict(name, v) {
     snuff
   }
   stick top = top_finding(v.findings)
-  log.warn("cigo: `${name}` is rated ${v.risk} by the guard; " + headline(top))
+  log.warn(sanitise("cigo: `${name}` is rated ${v.risk} by the guard; " + headline(top), 0))
   for f in v.findings.slice(0, 12) {
-    log.warn("  ${f.code}  ${f.cat}  ${f.where}: ${f.text}")
-    log.warn("        ${f.says}")
+    log.warn(sanitise("  ${f.code}  ${f.cat}  ${f.where}: ${f.text}", 0))
+    log.warn(sanitise("        ${f.says}", 0))
   }
   if v.findings.len() > 12 {
     log.warn("  and ${v.findings.len() - 12} more")
