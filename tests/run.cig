@@ -888,6 +888,121 @@ test("toolchains lists what this knows, and one in full", pack() {
   says(bad.err, "did you mean rust-cargo")
 })
 
+pull choose(cond, yes, no) {
+  if cond {
+    snuff yes
+  }
+  snuff no
+}
+
+# ----- cigarscript (cig-compile#13) ---------------------------------------------
+
+test("cigarscript: cigar.toml, .cigar-version or a .cigar file adopts it, and the stages run cigcompile and cigar", pack() {
+  for marker in ["cigar.toml", ".cigar-version", "app.cigar"] {
+    stick dir = fresh("tests/fixtures/empty")
+    burn {
+      fs.write_text(path.join(dir, marker), choose(marker == "app.cigar", "exhale \"hi\"\n", "0.1\n"))
+    }
+    exits(tool_in(dir, ["adopt", "--write"]), 0)
+    stick listed = tool_in(dir, ["list"]).out
+    says(listed, "cigarscript")
+    never_says(listed, "format")
+    for stage in ["lint", "check", "build", "test", "package", "clean"] {
+      exits(tool_stubbed(dir, ["run", stage]), 0)
+    }
+    stick log = stub_log(dir)
+    for want in [
+      "cigcompile build --check . @" + norm(dir),
+      "cigar check . @" + norm(dir),
+      "cigcompile build . @" + norm(dir),
+      choose(marker == "app.cigar", "cigar run --dry-run app.cigar @" + norm(dir), "cigcompile test . @" + norm(dir)),
+      "cigcompile build --sbom . @" + norm(dir),
+      "cigcompile clean . @" + norm(dir),
+    ] {
+      says(log, want)
+    }
+  }
+})
+
+# Programs of this test's own, first on PATH: each logs like the stubs do and
+# succeeds. Written as sh scripts, so Windows steps aside.
+pull own_stubs(dir, names) {
+  stick bin = dir + "-own"
+  burn {
+    fs.mkdir(bin)
+    for name in names {
+      fs.write_text(path.join(bin, name), "#!/bin/sh\nprintf '%s %s @%s\\n' " + name + " \"$*\" \"$(pwd)\" >> \"$STUB_LOG\"\n")
+      proc.run("chmod", ["+x", path.join(bin, name)], {timeout_ms: 10000})
+    }
+  }
+  snuff bin
+}
+
+test("cigarscript: setup asks the installer for the carton", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "cigar.toml"), "cigar = \"0.1\"\n")
+  }
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick bin = own_stubs(dir, ["ciginstaller"])
+  stick with_stubs = stubbed(dir)
+  exits(hop_env(dir, tool_prog("cig"), tool_args(["run", "setup"]), with_stubs.merge({PATH: bin + path_sep + with_stubs.PATH})), 0)
+  says(stub_log(dir), "ciginstaller install carton --yes @" + norm(dir))
+})
+
+test("cigarscript: check falls back to cigcompile when cigar is not installed", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "cigar.toml"), "cigar = \"0.1\"\n")
+  }
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick bin = own_stubs(dir, ["cigcompile"])
+  burn {
+    proc.run("ln", ["-s", proc.which("cig"), path.join(bin, "cig")], {timeout_ms: 10000})
+  }
+  stick bare = bin + path_sep + "/usr/bin" + path_sep + "/bin"
+  stick probe = hop_env(dir, "sh", ["-c", "command -v cigar"], {PATH: bare})
+  if probe.code == 0 {
+    exhale "      (skipped: a cigar is installed in a system folder)"
+    snuff
+  }
+  stick r = hop_env(dir, tool_prog("cig"), tool_args(["run", "check"]), {PATH: bare, STUB_LOG: dir + "-stub.log"})
+  exits(r, 0)
+  says(stub_log(dir), "cigcompile build --check . @" + norm(dir))
+})
+
+test("cigarscript: the pin in cigar.toml or .cigar-version is read and compared with the installed cigar", pack() {
+  for pin_file in ["cigar.toml", ".cigar-version"] {
+    stick dir = fresh("tests/fixtures/empty")
+    burn {
+      fs.write_text(path.join(dir, pin_file), choose(pin_file == "cigar.toml", "# the cigar this builds with\n[package]\ncigar = \"1.0\"\n", "1.0\n"))
+    }
+    exits(tool_in(dir, ["adopt", "--write"]), 0)
+    stick d = self_doctor(dir, {})
+    stick f = finding_of(d, "pin:cigarscript:cigar")
+    assert(f.severity == "action", json.stringify(f))
+    says(f.because, pin_file + " pins 1.0")
+    says(f.found, "99.1.0")
+  }
+})
+
+test("toolchains shows cigarscript, and the markdown lists it", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  stick r = tool_in(dir, ["toolchains", "cigarscript"])
+  exits(r, 0)
+  for piece in ["\"cigcompile\"", "\"--check\"", "\"--sbom\"", "cigar.toml:cigar", ".cigar-version", "bin/**", "footprints"] {
+    says(r.out, piece)
+  }
+  never_says(r.out, "\"format\"")
+  says(tool_in(dir, ["toolchains", "--markdown"]).out, "| `cigarscript` | CigarScript | `cigar.toml` or `.cigar-version` or `*.cigar` |")
+})
+
 test("two task runners in one directory: one runs the stages, so nothing runs twice", pack() {
   stick dir = fresh("tests/fixtures/empty")
   burn {
@@ -1099,22 +1214,62 @@ pull has_node_and_python() {
   snuff true
 }
 
+# The CigarScript component's tools, as stand-ins first on PATH, so the
+# example's own tests need no cigcompile: `cigcompile build` writes bin/ the
+# way the real one does, and everything else succeeds. The tests that use the
+# real programs say so (has_cigar_tools).
+pull poly_stub_env(dir) {
+  stick bin = dir + "-cigar-bin"
+  burn {
+    fs.mkdir(bin)
+    if on_windows {
+      for name in ["cigcompile", "cigar"] {
+        fs.write_text(path.join(bin, name + ".cmd"), "@echo off\r\nif \"%1\"==\"--version\" echo " + name + " 0.1.0\r\nif \"%1\"==\"build\" if not \"%2\"==\"--check\" (mkdir bin 2>nul & echo program> bin\\release-note)\r\nexit /b 0\r\n")
+      }
+    } else {
+      for name in ["cigcompile", "cigar"] {
+        fs.write_text(path.join(bin, name), "#!/bin/sh\ncase \"$1\" in\n  --version) echo " + name + " 0.1.0 ;;\n  build) case \" $* \" in *\" --check \"*) ;; *) mkdir -p bin && echo program > bin/release-note ;; esac ;;\nesac\nexit 0\n")
+        proc.run("chmod", ["+x", path.join(bin, name)], {timeout_ms: 10000})
+      }
+    }
+  }
+  snuff {PATH: bin + path_sep + env.get("PATH", "")}
+}
+
+pull poly(dir, words) {
+  snuff hop_env(dir, tool_prog("cig"), tool_args(words), poly_stub_env(dir))
+}
+
+# Does this machine have the real cigcompile and cigar as well?
+pull has_cigar_tools() {
+  if not has_node_and_python() {
+    snuff false
+  }
+  if proc.which("cigcompile") == null or proc.which("cigar") == null {
+    exhale "      (skipped: needs cigcompile and cigar on PATH)"
+    snuff false
+  }
+  snuff true
+}
+
 test("the polyglot example releases: Python's numbers, Node's page, bash's deploy", pack() {
   if not has_node_and_python() {
     snuff
   }
   stick dir = fresh("examples/polyglot")
-  exits(tool_in(dir, ["check"]), 0)
-  stick r = tool_in(dir, ["run", "release"])
+  exits(poly(dir, ["check"]), 0)
+  stick r = poly(dir, ["run", "release"])
   exits(r, 0)
-  in_order(r.out, ["] data:lint:", "] web:lint:", "] data:test:", "] web:test:", "] version:", "] stats:", "] site:", "] deploy:", "] announce:"])
+  in_order(r.out, ["] data:lint:", "] web:lint:", "] cigar:lint:", "] cigar:build:", "] data:test:", "] web:test:", "] cigar:test:", "] cigar:package:", "] version:", "] stats:", "] site:", "] deploy:", "] announce:"])
   says(r.out, "live: public/2.3.0/index.html (196 bytes)")
   says(read(dir, "public/2.3.0/index.html"), "5 orders, 555.84 in total; the top region is north")
   stick id = last_run(dir).id
+  assert(there(dir, "cigar/bin/release-note"), "the CigarScript program was not built")
   stick undone = cig(dir, ["unburn", id])
   exits(undone, 0)
   says(undone.out + undone.err, "took 2.3.0 back from public")
   assert(not there(dir, "public/2.3.0/index.html"), "the deploy survived unburn")
+  assert(not there(dir, "cigar/bin/release-note"), "the CigarScript program survived unburn")
 })
 
 test("the polyglot example rebuilds the page when Python's numbers change", pack() {
@@ -1122,15 +1277,75 @@ test("the polyglot example rebuilds the page when Python's numbers change", pack
     snuff
   }
   stick dir = fresh("examples/polyglot")
-  exits(tool_in(dir, ["run", "site"]), 0)
-  says(tool_in(dir, ["run", "site"]).out, "up to date")
+  exits(poly(dir, ["run", "site"]), 0)
+  says(poly(dir, ["run", "site"]).out, "up to date")
   burn {
     fs.append_text(path.join(dir, "data/sales.csv"), "south,500.00\n")
   }
-  stick again = tool_in(dir, ["run", "site"])
+  stick again = poly(dir, ["run", "site"])
   exits(again, 0)
   says(again.out, "built ")
   says(read(dir, "web/dist/index.html"), "6 orders, 1055.84 in total; the top region is south")
+})
+
+test("the polyglot example: a release that fails after the CigarScript build takes the program back", pack() {
+  if not has_node_and_python() {
+    snuff
+  }
+  stick dir = fresh("examples/polyglot")
+  burn {
+    fs.write_text(path.join(dir, "deploy/deploy.sh"), "#!/usr/bin/env bash\necho the server said no >&2\nexit 1\n")
+  }
+  stick r = poly(dir, ["run", "release"])
+  exits(r, 1)
+  in_order(r.out + r.err, ["] cigar:build:", "] cigar:package:", "] deploy:", "stopped at deploy"])
+  assert(not there(dir, "cigar/bin/release-note"), "the CigarScript program was left behind by a failed release")
+  assert(not there(dir, "public"), "something was deployed")
+})
+
+test("the polyglot example: ci builds the CigarScript component and a later failure takes it back", pack() {
+  if not has_node_and_python() {
+    snuff
+  }
+  stick dir = fresh("examples/polyglot")
+  stick ok = poly(dir, ["run", "ci"])
+  exits(ok, 0)
+  assert(there(dir, "cigar/bin/release-note"), "ci did not build the program")
+  burn {
+    fs.write_text(path.join(dir, "data/test_stats.py"), "import unittest\n\n\nclass Broken(unittest.TestCase):\n    def test_broken(self):\n        self.fail('on purpose')\n")
+    fs.rm(path.join(dir, "cigar/bin"))
+  }
+  stick bad = poly(dir, ["run", "ci"])
+  exits(bad, 1)
+  in_order(bad.out + bad.err, ["] cigar:build:", "] data:test:", "stopped at data:test"])
+  assert(not there(dir, "cigar/bin/release-note"), "the program survived the failed ci")
+})
+
+test("the polyglot example with the real cigcompile and cigar: ci and release, and rollback of a failed build", pack() {
+  if not has_cigar_tools() {
+    snuff
+  }
+  stick dir = fresh("examples/polyglot")
+  stick ci = tool_in(dir, ["run", "ci"])
+  exits(ci, 0)
+  in_order(ci.out, ["] cigar:lint:", "] cigar:check:", "] cigar:build:", "] cigar:test:"])
+  assert(there(dir, "cigar/bin/release-note"), "cigcompile wrote no program")
+  # A release in a copy of its own, so that taking it back takes the program with it.
+  stick rdir = fresh("examples/polyglot")
+  stick rel = tool_in(rdir, ["run", "release"])
+  exits(rel, 0)
+  says(rel.out, "live: public/2.3.0/index.html (196 bytes)")
+  assert(there(rdir, "cigar/bin/release-note"), "the release built no program")
+  stick id = last_run(rdir).id
+  exits(cig(rdir, ["unburn", id]), 0)
+  assert(not there(rdir, "cigar/bin/release-note"), "the program survived unburn")
+  # A second script that does not build: the build fails and leaves nothing.
+  burn {
+    fs.write_text(path.join(rdir, "cigar/zz-broken.cigar"), "exhale (\n")
+  }
+  stick bad = tool_in(rdir, ["run", "cigar:build"])
+  exits(bad, 1)
+  assert(not there(rdir, "cigar/bin/release-note"), "a failed build left a program behind")
 })
 
 # ----- the launcher ---------------------------------------------------------

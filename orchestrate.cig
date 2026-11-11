@@ -905,6 +905,26 @@ stick TOOLCHAINS = {
       lint: [{each: {files: ["**/*.cig"], skip: [".cig-orchestrator", ".test-work", "node_modules", "fixtures", "corpus", "testdata"]}, cmd: ["cig", "check", "--deny-warnings", "{file}"]}],
     },
   },
+  cigarscript: {
+    language: "CigarScript", short: "cigar", family: "cigarscript", priority: 15,
+    detect: [["file:cigar.toml", "file:.cigar-version", "glob:*.cigar"]], workspace: ["glob:*.cigar"],
+    tools: ["cigcompile", "cigar"], versions: {cigcompile: ["cigcompile", "--version"], cigar: ["cigar", "--version"]},
+    pins: {cigar: [".cigar-version", "cigar.toml:cigar"]},
+    install: "https://github.com/otmof-ops/cig-installer",
+    touches: {build: ["?bin/**"], package: ["?bin/**"], clean: ["?bin/**"]},
+    note: "stages run on the top-level .cigar scripts of the component; the installer picks the cigcompile and cigar a pin (.cigar-version, or `cigar = \"1.0\"` in cigar.toml) names, and setup fetches a carton; there is no formatter yet (cigar has no fmt), so no format stages; test dry-runs each .cigar file with `cigar run --dry-run` (cigcompile test needs cig to run the script, and cig cannot run a .cigar file), and cigcompile test runs for .cig scripts; package writes each program with its SBOM, and signing (`--sign KEY`) is a stage override because the key is the project's; builds go to bin/, which a failed chain rolls back",
+    stages: {
+      setup: [{when: ["tool:ciginstaller"], cmd: ["ciginstaller", "install", "carton", "--yes"]}],
+      lint: [["cigcompile", "build", "--check", "."]],
+      check: [{when: ["tool:cigar"], cmd: ["cigar", "check", "."]}, ["cigcompile", "build", "--check", "."]],
+      build: [["cigcompile", "build", "."]],
+      # cigcompile test compares a program with its script run by `cig`, which
+      # cannot run a .cigar file (cig-compile#13): for those, cigar's own dry run.
+      test: [{when: ["glob:*.cigar", "tool:cigar"], each: {files: ["*.cigar"]}, cmd: ["cigar", "run", "--dry-run", "{file}"]}, ["cigcompile", "test", "."]],
+      package: [["cigcompile", "build", "--sbom", "."]],
+      clean: [["cigcompile", "clean", "."]],
+    },
+  },
   shell: {
     language: "Shell", short: "shell", family: "shell", priority: 5, auto: false,
     detect: [], tools: ["shellcheck"], install: "https://github.com/koalaman/shellcheck#installing",
@@ -1023,6 +1043,15 @@ stick FOOTPRINTS = {
   "buck2": {
     "build": {writes: ["buck-out/**", "~/.buck/**"], reads: [], network: ["github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["buck2", "sh", "bash", "python3", "git", "rustc", "cc", "c++", "gcc", "g++", "clang", "clang++", "ld", "ar"], registry_env: [], confidence: "low"},
     "test": {writes: ["buck-out/**", "~/.buck/**"], reads: [], network: ["github.com", "codeload.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["buck2", "sh", "bash", "python3", "git", "rustc", "cc", "c++", "gcc", "g++", "clang", "clang++", "ld", "ar"], registry_env: [], confidence: "low"},
+  },
+  "cigarscript": {
+    "build": {writes: ["bin/**", "~/.cigscript/**"], reads: ["~/.cigscript/**"], network: [], execs: ["cigcompile", "cig"], registry_env: [], confidence: "medium"},
+    "check": {writes: [], reads: ["~/.cigscript/**"], network: [], execs: ["cigcompile", "cigar"], registry_env: [], confidence: "medium"},
+    "clean": {writes: ["bin/**"], reads: [], network: [], execs: ["cigcompile"], registry_env: [], confidence: "medium"},
+    "lint": {writes: [], reads: ["~/.cigscript/**"], network: [], execs: ["cigcompile"], registry_env: [], confidence: "medium"},
+    "package": {writes: ["bin/**", "~/.cigscript/**"], reads: ["~/.cigscript/**"], network: [], execs: ["cigcompile", "cig"], registry_env: [], confidence: "medium"},
+    "setup": {writes: ["~/.cigscript/**"], reads: ["~/.cigscript/**"], network: ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"], execs: ["ciginstaller"], registry_env: [], confidence: "low"},
+    "test": {writes: ["bin/**", "~/.cigscript/**", "~/.cache/cigar/**"], reads: ["~/.cigscript/**", "~/.cache/cigar/**"], network: [], execs: ["cigcompile", "cigar", "cig"], registry_env: [], confidence: "medium"},
   },
   "clojure-cli": {
     "clean": {writes: [".cpcache/**", "target/**", "~/.m2/repository/**", "~/.gitlibs/**", "~/.clojure/.cpcache/**", "~/.cache/clojure/**", "~/.clojure/deps.edn", "~/.clojure/tools/**"], reads: ["~/.clojure/deps.edn", "~/.config/clojure/**", "~/.m2/settings.xml"], network: ["repo1.maven.org", "repo.clojars.org"], execs: ["clojure", "bash", "java", "git"], registry_env: [], confidence: "medium"},
@@ -5420,7 +5449,7 @@ pull read_pin(dir, source) {
         v = parts[1]
       }
     }
-  } else if file == "mise.toml" {
+  } else if file == "mise.toml" or file == "cigar.toml" {
     stick c = text.captures(t, '(?m)^\s*"?' + key + '"?\s*=\s*"([^"]+)"')
     if c != null {
       v = c[1]
