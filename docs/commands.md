@@ -171,7 +171,8 @@ settings today: `versions` (`off` < `never` < `ask` < `always`; floored),
 `install` (`never` < `ask` < `always`), `security` (`off` < `report` <
 `standard` < `strict`; floored), `trust` (`on` < `off`; floored), `osv`
 (`off` < `online` < `offline`; floored), `rehearse` (`never` < `auto` <
-`always`; floored), `crash_reports` (`always` < `ask` < `never`),
+`always`; floored), `rehearse_use` (`off` < `on`; floored), `verdict_cache` (`on` <
+`off`; floored), `rehearse_jobs`, `crash_reports` (`always` < `ask` < `never`),
 `update_channel` (`prerelease` < `stable`), `issues_repo`, `preset`, and
 three of this machine's own, which a project cannot set at all:
 `guard_scope` (`project` < `dev` < `downloads` < `agents` < `system`),
@@ -904,11 +905,14 @@ cigo rehearse git+https://host/repo    cloned into the scratch (never your tree)
 cigo rehearse git+https://host/repo#v1 a clone at that ref, rehearsed the same way
 cigo rehearse name[@version]           in the registry this project's toolchains use (two: it asks which)
               [--json] [--keep]        the full evidence; keep the layer to read (cig box list)
+cigo rehearse                          in a project, with nothing named: the manifest's direct dependencies
 cigo rehearse --changed [--base=<rev>] every package the lockfiles add or change since the base
               [--list] [--max=N]       name them and rehearse nothing; at most N (50)
+              [--jobs=N]               rehearse up to N at once, each in its own box (rehearse_jobs)
               [--sarif | --markdown]   for code scanning or a pull request comment
               [--fresh]                rehearse even what was rehearsed before
-              [--no-use]               install only: no require, import or run
+              [--no-use]               install only: no require, import or run (rehearse_use = off)
+              [--use]                  use it once, whatever rehearse_use says
               [--against=<v | ./old.sh>] only what is new against that version, or that script
               [--fail-on=<level>]      the lowest verdict that fails (auto: high under CI, critical at a terminal)
 ```
@@ -961,6 +965,49 @@ every package that is new or at a new version. Each npm, PyPI and crates.io
 package is rehearsed on its own and its findings are placed at its entry in
 the lockfile; the rest are named as not rehearsed. `--list` stops at the
 names, and `--max` (50) keeps a lockfile refresh from rehearsing for an hour.
+
+**Nothing named, in a project.** `cigo rehearse` with no package, in a
+folder with a `package.json`, `requirements.txt`, `pyproject.toml` (its
+`[project]` dependencies) or `Cargo.toml`, rehearses the direct dependencies
+those manifests name, and says so on its first line (`no package named, so
+the manifest's direct dependencies in package.json, Cargo.toml: 12
+packages`). A dependency a lockfile beside the manifest pins (npm's
+`package-lock.json`, `Cargo.lock`, `poetry.lock`, `uv.lock`) is rehearsed at
+the locked version and its verdict kept under the lockfile's hash, as
+`--changed` does; one it does not pin is rehearsed as its range. A
+dependency that is not a registry's (`file:`, a git URL, a `path`) or whose
+range this does not pass to the tool is named as not rehearsed. `--list`,
+`--max`, `--jobs`, `--json`, `--sarif`, `--markdown`, `--fresh` and
+`--fail-on` work as they do for `--changed`. It is not `cigo run setup`,
+which rehearses the setup stage as a whole.
+
+**In parallel.** `--jobs=N` (or `rehearse_jobs`, `auto` by default: half the
+cores, at most 8) rehearses up to N packages at once for `--changed` and for
+a bare `cigo rehearse`. Each runs as a child cigo with a scratch folder and a
+box of its own, so one package cannot see another's, and the answers print in
+the order the packages were listed, whichever finished first. It needs cigo
+started through its launcher (`cigo`, not `cig run orchestrate.cig`); without
+it they run one after another and the report says so. `--jobs=1` is the old
+behavior.
+
+**Blamed on the package that did it.** After the install and the use, the
+rehearsal reads the tree it made (npm's `node_modules`, the venv's
+distributions, `cargo tree`) and blames a finding on the path from the
+package you asked for: `via colors-plus -> ansi-glow@0.3.2`. A dependency
+on your blacklist, or one named a letter or two from a popular package, is
+blamed exactly. What the box saw written or reached does not say which
+package did it, so it is blamed on the dependencies that carry an install
+script, and when there are several the finding names each and says the box
+cannot tell which. The report's first line says how many dependencies were
+read (`rehearsed colors-plus@2.4.1 in 6.2 s, with its 12 dependencies`).
+
+**Settings for it.** `verdict_cache` is `on` by default; `off` neither reads
+nor keeps a verdict, so the same bytes are rehearsed every time (a project
+may only turn it off, never back on; `--fresh` does it for one run).
+`rehearse_use` is `on` by default; `off` is `--no-use` for every run (a
+project may only turn it on, never off; `--use` turns it back on for one
+run). `rehearse_jobs` is the number above. `metadata_young_days` (7, see
+registry metadata above) is how recent "recently published" is for `E882`.
 
 It exits by risk, once the verdict reaches `--fail-on`: `0` below it (and
 for none or low), `1` medium, `2` high, `3` critical. `--fail-on` is `low`,
