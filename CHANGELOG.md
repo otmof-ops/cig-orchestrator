@@ -7,6 +7,32 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **`cigo rehearse`: transitive blame, `--jobs`, nothing in a project, three
+  settings (#56).**
+  - A finding in a dependency's dependency is blamed on the path from the
+    package you asked for (`via colors-plus -> ansi-glow@0.3.2`): the
+    rehearsal reads the tree the install made. A dependency on your blacklist
+    or a name a letter or two from a popular one is blamed exactly; what the
+    box saw written or reached is blamed on the dependencies with an install
+    script, and says so when it could be any of several. The report counts
+    the dependencies it read.
+  - `--jobs=N` and the `rehearse_jobs` setting (`auto`: half the cores, at
+    most 8) rehearse up to N packages at once for `--changed`, each as a
+    child cigo with a box and a scratch folder of its own; the answers print in
+    the order listed. It needs the launcher, and says so when it runs them one
+    at a time.
+  - `cigo rehearse` with nothing, in a folder with a `package.json`,
+    `requirements.txt`, `pyproject.toml` or `Cargo.toml`, rehearses the
+    manifest's direct dependencies (at the lockfile's pin when there is one)
+    and says so on its first line.
+  - New settings `verdict_cache` (`on`, `off`: no verdict read or kept) and
+    `rehearse_use` (`on`, `off`: `--no-use` as a setting; `--use` for one run),
+    both floored; `metadata_young_days` is tested.
+  - Tests by the issue's names: `rehearse_blames_a_transitive_dependency`,
+    `sarif_output_is_valid` (the SARIF 2.1.0 required properties, checked with
+    no network), `sarif_rule_ids_are_the_codes` and
+    `rehearse_reports_in_the_cig_voice_and_plain_in_ci`.
+
 - **License: FSL-1.1-ALv2 from the next release.** The code moves from Apache-2.0 to
   the Functional Source License 1.1 with an Apache-2.0 future license: free to
   use, study, change and share, not to sell or to offer in a competing

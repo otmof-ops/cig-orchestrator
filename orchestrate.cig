@@ -82,6 +82,12 @@ stick SETTINGS = {
     doc: "registry metadata reads: the ecosystem's own registry (npm, PyPI, crates.io) is asked once per package for the signals E882 (a version published in the last few days), E883 (a new install script this version adds) and E884 (no source repository linked); online reads each name once and keeps the answers a day, off does not look"},
   metadata_young_days: {values: null, default: "7", floor: false, presets: {},
     doc: "how recent `recently published` is for E882, in days (default 7); 0 turns the E882 check off without turning registry_meta off"},
+  verdict_cache: {values: ["on", "off"], default: "on", floor: true, presets: {paranoid: "off"},
+    doc: "kept verdicts: on keeps a rehearsal's verdict under the bytes it judged and answers the same bytes from it, off rehearses every time and keeps nothing (cigo rehearse --fresh does that for one run)"},
+  rehearse_use: {values: ["off", "on"], default: "on", floor: true, presets: {},
+    doc: "use it once: on runs the package after installing it (npm requires it, PyPI imports it, a crate is linked into a program that runs), off installs only (cigo rehearse --no-use for one run, --use to turn it back on for one)"},
+  rehearse_jobs: {values: null, default: "auto", floor: false, presets: {},
+    doc: "how many packages cigo rehearse --changed (and cigo rehearse with nothing) rehearses at once, each in its own box: a number from 1 to 16, or auto for half the cores (at most 8); --jobs=N for one run"},
   blacklist_unboxed: {values: ["refuse", "ask"], default: "refuse", floor: true, presets: {ci: "refuse", paranoid: "refuse"},
     doc: "whether blacklisted things may ever run outside the box: refuse (never, the default), ask (a second OS authentication and the typed phrase `no box`); the box itself is CigScript#106 and is not built yet, so with refuse the two warnings end in a refuse that points here"},
   blacklist_exception_ttl: {values: null, default: "24h", floor: false, presets: {},
@@ -1291,14 +1297,30 @@ stick command = args.get(0, "help")
 roll words = []
 roll extra = []
 roll passing = false
+# `--jobs N` and `--max N` are read as `--jobs=N` and `--max=N` (cigo rehearse).
+roll joins = ""
 for a in args.slice(1) {
   if passing {
     extra.push(a)
   } else if a == "--" {
     passing = true
+  } else if joins != "" and text.matches(a, '^[0-9]+$|^auto$') {
+    words.push(joins + "=" + a)
+    joins = ""
   } else {
-    words.push(a)
+    if joins != "" {
+      words.push(joins)
+    }
+    joins = ""
+    if command == "rehearse" and (a == "--jobs" or a == "--max") {
+      joins = a
+    } else {
+      words.push(a)
+    }
   }
+}
+if joins != "" {
+  words.push(joins)
 }
 stick flags = words.filter(pack(w) => w.starts_with("--"))
 stick targets = words.filter(pack(w) => not w.starts_with("--"))
@@ -3935,8 +3957,9 @@ pull do_help() {
   exhale "                              build the offline OSV database (npm, PyPI, crates.io, Go, RubyGems, Packagist, Maven, NuGet)"
   exhale "  cigo rehearse <npm:name[@version]|pypi:name[==version]|crates:name[@version]|./script.sh> [--json] [--keep]"
   exhale "                              install it in cig's contained box (Linux) and say what it did beyond its footprint"
-  exhale "  cigo rehearse --changed [--base=<rev>] [--list] [--max=N] [--fresh] [--json|--sarif|--markdown]"
+  exhale "  cigo rehearse --changed [--base=<rev>] [--list] [--max=N] [--jobs=N] [--fresh] [--json|--sarif|--markdown]"
   exhale "                              every package the lockfiles add or change since the default branch, rehearsed"
+  exhale "  cigo rehearse               in a project, with nothing named: the manifest's direct dependencies"
   exhale "  cigo blacklist [list | add <thing> [--reason=...] [--expires=90d] | remove <entry> | why <thing> | reload]"
   exhale "  cigo blacklist [allow <entry> --reason=... | unallow <entry> | allows]"
   exhale "                              overrides of a blacklist entry for this user (OS-authenticated)"
@@ -10913,7 +10936,28 @@ pull guard_run(tasks, names, defaults) {
 # verdict from what it did beyond the ecosystem's footprint. No project
 # needed. Exit 0 for none or low, 1 medium, 2 high, 3 critical.
 
-stick REHEARSE_DIR = ".cigo-rehearse"
+# A parallel rehearsal (--jobs) is a child cigo told which slot it holds, so
+# each has a scratch folder of its own.
+stick REHEARSE_SLOT = pick(text.matches(env.get("CIGO_REHEARSE_SLOT", ""), '^[0-9]{1,3}$'), "-" + env.get("CIGO_REHEARSE_SLOT", ""), "")
+stick REHEARSE_DIR = ".cigo-rehearse" + REHEARSE_SLOT
+
+# The manifests a bare `cigo rehearse` reads, and what a spec made from them may hold.
+stick DIRECT_MANIFESTS = ["package.json", "requirements.txt", "pyproject.toml", "Cargo.toml"]
+stick DIRECT_SAFE = '^[A-Za-z0-9@/._~^=<>*+!-]+$'
+
+# Use it once? The rehearse_use setting, or --no-use (--use turns it back on
+# for one run).
+pull no_use() {
+  if flags.contains("--use") {
+    snuff false
+  }
+  snuff flags.contains("--no-use") or config().rehearse_use == "off"
+}
+
+# Are verdicts kept and read? The verdict_cache setting.
+pull verdict_cache_on() {
+  snuff config().verdict_cache != "off"
+}
 
 # What to rehearse for a spec: the job, carrying the spec it was asked as.
 # A bare package name, rehearsed in the registry this project uses (#56):
@@ -10988,7 +11032,7 @@ pull rehearse_job(spec) {
   stick d = REHEARSE_DIR
   # Use it once (#56): much malware waits for the first require or import,
   # and a wheel runs no code at install. `--no-use` installs only.
-  stick use = not flags.contains("--no-use")
+  stick use = not no_use()
   if eco == "npm" {
     roll name = rest
     stick at = rest.slice(1).find("@")
@@ -11035,7 +11079,7 @@ pull rehearse_job(spec) {
 # its verdict is kept against the commit the clone landed on. None of it is
 # applied; the clone goes once the rehearsal does.
 
-stick REHEARSE_CLONE_DIR = ".cigo-rehearse-clone"
+stick REHEARSE_CLONE_DIR = ".cigo-rehearse-clone" + REHEARSE_SLOT
 
 # What the install step wants a .whl, .tgz, .crate or folder path to look
 # like: a path that survives as a shell word (no newlines, no single quotes)
@@ -11226,7 +11270,7 @@ pull drop_rehearse_clone() {
 pull rehearse_job_for_local(spec) {
   check_local_path(spec)
   stick d = REHEARSE_DIR
-  stick use = not flags.contains("--no-use")
+  stick use = not no_use()
   stick abs_spec = pick(path.is_abs(spec), spec, path.join(ROOT, spec))
   if fs.is_dir(abs_spec) {
     snuff rehearse_job_for_folder(spec, abs_spec, use, d)
@@ -11306,7 +11350,7 @@ pull rehearse_job_for_git(spec) {
   stick parts = git_url_parts(spec)
   stick clone = git_clone_to(parts.url, parts.ref)
   stick abs_spec = clone.path
-  stick use = not flags.contains("--no-use")
+  stick use = not no_use()
   stick job = rehearse_job_for_folder(spec, abs_spec, use, REHEARSE_DIR)
   snuff job.merge({eco: "git-" + job.eco, git_url: parts.url, git_ref: parts.ref, git_commit: clone.commit, label: spec})
 }
@@ -11366,7 +11410,7 @@ pull verdict_key(job, integrity) {
     what = want.eco + "|" + want.name + "@" + want.version + "|" + sum
   }
   # A rehearsal that never used the package is not the same verdict.
-  snuff hash.sha256(["cigo-verdict-1", what, VERSION].join("\n") + pick(flags.contains("--no-use"), "\nno-use", ""))
+  snuff hash.sha256(["cigo-verdict-1", what, VERSION].join("\n") + pick(no_use(), "\nno-use", ""))
 }
 
 pull verdict_files(key) {
@@ -11376,7 +11420,7 @@ pull verdict_files(key) {
 # A verdict kept from a rehearsal of the same bytes, or null. One that does
 # not verify under this machine's key is ignored, and said.
 pull kept_verdict(key) {
-  if key == null or flags.contains("--fresh") {
+  if key == null or flags.contains("--fresh") or not verdict_cache_on() {
     snuff null
   }
   stick f = verdict_files(key)
@@ -11397,7 +11441,7 @@ pull kept_verdict(key) {
 # Keep a verdict, signed. Only for an install that went through: a failure
 # says nothing about the package.
 pull keep_verdict(key, r) {
-  if key == null or not r.installed or as_list(r.get("findings", [])).any(pack(f) => f.code == "E898") {
+  if key == null or not verdict_cache_on() or not r.installed or as_list(r.get("findings", [])).any(pack(f) => f.code == "E898") {
     snuff false
   }
   stick f = verdict_files(key)
@@ -11525,14 +11569,22 @@ pull rehearse_against(spec, r, against, human) {
 }
 
 pull do_rehearse() {
-  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh", "--fail-on", "--no-use", "--against"])
+  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh", "--fail-on", "--no-use", "--use", "--against", "--jobs", "--integrity"])
   fail_on()
   if flags.contains("--changed") {
     do_rehearse_changed()
     snuff
   }
+  if targets.is_empty() and DIRECT_MANIFESTS.any(pack(n) => fs.is_file(path.join(ROOT, n))) {
+    do_rehearse_direct()
+    snuff
+  }
   if targets.get(0, "") == "" or targets.len() > 1 {
-    fail("cigo rehearse <npm:name[@version] | pypi:name[==version] | crates:name[@version] | ./script.sh>, or --changed")
+    fail("cigo rehearse <npm:name[@version] | pypi:name[==version] | crates:name[@version] | ./script.sh>, --changed, or nothing in a project with a package.json, requirements.txt, pyproject.toml or Cargo.toml")
+  }
+  stick integrity = flag_value("--integrity", null)
+  if integrity != null and not text.matches(integrity, '^[A-Za-z0-9+/=._:-]{1,200}$') {
+    fail("--integrity takes a lockfile's hash, not `${integrity}`")
   }
   stick spec = infer_registry(targets.get(0, ""))
   # On your blacklist: refused as it is, with nothing rehearsed.
@@ -11565,7 +11617,7 @@ pull do_rehearse() {
   if human and not kept_already {
     exhale "rehearsing ${job.label} (${job.eco}) in the box: nothing it does is applied"
   }
-  stick r = rehearse_or_kept(job, null, flags.contains("--keep"))
+  stick r = rehearse_or_kept(job, integrity, flags.contains("--keep"))
   drop_rehearse_clone()
   stick against = flag_value("--against", "")
   if against != "" {
@@ -11605,6 +11657,227 @@ pull rehearse_ready() {
   }
 }
 
+# ----- transitive blame: who in the tree did it (#56) ---------------------------------
+#
+# After the install (and the use), the job reads the tree it made: each
+# package and who asked for it, and which of them carry an install script.
+# Those lines come out of the box on stdout under a tag, are taken out of
+# what the rehearsal says, and let a finding in a dependency's dependency be
+# blamed on the path from the package asked for: `via colors-plus ->
+# ansi-glow@0.3.2`. Static findings about a dependency (the blacklist, a
+# typosquat's name) are blamed exactly. What the box saw written or reached
+# does not say which package did it, so it is blamed on the dependencies
+# that have an install script, and says so when there are several.
+
+stick TREE_TAG = "@cigo-tree "
+
+# npm: the tree under node_modules, walked as node resolves it.
+stick NPM_WALK = 'const fs=require("fs"),p=require("path");const out=[];const seen=new Set();function find(n,d){for(;;){const f=p.join(d,"node_modules",n,"package.json");if(fs.existsSync(f))return p.dirname(f);const u=p.dirname(d);if(u===d)return null;d=u}}function rd(d){try{return JSON.parse(fs.readFileSync(p.join(d,"package.json"),"utf8"))}catch(e){return null}}function walk(d,id){const j=rd(d);if(!j)return;const s=j.scripts||{};for(const h of ["preinstall","install","postinstall"]){if(s[h])out.push("@cigo-tree hook "+id+" "+h)}if(!s.install&&!s.preinstall&&fs.existsSync(p.join(d,"binding.gyp")))out.push("@cigo-tree hook "+id+" install");const deps=Object.assign({},j.optionalDependencies||{},j.dependencies||{});for(const n of Object.keys(deps)){const c=find(n,d);if(!c)continue;const k=rd(c);if(!k)continue;const cid=n+"@"+k.version;out.push("@cigo-tree edge "+id+" "+cid);if(!seen.has(cid)){seen.add(cid);walk(c,cid)}}}walk(".",".");console.log(out.slice(0,4000).join(String.fromCharCode(10)))'
+
+# PyPI: the distributions in the venv and what each requires.
+stick PY_WALK = [
+  "import importlib.metadata as m, re",
+  "n = lambda s: re.sub('[-_.]+', '-', s).lower()",
+  "ds = {}",
+  "for d in m.distributions():",
+  "    ds[n(d.metadata['Name'])] = d",
+  "req = {}",
+  "for k, d in ds.items():",
+  "    rs = []",
+  "    for r in (d.requires or []):",
+  "        if ';' in r and 'extra' in r.split(';', 1)[1]:",
+  "            continue",
+  "        x = re.match('[A-Za-z0-9_.-]+', r)",
+  "        if x and n(x.group(0)) in ds:",
+  "            rs.append(n(x.group(0)))",
+  "    req[k] = rs",
+  "idof = lambda k: k + '@' + ds[k].version",
+  "need = {c for v in req.values() for c in v}",
+  "out = []",
+  "seen = set()",
+  "def walk(k):",
+  "    for c in req[k]:",
+  "        out.append('@cigo-tree edge ' + idof(k) + ' ' + idof(c))",
+  "        if c not in seen:",
+  "            seen.add(c)",
+  "            walk(c)",
+  "for k in sorted(ds):",
+  "    if k in need or k in ('pip', 'setuptools', 'wheel', 'pkg-resources'):",
+  "        continue",
+  "    out.append('@cigo-tree edge . ' + idof(k))",
+  "    if k not in seen:",
+  "        seen.add(k)",
+  "        walk(k)",
+  "print(chr(10).join(out[:4000]))",
+].join("\n")
+
+# crates.io: cargo's own tree, depth-prefixed, turned into edges.
+stick CARGO_WALK = "awk '{ match($0, /^[0-9]+/); d = substr($0, 1, RLENGTH) + 0; split(substr($0, RLENGTH + 1), a, \" \"); id = (d == 0) ? \".\" : a[1] \"@\" substr(a[2], 2); st[d] = id; if (d > 0) print \"@cigo-tree edge \" st[d - 1] \" \" id }'"
+
+# The commands that print the tree for a job's ecosystem, or null for a
+# script (it has no tree).
+pull tree_script(eco) {
+  stick d = REHEARSE_DIR
+  if eco == "npm" or eco.ends_with("-npm") {
+    snuff "cd ${d} 2>/dev/null && node -e " + sh_quote(NPM_WALK)
+  }
+  if eco == "pypi" or eco.ends_with("-pypi") {
+    snuff "cd ${d} 2>/dev/null && .venv/bin/python -c " + sh_quote(PY_WALK)
+  }
+  if eco == "crates" or eco.ends_with("-crates") {
+    snuff "cd ${d} 2>/dev/null && cargo tree --prefix depth -e normal,build 2>/dev/null | " + CARGO_WALK
+  }
+  snuff null
+}
+
+# The job's script followed by the tree, with the install's own exit code
+# kept as the script's.
+pull with_tree(job) {
+  stick t = tree_script(job.eco)
+  if t == null {
+    snuff job.script
+  }
+  snuff "( " + job.script + "\n); rc=$?; ( " + t + " ) 2>/dev/null; exit $rc"
+}
+
+# What a rehearsal's stdout holds: the tree's lines (edges and install
+# scripts) and everything else, which is what the install said.
+pull tree_parse(out) {
+  roll edges = []
+  roll hooks = {}
+  roll rest = []
+  for line in str(out).lines() {
+    if not line.starts_with(TREE_TAG) {
+      rest.push(line)
+      continue
+    }
+    stick w = line.slice(TREE_TAG.len()).trim().split(" ")
+    if w.len() == 3 and w[0] == "edge" {
+      edges.push([w[1], w[2]])
+    } else if w.len() == 3 and w[0] == "hook" {
+      hooks[w[1]] = as_list(hooks.get(w[1], [])) + [w[2]]
+    }
+  }
+  snuff {edges: edges, hooks: hooks, rest: rest}
+}
+
+# From the scratch project's own `.`, the path to every package: {id: [the
+# asked package, ..., id]}, the shortest way there.
+pull tree_paths(edges) {
+  roll kids = {}
+  for e in edges {
+    kids[e[0]] = as_list(kids.get(e[0], [])) + [e[1]]
+  }
+  roll paths = {}
+  roll queue = []
+  for c in as_list(kids.get(".", [])) {
+    if not paths.has(c) {
+      paths[c] = [c]
+      queue.push(c)
+    }
+  }
+  roll i = 0
+  while i < queue.len() {
+    stick cur = queue[i]
+    i += 1
+    for c in as_list(kids.get(cur, [])) {
+      if not paths.has(c) {
+        paths[c] = paths[cur] + [c]
+        queue.push(c)
+      }
+    }
+  }
+  snuff paths
+}
+
+# `name@version` split at its last `@` (a scope's `@` leads the name).
+pull id_parts(id) {
+  stick at = id.slice(1).find("@")
+  if at < 0 {
+    snuff {name: id, version: ""}
+  }
+  snuff {name: id.slice(0, at + 1), version: id.slice(at + 2)}
+}
+
+# The path as a report says it: the package asked for by name, then each
+# hop with its version.
+pull via_text(p) {
+  roll hops = [id_parts(p.first()).name]
+  for id in p.slice(1) {
+    hops.push(id)
+  }
+  snuff hops.join(" -> ")
+}
+
+# The ecosystem's name in the lockfile readers' words.
+pull tree_eco(eco) {
+  if eco == "npm" or eco.ends_with("-npm") {
+    snuff "npm"
+  }
+  if eco == "pypi" or eco.ends_with("-pypi") {
+    snuff "PyPI"
+  }
+  snuff "crates.io"
+}
+
+# Findings about the dependencies themselves: one on your blacklist, or a
+# name a letter or two from a popular package's. Each carries the path.
+pull dependency_findings(job, paths) {
+  stick eco = tree_eco(job.eco)
+  roll out = []
+  for id in paths.keys().sort() {
+    stick p = paths[id]
+    if p.len() < 2 {
+      continue
+    }
+    stick part = id_parts(id)
+    stick via = via_text(p)
+    stick spec = rehearse_spec_of({eco: eco, name: part.name, version: part.version})
+    if spec != null {
+      for f in blacklist_for_spec(spec) {
+        out.push(f.merge({text: "via " + via, via: via}))
+      }
+    }
+    stick tops = top_list(eco)
+    if not tops.is_empty() {
+      stick n = normalize_name(eco, part.name)
+      stick near = typosquat_match(n, tops)
+      if near != null {
+        stick off_by = pick(edit_distance_le(n, near, 2) == 2, "two letters", "one letter")
+        out.push({code: "E881", cat: "typosquat", w: 0.5, rule: "typosquat", where: id, text: "via " + via, via: via, says: off_by + " from " + near + ", a popular " + eco + " package: check the name"})
+      }
+    }
+  }
+  snuff out
+}
+
+# What the box saw (writes, links, refused hosts) says nothing of which
+# package did it. When no package asked for has an install script, the ones
+# below it that do are the candidates, and are named; with several, the
+# finding says it could be any of them.
+pull blame_behaviour(findings, tree, paths) {
+  roll asked_has = false
+  roll cands = []
+  for id in tree.hooks.keys().sort() {
+    if not paths.has(id) {
+      continue
+    }
+    if paths[id].len() == 1 {
+      asked_has = true
+    } else {
+      cands.push(id)
+    }
+  }
+  if asked_has or cands.is_empty() {
+    snuff findings
+  }
+  stick vias = cands.slice(0, 3).map(pack(id) => via_text(paths[id]))
+  stick more = pick(cands.len() > 3, " or " + str(cands.len() - 3) + " more", "")
+  stick joined = vias.join(" or ") + more
+  stick why = pick(cands.len() > 1, " (each has an install script; the box does not say which)", "")
+  snuff findings.map(pack(f) => pick((f.get("rule", "") == "rehearsal" or f.cat == "prompt-injection") and f.code != "E898", f.merge({text: pick(f.cat == "prompt-injection", str(f.text) + " (via " + joined + ")", "in the rehearsal, via " + joined + why), via: joined}), f))
+}
+
 # One rehearsal of a job (rehearse_spec), nothing printed: what it did and
 # the verdict. The layer is discarded unless kept.
 pull rehearse_one(job, keep) {
@@ -11625,12 +11898,23 @@ pull rehearse_one(job, keep) {
   roll r = null
   burn {
     try {
-      r = proc.shell(job.script, {box: box, timeout_ms: 900000, encoding: "lossy"})
+      r = proc.shell(with_tree(job), {box: box, timeout_ms: 900000, encoding: "lossy"})
     } ashtray e {
       r = e
     }
   }
   roll findings = behaviour_findings(r.get("outside", []), r.get("refused", []))
+  # The tree the install made, taken out of what it said, and the
+  # findings blamed on the package that did them (#56).
+  stick tree = tree_parse(r.get("out", ""))
+  stick paths = tree_paths(tree.edges)
+  # What the install printed (stdout and stderr, as the box captured them)
+  # is read for text addressed to an AI agent: an agent is often what runs
+  # cigo rehearse, and reads this (E886, E887).
+  stick printed = tree.rest.join("\n") + "\n" + str(r.get("err", ""))
+  findings = findings + scan_docs(job.label + ": what the install printed", printed).map(pack(f) => f.merge({text: clip(redact(str(f.text)), 120)}))
+  findings = blame_behaviour(findings, tree, paths) + dependency_findings(job, paths)
+  stick dependencies = paths.values().filter(pack(p) => p.len() > 1).len()
   if job.eco == "script" {
     # A script is read as well as rehearsed, with the files it runs.
     for src in script_sources(job.spec) {
@@ -11649,11 +11933,11 @@ pull rehearse_one(job, keep) {
   }
   stick ok = ok0
   # The last thing it said, whether it went through or not, redacted.
-  stick said = (str(r.get("out", "")) + "\n" + str(r.get("err", "")) + "\n" + pick(ok, "", str(r.get("message", "")))).trim_end().lines().filter(pack(l) => l.trim() != "")
+  stick said = (tree.rest.join("\n") + "\n" + str(r.get("err", "")) + "\n" + pick(ok, "", str(r.get("message", "")))).trim_end().lines().filter(pack(l) => l.trim() != "")
   stick tail = clip(redact(said.last() ?? ""), 200)
   # A failed install with nothing found is not a verdict: it could not judge.
   stick risk = pick(not ok and findings.is_empty(), "unknown", risk_of(findings))
-  snuff {target: job.spec, label: job.label, ecosystem: job.eco, risk: risk, judged: ok, installed: ok, exit: r.get("code", null), error: r.get("message", null), last_line: tail, findings: findings, outside: r.get("outside", []), refused: r.get("refused", []), changed: r.get("changed", {}), layer: pick(keep, layer, null), seconds: (time.now_ms() - started) / 1000}
+  snuff {target: job.spec, label: job.label, ecosystem: job.eco, risk: risk, judged: ok, installed: ok, dependencies: dependencies, exit: r.get("code", null), error: r.get("message", null), last_line: tail, findings: findings, outside: r.get("outside", []), refused: r.get("refused", []), changed: r.get("changed", {}), layer: pick(keep, layer, null), seconds: (time.now_ms() - started) / 1000}
 }
 
 pull say_rehearsal(r) {
@@ -11662,7 +11946,8 @@ pull say_rehearsal(r) {
   } else if r.get("kept", false) {
     exhale "rehearsed ${r.label} before, on ${str(r.get("at", "")).slice(0, 10)}, as these same bytes: the verdict is kept (--fresh rehearses again)"
   } else {
-    exhale "rehearsed ${r.label} in ${duration(int(r.seconds * 1000))}" + pick(r.installed, "", "; the install itself failed (exit ${r.exit ?? "?"})")
+    stick deps = int(r.get("dependencies", 0))
+    exhale "rehearsed ${r.label} in ${duration(int(r.seconds * 1000))}" + pick(deps > 0, ", with its ${deps} dependenc" + pick(deps == 1, "y", "ies"), "") + pick(r.installed, "", "; the install itself failed (exit ${r.exit ?? "?"})")
   }
   stick blind = r.findings.len() == 1 and r.findings.first().code == "E898"
   if r.get("risk", "") == "unknown" {
@@ -11852,35 +12137,147 @@ pull setup_packages_all_kept() {
   snuff any
 }
 
-# `cigo rehearse --changed [--base=<rev>] [--list] [--max=N]`: every package
-# the lockfiles add or change since base, rehearsed one by one, the verdict
-# blamed on the package and placed at its line in the lockfile.
-pull do_rehearse_changed() {
-  if not targets.is_empty() {
-    fail("cigo rehearse --changed takes no package: it finds them in the lockfiles")
+# ----- cigo rehearse --changed and cigo rehearse with nothing: a set of packages ----------
+
+# How many at once: --jobs=N, else the rehearse_jobs setting; auto is half
+# the cores, at most 8. Never more than there are packages.
+pull rehearse_jobs_n(count) {
+  stick want = flag_value("--jobs", str(config().rehearse_jobs))
+  roll n = 1
+  if want == "auto" {
+    roll cores = 2
+    burn {
+      try {
+        stick c = proc.run("getconf", ["_NPROCESSORS_ONLN"], {timeout_ms: 5000})
+        if c.code == 0 and text.matches(c.out.trim(), '^[0-9]+$') {
+          cores = int(c.out.trim())
+        }
+      } ashtray e {
+        cores = 2
+      }
+    }
+    n = math.max(1, math.min(8, int(math.floor(cores / 2))))
+  } else if text.matches(want, '^[0-9]{1,2}$') and int(want) >= 1 and int(want) <= 16 {
+    n = int(want)
+  } else {
+    fail("--jobs and rehearse_jobs take a number from 1 to 16, or auto; got `${want}`")
   }
-  stick most = int(flag_value("--max", "50"))
-  stick base = changed_base()
-  roll todo = []
-  roll skipped = []
-  for p in changed_packages(base) {
-    stick spec = rehearse_spec_of(p)
-    if spec == null {
-      skipped.push(p)
-    } else {
-      todo.push({spec: spec, pkg: p})
+  snuff math.max(1, math.min(n, count))
+}
+
+# The cigo to run as each parallel rehearsal: the launcher this one was
+# started through, or null (then they run one after another).
+pull rehearse_self() {
+  stick given = env.get("CIGO_LAUNCHER", "")
+  if given != "" and path.is_abs(given) and fs.is_file(given) and not given.contains("'") and not given.contains("\n") {
+    snuff given
+  }
+  snuff null
+}
+
+# What a package needs asked of a child cigo: its spec, and the lockfile's
+# hash so the verdict is kept under the key `--changed` itself would use.
+pull child_words(x, slot, launcher) {
+  roll w = ["CIGO_REHEARSE_SLOT=" + str(slot), sh_quote(launcher), "rehearse", sh_quote(x.spec), "--json", "--fail-on=never"]
+  stick sum = str(x.pkg.get("integrity", ""))
+  if sum != "" and text.matches(sum, '^[A-Za-z0-9+/=._:-]{1,200}$') {
+    w.push("--integrity=" + sum)
+  }
+  for f in ["--fresh", "--no-use", "--use"] {
+    if flags.contains(f) {
+      w.push(f)
     }
   }
-  stick human = not flags.contains("--json") and not flags.contains("--sarif") and not flags.contains("--markdown")
-  stick over = math.max(0, todo.len() - most)
-  if over > 0 {
-    todo = todo.slice(0, most)
+  snuff w.join(" ")
+}
+
+# Run the packages that need a box at most `jobs` at a time, each as a
+# child cigo with its own scratch folder and its own box; the answers come
+# back in the order asked, whichever finished first. {index: result}.
+pull rehearse_in_parallel(pending, jobs, launcher) {
+  roll got = {}
+  roll start = 0
+  while start < pending.len() {
+    stick batch = pending.slice(start, start + jobs)
+    start += jobs
+    stick tag = "@@cigo-" + hash.sha256(str(time.now_ms()) + ROOT + str(start)).slice(0, 12)
+    roll lines = ['dir=$(mktemp -d "${TMPDIR:-/tmp}/cigo-jobs.XXXXXX") || exit 70']
+    roll slot = 0
+    for x in batch {
+      slot += 1
+      lines.push("( " + child_words(x, slot, launcher) + " > \"$dir/" + str(slot) + ".out\" 2> \"$dir/" + str(slot) + ".err\"; echo $? > \"$dir/" + str(slot) + ".code\" ) &")
+    }
+    lines.push("wait")
+    roll n = 0
+    for x in batch {
+      n += 1
+      lines.push("printf '%s\\n' \"" + tag + " out " + str(n) + " $(cat \"$dir/" + str(n) + ".code\" 2>/dev/null || echo 70)\"")
+      lines.push("cat \"$dir/" + str(n) + ".out\" 2>/dev/null")
+      lines.push("printf '%s\\n' \"" + tag + " err " + str(n) + "\"")
+      lines.push("tail -c 2000 \"$dir/" + str(n) + ".err\" 2>/dev/null")
+    }
+    lines.push("rm -rf \"$dir\"")
+    roll r = null
+    burn {
+      try {
+        r = proc.shell(lines.join("\n"), {timeout_ms: 1500000})
+      } ashtray e {
+        r = {code: -1, out: "", err: e.message}
+      }
+    }
+    roll outs = {}
+    roll errs = {}
+    roll codes = {}
+    roll at = 0
+    roll mode = ""
+    for line in str(r.get("out", "")).lines() {
+      if line.starts_with(tag + " ") {
+        stick w = line.slice(tag.len() + 1).split(" ")
+        at = int(w[1])
+        mode = w[0]
+        if mode == "out" {
+          codes[str(at)] = w[2]
+        }
+        continue
+      }
+      if mode == "out" {
+        outs[str(at)] = as_list(outs.get(str(at), [])) + [line]
+      } else if mode == "err" {
+        errs[str(at)] = as_list(errs.get(str(at), [])) + [line]
+      }
+    }
+    roll k = 0
+    for x in batch {
+      k += 1
+      roll res = null
+      try {
+        res = json.parse(as_list(outs.get(str(k), [])).join("\n"))
+      } ashtray e {
+        res = null
+      }
+      if res == null or type_of(res) != "map" {
+        stick why = clip(redact(as_list(errs.get(str(k), [])).join(" ").trim()), 200)
+        res = {target: x.spec, label: x.spec, ecosystem: rehearse_spec(x.spec).eco, risk: "unknown", judged: false, installed: false, exit: codes.get(str(k), null), error: pick(why == "", "the rehearsal did not answer", why), last_line: why, findings: [], outside: [], refused: [], seconds: 0, kept: false}
+      }
+      got[str(x.index)] = res
+    }
   }
+  snuff got
+}
+
+# The rehearsals of a list of packages (each {spec, pkg}), printed in the
+# order given: what `--changed` and `rehearse` with nothing both do after
+# they have found their packages. `head` says what was asked (a line, the
+# report's title, and the fields the JSON starts with).
+pull run_rehearsals(todo_in, skipped_in, over, most, head) {
+  roll todo = todo_in
+  roll skipped = skipped_in
+  stick human = not flags.contains("--json") and not flags.contains("--sarif") and not flags.contains("--markdown")
   if flags.contains("--list") {
     if flags.contains("--json") {
-      exhale json.stringify({base: base, rehearse: todo.map(pack(x) => x.spec), not_rehearsed: skipped.map(pack(p) => p.eco + ":" + p.name + "@" + p.version), over_max: over}, 2)
+      exhale json.stringify(head.json.merge({rehearse: todo.map(pack(x) => x.spec), not_rehearsed: skipped.map(pack(p) => p.eco + ":" + p.name + "@" + p.version), over_max: over}), 2)
     } else {
-      exhale "since ${base}: ${todo.len()} package" + pick(todo.len() == 1, "", "s") + " to rehearse"
+      exhale head.line + ": " + str(todo.len()) + " package" + pick(todo.len() == 1, "", "s") + " to rehearse"
       for x in todo {
         exhale "  ${x.spec}   (" + (project_rel(x.pkg.get("file", null)) ?? x.pkg.where) + ")"
       }
@@ -11893,14 +12290,41 @@ pull do_rehearse_changed() {
     }
     snuff
   }
+  stick jobs = rehearse_jobs_n(todo.len())
   rehearse_ready()
   roll worst = "none"
   roll results = []
   roll items = []
   if human {
-    exhale "since ${base}: ${todo.len()} package" + pick(todo.len() == 1, "", "s") + " new or changed in the lockfiles; each is rehearsed in the box and nothing is applied"
+    exhale head.line + ": ${todo.len()} package" + pick(todo.len() == 1, "", "s") + head.tail
   }
+  # The packages that need a box and are not on the blacklist or already
+  # kept go side by side, when there is a cigo to run them with.
+  roll ran = {}
+  stick launcher = rehearse_self()
+  if jobs > 1 and launcher != null {
+    roll pending = []
+    roll i = 0
+    for x in todo {
+      stick job = rehearse_spec(x.spec)
+      if blacklist_for_spec(x.spec).is_empty() and proc.which(job.tool) != null and kept_verdict(verdict_key(job, x.pkg.get("integrity", ""))) == null {
+        pending.push({index: i, spec: x.spec, pkg: x.pkg})
+      }
+      i += 1
+    }
+    if pending.len() > 1 {
+      if human {
+        exhale "  ${pending.len()} of them in the box, ${math.min(jobs, pending.len())} at a time; the answers follow in a fixed order"
+      }
+      ran = rehearse_in_parallel(pending, jobs, launcher)
+    }
+  } else if jobs > 1 and human and flag_value("--jobs", "") != "" {
+    exhale "  (--jobs needs cigo started through its launcher; they run one after another)"
+  }
+  roll at = 0
   for x in todo {
+    stick idx = at
+    at += 1
     stick listed = blacklist_for_spec(x.spec)
     stick job = rehearse_spec(x.spec)
     if listed.is_empty() and proc.which(job.tool) == null {
@@ -11909,7 +12333,11 @@ pull do_rehearse_changed() {
     }
     roll r = null
     if listed.is_empty() {
-      r = rehearse_or_kept(job, x.pkg.get("integrity", ""), false)
+      if ran.has(str(idx)) {
+        r = ran[str(idx)]
+      } else {
+        r = rehearse_or_kept(job, x.pkg.get("integrity", ""), false)
+      }
     } else {
       r = {target: x.spec, label: job.label, ecosystem: job.eco, risk: "critical", installed: false, rehearsed: false, findings: listed, seconds: 0}
     }
@@ -11936,9 +12364,9 @@ pull do_rehearse_changed() {
   if flags.contains("--sarif") {
     exhale json.stringify(sarif_log(items), 2)
   } else if flags.contains("--markdown") {
-    exhale markdown_report("cigo rehearse --changed (since " + base + ")", worst, items, "${results.len()} package" + pick(results.len() == 1, "", "s") + " rehearsed; nothing outside their footprints.")
+    exhale markdown_report(head.title, worst, items, "${results.len()} package" + pick(results.len() == 1, "", "s") + " rehearsed; nothing outside their footprints.")
   } else if flags.contains("--json") {
-    exhale json.stringify({base: base, worst: worst, packages: results, not_rehearsed: skipped.map(pack(p) => p.eco + ":" + p.name + "@" + p.version), over_max: over}, 2)
+    exhale json.stringify(head.json.merge({worst: worst, packages: results, not_rehearsed: skipped.map(pack(p) => p.eco + ":" + p.name + "@" + p.version), over_max: over}), 2)
   } else {
     for p in skipped {
       exhale "  not rehearsed: ${p.eco} ${p.name}@${p.version}"
@@ -11952,6 +12380,229 @@ pull do_rehearse_changed() {
   if code != 0 {
     exit(code)
   }
+}
+
+# `cigo rehearse --changed [--base=<rev>] [--list] [--max=N] [--jobs=N]`:
+# every package the lockfiles add or change since base, rehearsed (side by
+# side, --jobs at a time), the verdict blamed on the package and placed at
+# its line in the lockfile.
+pull do_rehearse_changed() {
+  if not targets.is_empty() {
+    fail("cigo rehearse --changed takes no package: it finds them in the lockfiles")
+  }
+  stick most = int(flag_value("--max", "50"))
+  stick base = changed_base()
+  roll todo = []
+  roll skipped = []
+  for p in changed_packages(base) {
+    stick spec = rehearse_spec_of(p)
+    if spec == null {
+      skipped.push(p)
+    } else {
+      todo.push({spec: spec, pkg: p})
+    }
+  }
+  stick over = math.max(0, todo.len() - most)
+  if over > 0 {
+    todo = todo.slice(0, most)
+  }
+  run_rehearsals(todo, skipped, over, most, {line: "since ${base}", tail: " new or changed in the lockfiles; each is rehearsed in the box and nothing is applied", title: "cigo rehearse --changed (since " + base + ")", json: {base: base}})
+}
+
+# ----- cigo rehearse with nothing: the manifest's direct dependencies (#56) --------------
+#
+# In a project, a bare `cigo rehearse` rehearses what the project's own
+# manifests name: package.json, requirements.txt, pyproject.toml and
+# Cargo.toml in its folder. A dependency pinned by the lockfile is rehearsed
+# at the locked version (and its verdict keyed by the lockfile's hash, as
+# --changed does); one the lockfile does not pin is rehearsed as its range.
+
+
+# The locked version of a package, from the lockfiles beside the manifest,
+# when exactly one is locked: {version, integrity} or null.
+pull locked_version(eco, name, locks) {
+  roll found = []
+  for p in locks {
+    if p.eco == eco and p.name == name and not found.any(pack(q) => q.version == p.version) {
+      found.push(p)
+    }
+  }
+  if found.len() == 1 {
+    snuff {version: found.first().version, integrity: str(found.first().get("integrity", ""))}
+  }
+  snuff null
+}
+
+pull direct_spec(eco, name, range, locks) {
+  stick locked = locked_version(eco, name, locks)
+  roll req = range
+  roll sum = ""
+  if locked != null {
+    req = pick(eco == "PyPI", "==", "@") + locked.version
+    sum = locked.integrity
+  } else if range != "" and range != "*" {
+    req = pick(eco == "PyPI", "", "@") + range
+  } else {
+    req = ""
+  }
+  stick prefix = pick(eco == "npm", "npm:", pick(eco == "PyPI", "pypi:", "crates:"))
+  stick spec = prefix + name + req
+  if not text.matches(spec.slice(prefix.len()), DIRECT_SAFE) {
+    snuff null
+  }
+  snuff {spec: spec, integrity: sum}
+}
+
+# `name`, extras and a specifier out of one requirement line or string:
+# {name, range} (range is what pip takes after the name, spaces removed,
+# `;` markers dropped), or null for a line that names no registry package.
+pull pip_requirement(line) {
+  stick l = line.split("#").first().split(";").first().trim()
+  if l == "" or l.starts_with("-") or l.contains("://") or l.contains(" @ ") or l.contains("@git") {
+    snuff null
+  }
+  stick c = text.captures(l, '^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$')
+  if c == null {
+    snuff null
+  }
+  snuff {name: c[1], range: c[2].replace(" ", "")}
+}
+
+# The direct dependencies of the manifests in the project's folder:
+# {todo: [{spec, pkg}], skipped: [pkg], files: [names]}.
+pull direct_dependencies() {
+  roll locks = []
+  for n in ["package-lock.json", "Cargo.lock", "poetry.lock", "uv.lock"] {
+    stick f = path.join(ROOT, n)
+    if fs.is_file(f) {
+      locks = locks + lock_packages(f)
+    }
+  }
+  roll todo = []
+  roll skipped = []
+  roll files = []
+  roll seen = {}
+  pull add(eco, name, range, file) {
+    stick key = eco + "|" + name
+    if seen.has(key) {
+      snuff
+    }
+    seen[key] = true
+    stick made = direct_spec(eco, name, range, locks)
+    stick p = {eco: eco, name: name, version: range, where: file, file: path.join(ROOT, file), integrity: ""}
+    if made == null {
+      skipped.push(p)
+    } else {
+      todo.push({spec: made.spec, pkg: p.merge({integrity: made.integrity})})
+    }
+  }
+  stick pj = path.join(ROOT, "package.json")
+  if fs.is_file(pj) {
+    files.push("package.json")
+    roll j = {}
+    try {
+      j = json.parse(unbom(fs.read_text(pj)))
+    } ashtray e {
+      j = {}
+    }
+    for sect in ["dependencies", "optionalDependencies", "devDependencies"] {
+      stick m = j.get(sect, {})
+      if type_of(m) == "map" {
+        for name in m.keys().sort() {
+          stick range = str(m[name]).trim()
+          if range.contains(":") or range.contains("/") or range.contains(" ") {
+            if not seen.has("npm|" + name) {
+              seen["npm|" + name] = true
+              skipped.push({eco: "npm", name: name, version: range, where: "package.json", file: pj})
+            }
+          } else {
+            add("npm", name, range, "package.json")
+          }
+        }
+      }
+    }
+  }
+  stick req = path.join(ROOT, "requirements.txt")
+  if fs.is_file(req) {
+    files.push("requirements.txt")
+    roll body = ""
+    try {
+      body = unbom(fs.read_text(req))
+    } ashtray e {
+      body = ""
+    }
+    for line in body.lines() {
+      stick r = pip_requirement(line)
+      if r != null {
+        add("PyPI", r.name, r.range, "requirements.txt")
+      }
+    }
+  }
+  stick pp = path.join(ROOT, "pyproject.toml")
+  if fs.is_file(pp) {
+    roll body = ""
+    try {
+      body = unbom(fs.read_text(pp))
+    } ashtray e {
+      body = ""
+    }
+    stick c = text.captures(body, '(?ms)^\[project\]\s*$.*?^dependencies\s*=\s*\[(.*?)\]')
+    if c != null {
+      files.push("pyproject.toml")
+      for m in text.find_all(c[1], '"([^"]+)"') {
+        stick r = pip_requirement(m.replace("\"", ""))
+        if r != null {
+          add("PyPI", r.name, r.range, "pyproject.toml")
+        }
+      }
+    }
+  }
+  stick ct = path.join(ROOT, "Cargo.toml")
+  if fs.is_file(ct) {
+    files.push("Cargo.toml")
+    roll body = ""
+    try {
+      body = unbom(fs.read_text(ct))
+    } ashtray e {
+      body = ""
+    }
+    roll in_deps = false
+    for line in body.lines() {
+      stick t = line.trim()
+      if t.starts_with("[") {
+        in_deps = ["[dependencies]", "[build-dependencies]", "[dev-dependencies]"].contains(t)
+        continue
+      }
+      if not in_deps or t == "" or t.starts_with("#") {
+        continue
+      }
+      stick plain = text.captures(t, '^([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"')
+      stick table = text.captures(t, '^([A-Za-z0-9_-]+)\s*=\s*\{(.*)\}')
+      if plain != null {
+        add("crates.io", plain[1], plain[2], "Cargo.toml")
+      } else if table != null {
+        stick v = text.captures(table[2], 'version\s*=\s*"([^"]*)"')
+        if v != null and not table[2].contains("path") and not table[2].contains("git") {
+          add("crates.io", table[1], v[1], "Cargo.toml")
+        } else {
+          skipped.push({eco: "crates.io", name: table[1], version: "path or git", where: "Cargo.toml", file: ct})
+        }
+      }
+    }
+  }
+  snuff {todo: todo, skipped: skipped, files: files}
+}
+
+pull do_rehearse_direct() {
+  stick most = int(flag_value("--max", "50"))
+  stick found = direct_dependencies()
+  roll todo = found.todo
+  stick over = math.max(0, todo.len() - most)
+  if over > 0 {
+    todo = todo.slice(0, most)
+  }
+  stick files = found.files.join(", ")
+  run_rehearsals(todo, found.skipped, over, most, {line: "no package named, so the manifest's direct dependencies in ${files}", tail: "; each is rehearsed in the box and nothing is applied", title: "cigo rehearse (the direct dependencies in " + files + ")", json: {direct: true, files: found.files}})
 }
 
 # `cigo audit [<task>...]`: the guard's read of each task, with nothing run.
@@ -12826,7 +13477,7 @@ pull do_config() {
 # The settings cigo guard stats watches for a "notice was followed by a
 # change of setting" link: the keys that tighten or loosen what the guard
 # does, or how it answers a prompt.
-stick GUARD_SETTINGS = ["preset", "guard_scope", "guard_commands", "guard_shells", "guard_agents", "guard_pause_max", "security", "rehearse", "rehearse_fail_on", "osv", "registry_meta", "metadata_young_days", "blacklist_unboxed", "blacklist_exception_ttl", "agent_approval"]
+stick GUARD_SETTINGS = ["preset", "guard_scope", "guard_commands", "guard_shells", "guard_agents", "guard_pause_max", "security", "rehearse", "rehearse_fail_on", "rehearse_use", "rehearse_jobs", "verdict_cache", "osv", "registry_meta", "metadata_young_days", "blacklist_unboxed", "blacklist_exception_ttl", "agent_approval"]
 
 # Set (or unset, with null) one key in the user's config file. A change to
 # a guard-related setting is logged, so cigo guard stats can say how often

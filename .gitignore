@@ -8,3 +8,4 @@ examples/demo-app/dist/
 examples/demo-app/logs/
 examples/polyglot/public/
 examples/polyglot/web/dist/
+test-timings.json

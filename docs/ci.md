@@ -137,6 +137,11 @@ cig's contained box and placed at its entry in the lockfile.
         with: { sarif_file: rehearse.sarif, category: cigo-rehearse }
 ```
 
+`--jobs=N` (the `rehearse_jobs` setting, half the cores by default) rehearses
+up to N of the pull request's packages at once, each in its own box; the
+report keeps its order. A bare `cigo rehearse` rehearses a project's direct
+dependencies, for a job with no pull request to compare with.
+
 `--markdown` writes the same findings as one table for a pull request
 comment. The exit codes say the risk (`0` none or low, `1` medium, `2` high,
 `3` critical) for a job that should stop on its own line; `cigo audit`
