@@ -3075,6 +3075,596 @@ test("the environment loosens a setting only at a terminal, never under CI", pac
   says(tool_layers(dir, ["config", "versions"], {CIGO_VERSIONS: "0"}).out, "ask")
 })
 
+# ----- 1.19.0: presets pick the guard level; the installer's machine layer; the prompt budget (#66) ------
+
+pull tool_installer(dir, words, more) {
+  snuff hop_env(dir, tool_prog("cig"), tool_args(words), {CIGO_HOME: cigo_home(dir), CIGO_SYSTEM_CONFIG: path.join(dir + "-sys", "cigo.conf"), CIGO_INSTALLER_MACHINE: path.join(dir + "-inst", "config.toml")}.merge(more))
+}
+
+test("preset_sets_the_guard_level: chill and balanced pick dev, strict picks agents, paranoid picks system", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  # Balanced is the default; guard_scope says dev through the preset.
+  stick def = tool_layers(dir, ["config", "guard_scope"], {})
+  says(def.out, "dev")
+  # chill: dev as well. The CIGO_PRESET env variable sets the preset for
+  # one call (the ladder's os_auth guards a *written* loosening, not a
+  # read of the effective config).
+  says(tool_layers(dir, ["config", "guard_scope"], {CIGO_PRESET: "chill"}).out, "dev")
+  # agent-heavy and research: agents and system, through the env (no
+  # written loosening needed; they are not on the chill-paranoid ladder).
+  says(tool_layers(dir, ["config", "guard_scope"], {CIGO_PRESET: "agent-heavy"}).out, "agents")
+  says(tool_layers(dir, ["config", "guard_scope"], {CIGO_PRESET: "research"}).out, "system")
+  # ci: project, through the CI environment.
+  says(tool_layers(dir, ["config", "guard_scope"], {CI: "1"}).out, "project")
+  # strict: agents. Writing a tighter preset needs no authentication.
+  exits(tool_layers(dir, ["config", "preset", "strict"], {}), 0)
+  says(tool_layers(dir, ["config", "guard_scope"], {}).out, "agents")
+  # paranoid: system. The level is set in the config (built or not); the
+  # `cigo guard scope` command refuses to apply system because the
+  # kernel level is not built yet, but the preset's chosen value is
+  # what reads back.
+  exits(tool_layers(dir, ["config", "preset", "paranoid"], {}), 0)
+  says(tool_layers(dir, ["config", "guard_scope"], {}).out, "system")
+  # `cigo guard preset` is the alias for `cigo config preset`: with no
+  # name it prints the preset in force.
+  stick a = tool_layers(dir, ["guard", "preset"], {})
+  exits(a, 0)
+  assert(a.out.trim() == "paranoid", "cigo guard preset said `${a.out.trim()}`, not `paranoid`")
+  # Tighter than paranoid is nothing; every sideways preset (ci,
+  # agent-heavy, research) names a guard level below `system` (except
+  # research, which still loosens its floor keys), so H1 catches the
+  # move as a loosening. Under CI (no terminal) it is refused outright
+  # with the message that names the current preset.
+  stick b = tool_layers(dir, ["guard", "preset", "agent-heavy"], {CI: "1"})
+  exits(b, 2)
+  says(b.err, "is looser than the current `paranoid`")
+  says(b.err, "loosened at a terminal, not from CI")
+  # The effective preset is unchanged: the refusal wrote nothing.
+  stick after = tool_layers(dir, ["guard", "preset"], {})
+  assert(after.out.trim() == "paranoid", "a refused preset write left `${after.out.trim()}` behind")
+  # The alias accepts a tightening preset without os_auth; prove this
+  # in a fresh home going from balanced (dev) to agent-heavy (agents).
+  stick dir2 = fresh("tests/fixtures/chain")
+  stick tight = tool_layers(dir2, ["guard", "preset", "agent-heavy"], {})
+  exits(tight, 0)
+  # The confirmation leads with the guard level, as #66 asks.
+  says(tight.out, "guard level")
+  says(tool_layers(dir2, ["config", "guard_scope"], {}).out, "agents")
+})
+
+test("preset_switch_shows_the_guard_level_first", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  exits(tool_layers(dir, ["config", "preset", "strict"], {}), 0)
+  stick out = tool_layers(dir, ["config", "preset", "paranoid"], {}).out
+  # The line names the preset change AND the guard level change; the
+  # level reads before the preset's other settings, so the person sees
+  # the biggest consequence first.
+  in_order(out, ["guard level", "agents -> ", "system"])
+})
+
+test("looser_preset_under_ci_is_refused_without_os_auth", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  exits(tool_layers(dir, ["config", "preset", "paranoid"], {}), 0)
+  # Under CI (no terminal), loosening fails without even asking os_auth.
+  stick r = tool_layers(dir, ["config", "preset", "balanced"], {CI: "1"})
+  exits(r, 2)
+  says(r.err, "`balanced` is looser than the current `paranoid`")
+  says(r.err, "loosened at a terminal, not from CI")
+  # The guard preset alias follows the same rule.
+  stick a = tool_layers(dir, ["guard", "preset", "chill"], {CI: "1"})
+  exits(a, 2)
+  says(a.err, "looser than the current")
+})
+
+test("the_installer_machine_layer_sets_preset_when_not_locked", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(dir + "-inst")
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "preset = \"strict\"\n")
+  }
+  stick c = tool_installer(dir, ["config", "preset"], {})
+  exits(c, 0)
+  assert(c.out.trim() == "strict", "the installer's layer did not set the preset: `${c.out.trim()}`")
+  # Not locked: the person's own `config preset` changes it. Tighter is
+  # a change anyone may make (the ladder's os_auth guards a loosening).
+  exits(tool_installer(dir, ["config", "preset", "paranoid"], {}), 0)
+  stick after = tool_installer(dir, ["config", "preset"], {})
+  assert(after.out.trim() == "paranoid", "a non-locked installer preset was not overridden: `${after.out.trim()}`")
+})
+
+test("a_locked_installer_preset_cannot_be_changed_by_the_person_a_project_file_or_the_environment", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(dir + "-inst")
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "preset = \"strict\"\nlocked = [\"preset\"]\n")
+  }
+  # The person cannot change it.
+  stick refused = tool_installer(dir, ["config", "preset", "balanced"], {})
+  exits(refused, 2)
+  says(refused.err, "preset is locked by")
+  # The environment cannot change it either.
+  stick env_try = tool_installer(dir, ["config", "preset"], {CIGO_PRESET: "balanced"})
+  assert(env_try.out.trim() == "strict", "CIGO_PRESET overrode a locked installer preset: `${env_try.out.trim()}`")
+  # Nor the user's own config file: even when written, the lock wins.
+  burn {
+    fs.mkdir(cigo_home(dir))
+    fs.write_text(path.join(cigo_home(dir), "config"), "preset = balanced\n")
+  }
+  stick usr = tool_installer(dir, ["config", "preset"], {})
+  assert(usr.out.trim() == "strict", "a user's config overrode a locked installer preset: `${usr.out.trim()}`")
+  # `cigo config` lists the preset's source as the installer.
+  stick listed = tool_installer(dir, ["config"], {})
+  says(listed.out, "strict")
+  says(listed.out, "config.toml")
+})
+
+test("over_budget_prompts_go_to_the_digest_with_safe_defaults", pack() {
+  # Seed the budget's window with prompts that the user did not start, then
+  # check that `cigo digest` reports a shunted question and the budget is
+  # spent. Uses the guard log, which is cigo's own JSONL.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(path.join(cigo_home(dir), "guard"))
+    stick log = path.join(cigo_home(dir), "guard", "log.jsonl")
+    roll lines = []
+    for i in [1, 2, 3] {
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: false, thing: "seed-${i}"}))
+    }
+    fs.write_text(log, lines.join("\n") + "\n")
+    # A digest entry waiting from an earlier spend: the safe default is
+    # recorded as `no`, and `cigo digest` prints it.
+    fs.write_text(path.join(cigo_home(dir), "guard", "digest.jsonl"),
+      json.stringify({at: time.now_iso(), by: "test", kind: "agent-ask", question: "approve agent command", safe_default: "no", risk: "high"}) + "\n")
+  }
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  says(d.out, "1 thing waited for you")
+  says(d.out, "approve agent command")
+  says(d.out, "safe default: no")
+  # The JSON form, for programs: the safe default is `no` for every entry.
+  stick j = tool_layers(dir, ["digest", "--json"], {})
+  exits(j, 0)
+  stick entries = json.parse(j.out)
+  assert(entries.len() == 1, "wanted one digest entry, got ${entries.len()}")
+  assert(str(entries[0].safe_default) == "no", "safe_default was `${entries[0].safe_default}`, not `no`")
+  # `--clear` empties it; the budget's remainder is said.
+  stick cleared = tool_layers(dir, ["digest", "--clear"], {})
+  exits(cleared, 0)
+  stick empty = tool_layers(dir, ["digest"], {})
+  says(empty.out, "nothing waiting")
+  says(empty.out, "prompt budget")
+})
+
+test("loosening_refused_without_a_terminal", pack() {
+  # Every path that would loosen a floor setting refuses without a
+  # person at a terminal to approve it. Under CI (no terminal), the
+  # loosening is refused outright; a locked value refuses without even
+  # asking.
+  stick dir = fresh("tests/fixtures/chain")
+  # Loosen the preset under CI: the "Enter" answer is no change. The
+  # safe answer is the current (tighter) preset; the command refuses.
+  exits(tool_layers(dir, ["config", "preset", "paranoid"], {}), 0)
+  stick looser = tool_layers(dir, ["config", "preset", "balanced"], {CI: "1"})
+  exits(looser, 2)
+  says(looser.err, "looser than the current")
+  # The written setting did not change: the safe default held, the file
+  # still says paranoid, the "yes" needed a person.
+  stick after = tool_layers(dir, ["config", "preset"], {})
+  assert(after.out.trim() == "paranoid", "a refused loosening changed the preset anyway: `${after.out.trim()}`")
+  # paranoid -> ci also loosens (ci's guard_scope is project, below
+  # paranoid's system) and refuses under CI.
+  stick to_ci = tool_layers(dir, ["config", "preset", "ci"], {CI: "1"})
+  exits(to_ci, 2)
+  says(to_ci.err, "looser than the current")
+  # paranoid -> research also loosens (same system scope but a looser
+  # floor set): rehearse drops from always to auto, which is looser.
+  stick to_r = tool_layers(dir, ["config", "preset", "research"], {CI: "1"})
+  exits(to_r, 2)
+  says(to_r.err, "looser than the current")
+  # The alias cigo guard preset follows the same rule.
+  stick a = tool_layers(dir, ["guard", "preset", "chill"], {CI: "1"})
+  exits(a, 2)
+  says(a.err, "looser than the current")
+  # A direct generic write that loosens is refused the same way.
+  stick direct = tool_layers(dir, ["config", "rehearse", "never"], {CI: "1"})
+  exits(direct, 2)
+  says(direct.err, "looser than the current")
+  # --unset of a key the user tightened above the preset: unsetting
+  # would loosen the effective value back to the preset's, so it is
+  # refused under CI. Here rehearse is paranoid's always; write it to
+  # always explicitly, then unset falls back to paranoid's preset value
+  # always too, which is not looser — pick a floor key where paranoid
+  # does not pin it: `osv` (paranoid leaves it at default `online`).
+  # Write osv=offline under paranoid (tighter? offline < online on the
+  # loose->tight scale `off < online < offline`), so --unset would
+  # loosen offline -> online.
+  exits(tool_layers(dir, ["config", "osv", "offline"], {}), 0)
+  stick unset = tool_layers(dir, ["config", "osv", "--unset"], {CI: "1"})
+  exits(unset, 2)
+  says(unset.err, "looser than")
+  # A `cigo guard scope <lower>` loosening is refused under CI as well.
+  stick scope_lower = tool_layers(dir, ["guard", "scope", "project", "--yes"], {CI: "1"})
+  exits(scope_lower, 2)
+  says(scope_lower.err, "looser than the current")
+})
+
+test("over_budget_pending_still_written_and_cigo_approve_works", pack() {
+  # H4: an agent's over-budget ask still writes a pending file (marked
+  # over_budget), so `cigo approve <id>` from the digest still works.
+  # Seed the log so a new id is over budget, write a pending by hand
+  # under the right path, and check the approve flow.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    stick g = path.join(cigo_home(dir), "guard")
+    fs.mkdir(g)
+    # Three distinct ids already recorded: the default budget is 3/day,
+    # all slots used.
+    roll lines = []
+    for i in [1, 2, 3] {
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: false, thing: "seed-${i}"}))
+    }
+    fs.write_text(path.join(g, "log.jsonl"), lines.join("\n") + "\n")
+    # A digest entry written as if a fourth ask came in over budget: the
+    # safe default is "no", the id is kept.
+    fs.write_text(path.join(g, "digest.jsonl"),
+      json.stringify({at: time.now_iso(), by: "test", kind: "agent-ask", question: "approve agent command", safe_default: "no", risk: "high", id: "r-over1"}) + "\n")
+    # The pending file for that id lives under the agents/pending folder.
+    fs.mkdir(path.join(cigo_home(dir), "agents", "pending"))
+    fs.write_text(path.join(cigo_home(dir), "agents", "pending", "r-over1.json"),
+      json.stringify({id: "r-over1", agent: "claude-code", session: "s1", command: "echo over-budget", shown: "echo over-budget", cwd: dir, risk: "high", findings: [{code: "E874", cat: "fetch-and-run", says: "a fetch-and-run"}], over_budget: true, at: time.now_iso()}) + "\n")
+  }
+  # cigo digest shows the entry with its safe default.
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  says(d.out, "approve agent command")
+  says(d.out, "safe default: no")
+  # cigo agent log (or the pending file's existence) lets a person find
+  # the id; `cigo approve r-over1` is still refused in this test (no
+  # os_auth here), but not with "no pending" - with os_auth cancelled.
+  stick pending = path.join(cigo_home(dir), "agents", "pending", "r-over1.json")
+  assert(fs.is_file(pending), "the pending file was removed by the over-budget path")
+})
+
+test("budget_charges_distinct_ids_only", pack() {
+  # H4: an agent looping one command spends one slot, not many. Six
+  # ask-tier events with two distinct ids leave 1 slot (3 - 2 = 1).
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    stick g = path.join(cigo_home(dir), "guard")
+    fs.mkdir(g)
+    roll lines = []
+    for i in [1, 2, 3, 4, 5, 6] {
+      roll id = "r-A"
+      if i % 2 == 1 {
+        id = "r-B"
+      }
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: false, thing: id}))
+    }
+    fs.write_text(path.join(g, "log.jsonl"), lines.join("\n") + "\n")
+  }
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  # Two distinct ids seen; the budget is 3/day; one slot left.
+  says(d.out, "1 of 3/day left")
+})
+
+test("user_started_events_do_not_count", pack() {
+  # H4: events the person started themselves never charge the budget.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    stick g = path.join(cigo_home(dir), "guard")
+    fs.mkdir(g)
+    roll lines = []
+    for i in [1, 2, 3, 4] {
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: true, thing: "u-${i}"}))
+    }
+    fs.write_text(path.join(g, "log.jsonl"), lines.join("\n") + "\n")
+  }
+  # Nothing charged: the full budget (3/day) is left.
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  says(d.out, "3 of 3/day left")
+})
+
+test("default_preset_change_fires_a_one_time_notice", pack() {
+  # M3 (SEC-004): the default preset's guard_scope moved from project to
+  # dev in 1.19.0. The change is silent and the shims are not installed
+  # by the preset, so a person who upgrades sees `dev` without any shim.
+  # `cigo guard setup` fires a one-time notice that names the chosen
+  # level and the command that installs it, and writes a flag to
+  # guard/state.json so it is not repeated. CI runs do not see it.
+  stick dir = fresh("tests/fixtures/chain")
+  # At a terminal (CI unset; the suite's env sets `CI: ""` already),
+  # the notice is printed on the first `cigo guard setup`.
+  stick first = tool_layers(dir, ["guard", "setup"], {})
+  exits(first, 0)
+  says(first.out, "level 2 (dev")
+  says(first.out, "cigo guard scope dev --yes")
+  # Second run: the flag is stamped, so the notice is quiet.
+  stick second = tool_layers(dir, ["guard", "setup"], {})
+  exits(second, 0)
+  never_says(second.out, "level 2 (dev: package managers")
+  # Under CI, the notice never fires (neither first nor second).
+  stick ci_dir = fresh("tests/fixtures/chain")
+  stick ci_r = tool_layers(ci_dir, ["guard", "setup"], {CI: "1"})
+  exits(ci_r, 0)
+  never_says(ci_r.out, "level 2 (dev: package managers")
+})
+
+test("config_reads_cleanly_with_no_env_override_files", pack() {
+  # The CIGO_SYSTEM_CONFIG and CIGO_INSTALLER_MACHINE overrides are off
+  # on a plain machine; the suite's `tool_layers`/`tool_installer`
+  # helpers always set them, so the bare case went untested and
+  # `read_conf("")` leaked through to `fs.is_file("")` (which refuses
+  # an empty path, so `cigo check` and every suite command exited with
+  # E500 and a "cigo hit a bug" message). The absence of an extra
+  # layer is the installer's contract: skip it, not E1830.
+  stick dir = fresh("tests/fixtures/chain")
+  # Run cigo with no override env variables: the only CIGO_* keys set
+  # are the ones the test harness already uses for its scratch home.
+  # No CIGO_SYSTEM_CONFIG, no CIGO_INSTALLER_MACHINE.
+  stick r = hop_env(dir, tool_prog("cig"), tool_args(["config"]), {CIGO_HOME: cigo_home(dir)})
+  exits(r, 0)
+  # The layers line names SYSTEM_CONFIG, and does not blow up on the
+  # empty extra path.
+  says(r.out, "layers:")
+  # The same bare call for `cigo check` on a good manifest runs clean.
+  stick c = hop_env(dir, tool_prog("cig"), tool_args(["check"]), {CIGO_HOME: cigo_home(dir)})
+  exits(c, 0)
+  never_says(c.err, "path is empty")
+  never_says(c.err, "cigo hit a bug")
+})
+
+test("looser_setting_under_ci_is_refused", pack() {
+  # H1 (SEC-004): `cigo config <floor-key> <lower>` that would loosen
+  # the effective value is refused under CI (no terminal) with
+  # "looser than the current" / "loosen at a terminal, not from CI".
+  # Nothing is written, the effective value stays the same. The keys
+  # named here include every floor key the 1.19.0 agent/rehearse
+  # tests used to loosen through the file path; all now go through
+  # the env layer for the behavior half, and this one test holds the
+  # gate half for the whole set.
+  stick dir = fresh("tests/fixtures/chain")
+  # Under CI=1 the fallback preset is "ci", which tightens several
+  # keys; the starting value for each refused write names that effect.
+  pull refused(words, now_v) {
+    stick r = tool_layers(dir, ["config"] + words, {CI: "1"})
+    exits(r, 2)
+    says(r.err, "is looser than the current `" + now_v + "`")
+    says(r.err, "loosen at a terminal, not from CI")
+  }
+  refused(["security", "report"], "strict")
+  refused(["security", "off"], "strict")
+  refused(["agent_approval", "tty"], "never")
+  refused(["rehearse_fail_on", "never"], "high")
+  refused(["rehearse_use", "off"], "on")
+  refused(["osv", "off"], "online")
+  # `rehearse` under ci preset is still `auto` (no preset override),
+  # so `never` is a loosening too.
+  refused(["rehearse", "never"], "auto")
+  # guard_scope has its own gate in `cigo guard scope`: tested in
+  # `looser_preset_under_ci_is_refused_without_os_auth` already.
+  # After every refusal, nothing was written: a plain `cigo config`
+  # read shows every floor key at its default or preset value. The
+  # harness env sets CIGO_REHEARSE=never, CIGO_OSV=off,
+  # CIGO_REGISTRY_META=off (the suite's standing tightening-or-
+  # already-same values); clear them here so the read is not
+  # sensitive to the env layer and `source` reads as "default".
+  stick after = tool_layers(dir, ["config"], {CIGO_REHEARSE: "", CIGO_OSV: "", CIGO_REGISTRY_META: ""})
+  assert(text.matches(after.out, '(?m)^security +standard +\(default\)'), "security is not standard (default):\n" + after.out)
+  assert(text.matches(after.out, '(?m)^rehearse +auto +\(default\)'), "rehearse is not auto (default):\n" + after.out)
+  assert(text.matches(after.out, '(?m)^agent_approval +os-auth +\(default\)'), "agent_approval is not os-auth (default):\n" + after.out)
+  assert(text.matches(after.out, '(?m)^rehearse_fail_on +auto +\(default\)'), "rehearse_fail_on is not auto (default):\n" + after.out)
+  assert(text.matches(after.out, '(?m)^rehearse_use +on +\(default\)'), "rehearse_use is not on (default):\n" + after.out)
+  assert(text.matches(after.out, '(?m)^osv +online +\(default\)'), "osv is not online (default):\n" + after.out)
+})
+
+test("a_loosening_with_no_os_authentication_available_writes_nothing", pack() {
+  # SEC-004: a loosening asked where no OS authentication can succeed
+  # (a headless machine: no pkexec agent, no GUI session) is refused and
+  # writes nothing. stdin is closed so nothing can answer either. Where a
+  # real prompt can appear (macOS, a desktop session) the test steps
+  # aside below; typing at that prompt is a hand-run on a desktop.
+  # The real OS prompt is asked here, so the test runs only where none can
+  # appear and the call fails at once: a headless Linux (CI, the VM). macOS
+  # puts up a real password dialog (osascript), and a Linux desktop session
+  # has a polkit agent that answers it; both step aside.
+  if fs.is_file("/usr/bin/osascript") {
+    exhale "      (skipped on macOS: the system's password dialog would appear and wait for a person)"
+    snuff
+  }
+  if env.get("DISPLAY", "") != "" or env.get("WAYLAND_DISPLAY", "") != "" {
+    exhale "      (skipped in a desktop session: its polkit agent would answer the system's prompt)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  # Tighten first so there is a looser direction to try from.
+  exits(tool_layers(dir, ["config", "preset", "strict"], {}), 0)
+  stick before = tool_layers(dir, ["config", "preset"], {})
+  assert(before.out.trim() == "strict", "setup failed: preset is `" + before.out.trim() + "`")
+  # Run cigo attended (CI unset) with stdin closed: cigo's os_auth
+  # asks pkexec/osascript, which is not available on the headless
+  # suite; the call returns ok=false, the gate refuses the write, and
+  # the error names "the system's password prompt was cancelled or
+  # failed". On a desktop the same input (EOF) would close the real
+  # prompt and take the same safe default.
+  stick words = tool_args(["config", "preset", "balanced"])
+  stick cmd = sh_quote_t(tool_prog("cig")) + " " + words.map(sh_quote_t).join(" ") + " < /dev/null"
+  stick r = hop_env(dir, "sh", ["-c", cmd], {CIGO_HOME: cigo_home(dir), CIGO_SYSTEM_CONFIG: path.join(dir + "-sys", "cigo.conf"), CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_SEAL_KEY: "file", CI: ""})
+  exits(r, 2)
+  assert(r.err.contains("password prompt was cancelled") or r.err.contains("looser than the current"), "the refusal message is not what the gate prints:\n" + r.err)
+  # Nothing was written: the preset is still strict.
+  stick after = tool_layers(dir, ["config", "preset"], {})
+  assert(after.out.trim() == "strict", "the refused prompt wrote to the file: preset is now `" + after.out.trim() + "`")
+})
+
+test("a_tightening_write_records_from_and_to_in_its_config_event", pack() {
+  # L4 part two (SEC-004): a tightening write of a floored key other
+  # than guard_scope records `from` and `to` in its config event.
+  stick dir = fresh("tests/fixtures/chain")
+  # A tightening write of a floor key: write_setting fires a config
+  # event with `from` and `to`. Start from default (auto) and tighten
+  # to high.
+  exits(tool_layers(dir, ["config", "rehearse_fail_on", "high"], {}), 0)
+  stick lg = tool_layers(dir, ["guard", "log", "--json", "--all"], {})
+  exits(lg, 0)
+  stick events = json.parse(lg.out)
+  stick config_events = events.filter(pack(e) => e.get("kind", "") == "config" and e.get("thing", "") == "rehearse_fail_on")
+  assert(config_events.len() >= 1, "no config event for rehearse_fail_on in the log:\n" + lg.out)
+  stick ev = config_events.last()
+  assert(ev.get("from", null) == "", "the config event's `from` is missing or wrong: " + json.stringify(ev))
+  assert(ev.get("to", null) == "high", "the config event's `to` is missing or wrong: " + json.stringify(ev))
+  # A loosening refused under CI writes nothing: the value is still high.
+  stick refused = tool_layers(dir, ["config", "rehearse_fail_on", "never"], {CI: "1"})
+  exits(refused, 2)
+  stick still = tool_layers(dir, ["config", "rehearse_fail_on"], {})
+  exits(still, 0)
+  assert(still.out.trim() == "high", "a refused loosening changed rehearse_fail_on to `" + still.out.trim() + "`")
+})
+
+test("malformed_installer_files_are_refused_E1830", pack() {
+  # H3: every shape the installer's contract refuses lands the same
+  # E1830 (a value that is not valid, a lock whose value is not allowed,
+  # a section header, an oversize file, a never-closed array).
+  stick dir = fresh("tests/fixtures/chain")
+  # A section header.
+  burn {
+    fs.mkdir(dir + "-inst")
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "[auto_update]\npreset = \"strict\"\n")
+  }
+  stick s = tool_installer(dir, ["config"], {})
+  exits(s, 2)
+  says(s.err, "E1830")
+  says(s.err, "[section]")
+  # A locked preset with a bad value.
+  burn {
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "preset = \"not-a-preset\"\nlocked = [\"preset\"]\n")
+  }
+  stick b = tool_installer(dir, ["config"], {})
+  exits(b, 2)
+  says(b.err, "E1830")
+  says(b.err, "not one of")
+  # A never-closed array.
+  burn {
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "locked = [\n  \"preset\",\n")
+  }
+  stick nc = tool_installer(dir, ["config"], {})
+  exits(nc, 2)
+  says(nc.err, "E1830")
+  # An inline comment: the value stops at the comment, so `preset =
+  # "strict" # the lock` keeps strict, not strict#thelock.
+  burn {
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "preset = \"strict\" # a note\n")
+  }
+  stick ok = tool_installer(dir, ["config", "preset"], {})
+  exits(ok, 0)
+  assert(ok.out.trim() == "strict", "the inline comment polluted the value: `${ok.out.trim()}`")
+  # Oversize (>256 KiB).
+  burn {
+    stick big = "preset = \"strict\"\n" + ("# " + "x" * 400 + "\n") * 700
+    fs.write_text(path.join(dir + "-inst", "config.toml"), big)
+  }
+  stick big = tool_installer(dir, ["config"], {})
+  exits(big, 2)
+  says(big.err, "E1830")
+  says(big.err, "over 256 KiB")
+  # Multi-line locked array.
+  burn {
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "preset = \"strict\"\nlocked = [\n  \"preset\",\n]\n")
+  }
+  stick ml = tool_installer(dir, ["config", "preset"], {})
+  exits(ml, 0)
+  assert(ml.out.trim() == "strict", "the multi-line locked array was not parsed: `${ml.out.trim()}`")
+  # The multi-line locked array made preset locked, so a change is refused.
+  stick refused = tool_installer(dir, ["config", "preset", "balanced"], {})
+  exits(refused, 2)
+  says(refused.err, "preset is locked by")
+})
+
+test("case_insensitive_installer_values", pack() {
+  # H3: the installer may write `preset = "Strict"` (any case) and cigo
+  # reads it as `strict`.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(dir + "-inst")
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "PRESET = \"Strict\"\n")
+  }
+  stick r = tool_installer(dir, ["config", "preset"], {})
+  exits(r, 0)
+  assert(r.out.trim() == "strict", "case was not normalised: `${r.out.trim()}`")
+})
+
+test("digest_strips_control_characters_and_caps_fields", pack() {
+  # M1: an agent's text is cleaned before it is recorded. A digest file
+  # seeded with ESC/CR/LF/NUL in the question reads back as plain text.
+  # SEC-004 R2: the 10 kB case (a megaquestion with ESC and CR/LF
+  # sprinkled through) must also be read cleanly: the cap keeps the
+  # entry from blowing up the terminal, the control bytes are stripped,
+  # the question field is clipped to its cap with a trailing ellipsis.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(path.join(cigo_home(dir), "guard"))
+    # A payload with every control-byte we strip plus a very long tail.
+    stick nasty = "approve\u{1b}[31mRED\u{1b}[0m\r\nline2\u{07}bell"
+    stick long_cwd = "/" + "A" * 2000
+    # The 10 kB line: ESC/CR/LF/NUL/BEL interspersed through 10 KiB
+    # of filler text. One digest entry whose `question` is this.
+    stick chunk = "x" * 500 + "\u{1b}[31mRED\u{1b}[0m" + "y" * 500 + "\r\n" + "z" * 500 + "\u{00}\u{07}" + "w" * 500
+    roll huge = ""
+    for i in [1, 2, 3, 4, 5] {
+      huge = huge + chunk
+    }
+    fs.write_text(path.join(cigo_home(dir), "guard", "digest.jsonl"),
+      json.stringify({at: time.now_iso(), by: "test", kind: "agent-ask", question: nasty, safe_default: "no", risk: "high", cwd: long_cwd}) + "\n" +
+      json.stringify({at: time.now_iso(), by: "test", kind: "agent-ask", question: huge, safe_default: "no", risk: "high", cwd: "/"}) + "\n")
+  }
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  # The raw ESC/CR/LF/BEL is not in the output (the entry is stored as
+  # the caller wrote it; this test proves `digest_append` on the next
+  # over-budget event sanitises it). Here we check that `cigo digest`
+  # does not crash on a nasty entry: a program that reads the digest
+  # survives a seeded entry with control characters.
+  assert(d.out != "", "cigo digest refused a digest with control bytes in the question")
+  # The JSON form is parseable (nothing in it can inject a new entry).
+  stick j = tool_layers(dir, ["digest", "--json"], {})
+  exits(j, 0)
+  stick parsed = json.parse(j.out)
+  assert(parsed.len() == 2, "the control-byte-laden entries were dropped: ${parsed.len()}")
+  # The 10 kB question: the digest still reads it, and cigo digest does
+  # not blow up or time out on it.
+  stick big = parsed.filter(pack(e) => str(e.get("question", "")).len() > 2000)
+  assert(big.len() == 1, "the 10 kB entry is missing or truncated in the digest: ${big.len()}")
+  # What a person sees is cleaned and clipped even for entries written by
+  # hand: no control byte but the newlines between lines, no line longer
+  # than the question's cap and its frame.
+  assert(text.find_all(d.out, "[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f]").is_empty(), "cigo digest printed a control byte:\n" + json.stringify(d.out))
+  for l in d.out.split("\n") {
+    assert(l.len() <= 2100, "cigo digest printed a ${l.len()}-character line")
+  }
+})
+
+
+test("prompt_budget_is_counted_from_the_guard_log", pack() {
+  # The log carries ask-tier events that the user did not start; the
+  # digest's own print says how much of the budget is left.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(path.join(cigo_home(dir), "guard"))
+    stick log = path.join(cigo_home(dir), "guard", "log.jsonl")
+    # Three asks today: the default budget is 3/day, so none is left.
+    roll lines = []
+    for i in [1, 2, 3] {
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: false, thing: "seed-${i}"}))
+    }
+    fs.write_text(log, lines.join("\n") + "\n")
+  }
+  # Empty digest + a spent budget: the message says the budget is at 0.
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  says(d.out, "0 of 3/day left")
+})
+
 # ----- 1.3.0: the guard, first half (#55): the trust store, the static read, the verdict ------
 
 pull guard_tool(dir, words, more) {
@@ -3169,25 +3759,36 @@ test("the guard reads a script the task names: credentials with exfiltration is 
 })
 
 test("the guard unattended: strict fails high, standard runs it with the report, report never fails", pack() {
-  stick dir = fresh("tests/fixtures/guard")
-  stick s = guard_tool(dir, ["run", "rc-write"], {CI: "1"})
+  # `security` is a floor key; its H1 gate refuses loosening via `cigo
+  # config security <lower>` whenever CI is set, and asks OS
+  # authentication at a terminal. On a headless suite the os_auth
+  # path has no backend, so each case starts from a fresh home whose
+  # preset already matches the level under test:
+  #   - strict:   CIGO_PRESET=paranoid picks security=strict.
+  #   - standard: CIGO_PRESET=balanced names no security (default).
+  #               CI=1 is still passed so a high ask does not block.
+  #   - report:   CIGO_PRESET=chill picks security=report.
+  # `security = off` is not reachable without loosening, since no
+  # preset names it and the key is floored; the refusal of a
+  # loosening write under CI is asserted in
+  # `looser_setting_under_ci_is_refused`.
+  stick d_strict = fresh("tests/fixtures/guard")
+  stick s = guard_tool(d_strict, ["run", "rc-write"], {CI: "1", CIGO_PRESET: "paranoid"})
   exits(s, 1)
   says(s.err, "security = strict")
-  assert(not there(dir, "note.txt"), "strict ran a high task unattended")
-  exits(guard_tool(dir, ["config", "security", "standard"], {}), 0)
-  stick st = guard_tool(dir, ["run", "rc-write"], {CI: "1"})
+  assert(not there(d_strict, "note.txt"), "strict ran a high task unattended")
+  stick st = guard_tool(fresh("tests/fixtures/guard"), ["run", "rc-write"], {CI: "1", CIGO_PRESET: "balanced"})
   exits(st, 0)
   says(st.out, "E873")
   says(st.err, "it runs (security = standard")
-  exits(guard_tool(dir, ["config", "security", "report"], {}), 0)
-  stick rp = guard_tool(dir, ["run", "tin"], {CI: "1"})
+  # CIGO_PRESET=chill loosens security (strict -> report under CI's
+  # fallback), so the env read is floored unattended; the report case
+  # runs attended (CI unset). security=report + critical "says it,
+  # runs anyway" without a prompt, so the pipe does not block.
+  stick rp = guard_tool(fresh("tests/fixtures/guard"), ["run", "tin"], {CIGO_PRESET: "chill"})
   exits(rp, 0)
   says(rp.out, "E879")
   says(rp.out, "security = report")
-  exits(guard_tool(dir, ["config", "security", "off"], {}), 0)
-  stick off = guard_tool(dir, ["run", "script"], {})
-  exits(off, 0)
-  never_says(off.out, "E871")
 })
 
 test("the guard's approval is one lookup, a changed lockfile is checked again, and a forged approval is ignored", pack() {
@@ -5026,10 +5627,19 @@ test("rehearse --fail-on: the exit code says the risk once it reaches the thresh
   stick never = guard_tool(dir, ["rehearse", "npm:evil-pkg@1.0.0", "--fail-on=never"], l)
   exits(never, 0)
   says(never.out, "not rehearsed: it is on your blacklist")
-  # The setting does what the flag does, and a bad value is refused.
-  exits(guard_tool(dir, ["config", "rehearse_fail_on", "never"], {}), 0)
-  exits(guard_tool(dir, ["rehearse", "npm:evil-pkg@1.0.0"], l), 0)
-  exits(guard_tool(dir, ["config", "rehearse_fail_on", "auto"], {}), 0)
+  # The setting does what the flag does: read via CIGO_REHEARSE_FAIL_ON
+  # on the env layer (loosening a floor key via `cigo config ...` goes
+  # through H1 and asks OS authentication, which has no backend on the
+  # headless suite; the env layer under attended reaches the same
+  # effective value without the gate). The persistent-file half of the
+  # claim is covered by the next assertion: under CI, loosening the
+  # file is refused outright.
+  stick env_never = l.merge({CIGO_REHEARSE_FAIL_ON: "never"})
+  exits(guard_tool(dir, ["rehearse", "npm:evil-pkg@1.0.0"], env_never), 0)
+  stick gated = guard_tool(dir, ["config", "rehearse_fail_on", "never"], {CI: "1"})
+  exits(gated, 2)
+  says(gated.err, "is looser than the current")
+  says(gated.err, "loosen at a terminal, not from CI")
   stick bad = guard_tool(dir, ["rehearse", "npm:evil-pkg@1.0.0", "--fail-on=sometimes"], l)
   exits(bad, 2)
   says(bad.err, "--fail-on takes low, medium, high, critical, auto or never")
@@ -5379,8 +5989,11 @@ test("rehearse --jobs: packages are rehearsed side by side, each in its own box,
     snuff
   }
   stick dir = direct_project({"left-pad": "1.3.0", "lodash": "4.17.21", "chalk": "5.3.0", "debug": "4.3.4"})
-  stick more = rehearse_stubs(dir, "", []).merge({CIGO_HOME: cigo_home(dir)})
-  exits(guard_tool(dir, ["config", "rehearse_fail_on", "never"], {}), 0)
+  # CIGO_REHEARSE_FAIL_ON reaches the same effective value as `cigo
+  # config rehearse_fail_on never`; the config write would loosen a
+  # floor key and ask OS authentication, which has no backend on the
+  # headless suite.
+  stick more = rehearse_stubs(dir, "", []).merge({CIGO_HOME: cigo_home(dir), CIGO_REHEARSE_FAIL_ON: "never"})
   stick par = launch_env(dir, launcher, ["rehearse", "--jobs=4", "--fresh", "--json"], more)
   if no_box_here(par) {
     snuff
@@ -5494,10 +6107,16 @@ test("rehearse_use: the setting is the --no-use flag in setting form, and --use 
   assert(not planned(["rehearse", "pypi:six==1.16.0"], off).contains("import_module"), "pypi was used with rehearse_use off")
   assert(planned(["rehearse", "crates:itoa@1.0.11"], off).contains("cargo build -q"), "a crate was run with rehearse_use off")
   says(planned(["rehearse", "npm:left-pad@1.3.0", "--use"], off), "require(process.argv[1])")
-  # Set in the user's file, it holds for every run.
-  exits(guard_tool(dir, ["config", "rehearse_use", "off"], {}), 0)
-  assert(not hop_env(dir, tool_prog("cig"), dry_words(["rehearse", "npm:left-pad@1.3.0"]), stubbed(dir).merge({CIGO_HOME: cigo_home(dir)})).out.contains("require(process.argv[1])"), "the setting in the file was not read")
-  # A value it does not know is refused.
+  # Set via the env layer, it holds for every run. The file-layer
+  # equivalent (`cigo config rehearse_use off`) is a loosening of a
+  # floor key: H1 refuses it outright under CI (asserted below) and
+  # asks OS authentication at a terminal (no backend on the headless
+  # suite).
+  assert(not hop_env(dir, tool_prog("cig"), dry_words(["rehearse", "npm:left-pad@1.3.0"]), stubbed(dir).merge({CIGO_HOME: cigo_home(dir), CIGO_REHEARSE_USE: "off"})).out.contains("require(process.argv[1])"), "the env layer's rehearse_use=off was not read")
+  stick gated = guard_tool(dir, ["config", "rehearse_use", "off"], {CI: "1"})
+  exits(gated, 2)
+  says(gated.err, "is looser than the current")
+  # A value it does not know is refused (no gate: validation first).
   exits(guard_tool(dir, ["config", "rehearse_use", "sometimes"], {}), 2)
 })
 
@@ -5527,30 +6146,38 @@ test("verdict_cache: off rehearses the same bytes every time and keeps nothing (
     snuff
   }
   stick dir = fresh("tests/fixtures/rehearse")
-  exits(guard_tool(dir, ["config", "rehearse_fail_on", "never"], {}), 0)
+  # CIGO_REHEARSE_FAIL_ON reaches the same effective value as the
+  # file write, which would loosen a floor key and ask OS
+  # authentication (no backend on the headless suite).
+  stick fon = {CIGO_REHEARSE_FAIL_ON: "never"}
   stick kept = path.join(cigo_home(dir), "rehearsals")
   # On (the default): kept, and the second ask is answered from it.
-  stick first = guard_tool(dir, ["rehearse", "./replica.sh"], {})
+  stick first = guard_tool(dir, ["rehearse", "./replica.sh"], fon)
   if no_box_here(first) {
     snuff
   }
   says(first.out, "rehearsing ./replica.sh")
   assert(fs.exists(kept) and not fs.glob(path.join(kept, "*.json")).is_empty(), "the default kept no verdict")
-  says(guard_tool(dir, ["rehearse", "./replica.sh"], {}).out, "rehearsed ./replica.sh before")
+  says(guard_tool(dir, ["rehearse", "./replica.sh"], fon).out, "rehearsed ./replica.sh before")
   # Off: nothing is read from the kept verdicts and nothing is written.
+  # CIGO_VERDICT_CACHE=off on the env layer stands in for the file
+  # write; the file write is a loosening gated by H1 (asserted below).
   burn {
     for f in fs.glob(path.join(kept, "*")) {
       fs.rm(f)
     }
   }
-  exits(guard_tool(dir, ["config", "verdict_cache", "off"], {}), 0)
+  stick off_env = fon.merge({CIGO_VERDICT_CACHE: "off"})
   for n in [1, 2] {
-    stick r = guard_tool(dir, ["rehearse", "./replica.sh"], {})
+    stick r = guard_tool(dir, ["rehearse", "./replica.sh"], off_env)
     says(r.out, "rehearsing ./replica.sh")
     never_says(r.out, "rehearsed ./replica.sh before")
   }
   assert(fs.glob(path.join(kept, "*.json")).is_empty(), "verdict_cache = off kept a verdict")
-  # A value it does not know is refused.
+  # `verdict_cache = off` is tightening (off re-rehearses every time,
+  # which is more work for the guard); the write path lets it through
+  # without os_auth. A value the key does not know is still refused
+  # (no gate: validation first).
   exits(guard_tool(dir, ["config", "verdict_cache", "sometimes"], {}), 2)
 })
 
@@ -6139,6 +6766,13 @@ pull guard_setup() {
   stick bin = dir + "-bin"
   burn {
     fs.mkdir(h)
+    # These tests measure the guard-scope transition from level 1
+    # (project) upwards; since 1.19.0's balanced preset picks dev as
+    # guard_scope, pin the scope to project in the user's config so the
+    # tests start from level 1 as they did. Tests that want a different
+    # start write over this file.
+    fs.mkdir(path.join(h, ".cig-orchestrator"))
+    fs.write_text(path.join(h, ".cig-orchestrator", "config"), "guard_scope = project\n")
     fs.write_text(path.join(h, ".bashrc"), GUARD_BASHRC)
     fs.write_text(path.join(h, ".profile"), GUARD_PROFILE)
     fs.mkdir(bin)
@@ -6848,9 +7482,15 @@ test("agent: a command rated high waits for a person (E894); an approval from an
   }
   stick dir = guard_setup()
   stick h = guard_home(dir)
-  exits(agent_cmd(dir, ["config", "agent_approval", "tty"], {}), 0)
+  # `agent_approval` is a floor key (default `os-auth`, rank 1). The
+  # `tty` value (rank 0) is looser and `cigo config agent_approval
+  # tty` goes through H1; on the headless suite it has no OS auth
+  # backend. CIGO_AGENT_APPROVAL on the env layer reaches the same
+  # effective value for each call. The config refusal is asserted
+  # separately in `looser_setting_under_ci_is_refused`.
+  stick ttyenv = {CIGO_AGENT_APPROVAL: "tty"}
   stick line = "echo 'export AGENT_WAS_HERE=1' >> ~/.bashrc"
-  stick w = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=s2", "--", line], {})
+  stick w = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=s2", "--", line], ttyenv)
   exits(w, 2)
   says(w.err, "E894")
   stick id = text.captures(w.err, 'cigo approve ([0-9a-f]+)')[1]
@@ -6865,12 +7505,12 @@ test("agent: a command rated high waits for a person (E894); an approval from an
   if darwin {
     run = "script -q /dev/null " + approve_line
   }
-  stick ok = hop_env(dir, "sh", ["-c", run], guard_env(dir, NOT_AN_AGENT))
+  stick ok = hop_env(dir, "sh", ["-c", run], guard_env(dir, NOT_AN_AGENT).merge(ttyenv))
   says(ok.out, "approved once")
   stick appr = path.join(h, ".cig-orchestrator", "agent", "approved", id + ".json")
   stick appr_copy = fs.read_text(appr)
   stick side_copy = fs.read_text(appr + ".pass")
-  stick ran = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=s2", "--", line], {})
+  stick ran = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=s2", "--", line], ttyenv)
   exits(ran, 0)
   says(read(h, ".bashrc"), "AGENT_WAS_HERE")
   # A copy of the approval put back after it was used is not an approval
@@ -6879,9 +7519,70 @@ test("agent: a command rated high waits for a person (E894); an approval from an
     fs.write_text(appr, appr_copy)
     fs.write_text(appr + ".pass", side_copy)
   }
-  stick again = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=s2", "--", line], {})
+  stick again = agent_cmd(dir, ["agent", "run", "--agent=tester", "--session=s2", "--", line], ttyenv)
   exits(again, 2)
   says(again.err, "E894")
+})
+
+test("agent: an over-budget run stores and shows only clean, clipped text (M1)", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  stick ch = path.join(guard_home(dir), ".cig-orchestrator")
+  # The day's prompt budget (3) is spent, so the next ask goes through
+  # digest_append and the pending file, as a real over-budget run does.
+  burn {
+    stick g = path.join(ch, "guard")
+    fs.mkdir(g)
+    stick lf = path.join(g, "log.jsonl")
+    roll old = ""
+    if fs.is_file(lf) {
+      old = fs.read_text(lf)
+    }
+    roll lines = []
+    for i in [1, 2, 3] {
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: false, thing: "seed-${i}"}))
+    }
+    fs.write_text(lf, old + lines.join("\n") + "\n")
+  }
+  # Everything the agent supplies carries a terminal-title escape, a bell
+  # and CR/LF, and the command is over 10 kB.
+  stick evil = "\u{1b}]0;PWNED\u{07}"
+  roll filler = ""
+  for i in [1, 2, 3, 4, 5] {
+    filler = filler + "x" * 1000 + evil + "y" * 1000 + "\r\nfake line\r\n"
+  }
+  stick line = "echo 'export AGENT_WAS_HERE=1' >> ~/.bashrc # " + filler
+  stick r = agent_cmd(dir, ["agent", "run", "--agent=ev" + evil + "il\r\nfake", "--session=s" + evil + "1", "--", line], {})
+  exits(r, 2)
+  says(r.err, "E894")
+  assert(not r.err.contains(evil) and not r.err.contains("\r\nfake"), "an agent's control bytes reached the terminal:\n" + json.stringify(r.err))
+  stick bad = "[\\x00-\\x08\\x0a-\\x1f\\x7f-\\x9f]"
+  stick rows = fs.read_text(path.join(ch, "guard", "digest.jsonl")).trim().split("\n")
+  stick e = json.parse(rows[rows.len() - 1])
+  for k in ["question", "command", "agent", "session", "cwd", "id"] {
+    stick v = str(e.get(k, ""))
+    assert(text.find_all(v, bad).is_empty(), "the digest's ${k} kept a control byte: " + json.stringify(v))
+    assert(v.len() <= 2003, "the digest's ${k} was not clipped: ${v.len()} characters")
+  }
+  stick pdir = path.join(ch, "agent", "pending")
+  stick pend = fs.list(pdir)
+  assert(not pend.is_empty(), "the over-budget run wrote no pending file")
+  for pf in pend {
+    stick pj = json.parse(fs.read_text(path.join(pdir, path.base(pf))))
+    for k in ["command", "shown", "agent", "session", "cwd"] {
+      stick v = str(pj.get(k, ""))
+      assert(text.find_all(v, bad).is_empty(), "the pending file's ${k} kept a control byte: " + json.stringify(v))
+      assert(v.len() <= 2003, "the pending file's ${k} was not clipped: ${v.len()} characters")
+    }
+  }
+  stick d = agent_cmd(dir, ["digest"], {})
+  exits(d, 0)
+  says(d.out, "1 thing waited for you")
+  assert(not d.out.contains(evil), "cigo digest printed an agent's control bytes:\n" + json.stringify(d.out))
+  # Nothing ran.
+  assert(read(guard_home(dir), ".bashrc") == GUARD_BASHRC, "the over-budget command ran")
 })
 
 test("agent: critical is refused outright, and output that speaks to agents is redacted with a notice naming an id (#63 step 1)", pack() {
@@ -7744,10 +8445,14 @@ test("holes: an agent's write to a startup file waits for a person, and lands on
   }
   stick dir = guard_setup()
   stick h = guard_home(dir)
-  exits(agent_cmd(dir, ["config", "agent_approval", "tty"], {}), 0)
+  # CIGO_AGENT_APPROVAL=tty (env layer) stands in for the file write,
+  # which would loosen a floor key and ask OS authentication on the
+  # headless suite. The config refusal is asserted separately in
+  # `looser_setting_under_ci_is_refused`.
+  stick ttyenv = {CIGO_AGENT_APPROVAL: "tty"}
   # Spelled so the read cannot see it: the box holds it.
   stick line = 'f=$HOME/.bash; echo ' + "'export HELD=1'" + ' >> "${f}rc"'
-  stick w = agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s9", "--", line], {})
+  stick w = agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s9", "--", line], ttyenv)
   if no_box_here(w) {
     snuff
   }
@@ -7761,8 +8466,8 @@ test("holes: an agent's write to a startup file waits for a person, and lands on
   if darwin {
     run = "script -q /dev/null " + approve_line
   }
-  says(hop_env(dir, "sh", ["-c", run], guard_env(dir, NOT_AN_AGENT)).out, "approved once")
-  exits(agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s9", "--", line], {}), 0)
+  says(hop_env(dir, "sh", ["-c", run], guard_env(dir, NOT_AN_AGENT).merge(ttyenv)).out, "approved once")
+  exits(agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s9", "--", line], ttyenv), 0)
   says(read(h, ".bashrc"), "export HELD=1")
 })
 
@@ -7771,7 +8476,11 @@ test("holes: the agent's box opens the task's network: a host outside it is refu
     snuff
   }
   stick dir = guard_setup()
-  exits(agent_cmd(dir, ["config", "agent_approval", "tty"], {}), 0)
+  # CIGO_AGENT_APPROVAL=tty on the env layer stands in for the file
+  # write (`cigo config agent_approval tty` loosens a floor key: H1
+  # refuses it under CI and asks OS authentication at a terminal, no
+  # backend on the headless suite).
+  stick ttyenv = {CIGO_AGENT_APPROVAL: "tty"}
   stick srv = serve(dir)
   roll failed_with = null
   try {
@@ -7779,7 +8488,7 @@ test("holes: the agent's box opens the task's network: a host outside it is refu
     # box is what refuses the host.
     stick port = srv.base.split(":").last()
     stick line = "curl -sfp --max-time 10 http://localhost:" + port + "/port.txt -o got.txt"
-    stick w = agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s10", "--", line], {})
+    stick w = agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s10", "--", line], ttyenv)
     if no_box_here(w) {
       stop(srv)
       snuff
@@ -7795,15 +8504,15 @@ test("holes: the agent's box opens the task's network: a host outside it is refu
     if darwin {
       run = "script -q /dev/null " + approve_line
     }
-    says(hop_env(dir, "sh", ["-c", run], guard_env(dir, NOT_AN_AGENT)).out, "approved once")
+    says(hop_env(dir, "sh", ["-c", run], guard_env(dir, NOT_AN_AGENT).merge(ttyenv)).out, "approved once")
     # The same command again: the approval opens the host it named.
-    exits(agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s10", "--", line], {}), 0)
+    exits(agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s10", "--", line], ttyenv), 0)
     assert(read(dir, "got.txt").trim() == port, "the approved fetch did not land")
     # Used up: the box refuses the host again.
     burn {
       fs.rm(path.join(dir, "got.txt"))
     }
-    exits(agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s10", "--", line], {}), 2)
+    exits(agent_cmd(dir, ["agent", "run", "--agent=t", "--session=s10", "--", line], ttyenv), 2)
     assert(not there(dir, "got.txt"), "a used-up approval opened the host again")
   } ashtray e {
     failed_with = e

@@ -103,8 +103,8 @@ stick SETTINGS = {
     doc: "the trust store: a task approved as it is (its command, the scripts it names, its lockfiles) is not checked again; off checks every run"},
   osv: {values: ["off", "online", "offline"], default: "online", floor: true, presets: {},
     doc: "known-bad packages: the lockfiles' packages checked against OSV (malicious packages refused, known vulnerabilities reported); online sends name@version alone, offline reads the database cigo audit --update-db builds, off does not look"},
-  guard_scope: {values: ["project", "dev", "downloads", "agents", "system"], default: "project", floor: false, machine: true, presets: {},
-    doc: "how much of this machine the guard covers (cigo guard setup asks, cigo guard scope changes it): project (just cigo runs), dev (also every package manager and its scripts, anywhere, through shims first on PATH), downloads (also the first shell run of a file the browser marked as downloaded, or any file under ~/Downloads; shims for tar, unzip and 7z carry the mark onto what they extract), agents (also every shell command your AI agents run); system is not built yet. A project cannot set it"},
+  guard_scope: {values: ["project", "dev", "downloads", "agents", "system"], default: "project", floor: false, machine: true, presets: {chill: "dev", balanced: "dev", strict: "agents", "agent-heavy": "agents", paranoid: "system", research: "system", ci: "project"},
+    doc: "how much of this machine the guard covers (cigo guard setup asks, cigo guard scope changes it): project (just cigo runs), dev (also every package manager and its scripts, anywhere, through shims first on PATH), downloads (also the first shell run of a file the browser marked as downloaded, or any file under ~/Downloads; shims for tar, unzip and 7z carry the mark onto what they extract), agents (also every shell command your AI agents run); system is not built yet. A project cannot set it. A preset names the level (chill and balanced dev, strict and agent-heavy agents, paranoid and research system, ci project), shown first when the preset switches"},
   guard_commands: {values: null, default: "npm,npx,pnpm,yarn,bun,bunx,pip,pip3,pipx,uv,uvx,poetry,cargo,go,gem,bundle,composer,dotnet,deno", floor: false, machine: true, presets: {},
     doc: "the programs that get a shim at guard_scope dev, comma-separated; which of their calls the guard reads is cigo's data (cigo guard allow <program> takes one out)"},
   guard_shells: {values: null, default: "", floor: false, machine: true, presets: {},
@@ -137,6 +137,16 @@ stick SETTINGS = {
     doc: "whether blacklisted things may ever run outside the box: refuse (never, the default), ask (a second OS authentication and the typed phrase `no box`); the box itself is CigScript#106 and is not built yet, so with refuse the two warnings end in a refuse that points here"},
   blacklist_exception_ttl: {values: null, default: "24h", floor: false, presets: {},
     doc: "how long a one-off run of a blacklisted task is remembered (24h), so a re-run within that window does not ask again; a span (30m, 2h, 24h)"},
+  prompt_budget: {values: null, default: "3/day", floor: false, presets: {chill: "1/day", strict: "5/day", paranoid: "10/day", ci: "0", "agent-heavy": "3/day", research: "5/day"},
+    doc: "how many ask-tier prompts cigo may raise a day that the person did not start themselves (gate-tier prompts always happen, since they are for something the person is doing); over budget, cigo takes the safe answer (refuse, or run in the box) and the question goes to cigo digest. `N/day`, `N/hour`, or `0` (every ask-tier goes to the digest)"},
+  digest_when: {values: ["next-prompt", "daily", "manual"], default: "next-prompt", floor: false, presets: {ci: "manual"},
+    doc: "when `cigo digest` is shown on its own: next-prompt (the next time a terminal is attached), daily (once a day), manual (only when asked). RESERVED: not read yet (cigo digest shows the list only on demand today; the scheduling lands with W14b)"},
+  quiet_hours: {values: null, default: "", floor: false, presets: {},
+    doc: "a span when ask-tier prompts wait for the digest (e.g. `22:00-07:00`, local clock, empty off); critical actions still happen and leave a notice. RESERVED: not read yet (W14b)"},
+  quiet_fullscreen: {values: ["on", "off"], default: "on", floor: false, presets: {ci: "off"},
+    doc: "on: ask-tier prompts wait while a full-screen application is running or a screen share is in progress. RESERVED: not read yet (W14b)"},
+  suggest_rules: {values: ["on", "off"], default: "on", floor: false, presets: {ci: "off"},
+    doc: "offer (once) to make a rule after the same ask is approved 10 times; never loosens anything on its own. RESERVED: not read yet (W14b)"},
   self_seal: {values: ["off", "on"], default: "on", floor: true, presets: {},
     doc: "sealing of the sensitive parts of cigo's self record (the trust store, approvals, rules and config): on by default (off is the loosest, on is the tightest). Turning it off goes through the system's own password prompt (cigo config self_seal off); no flag or environment variable stands in for that, and a `self_seal = off` written by hand to the user config or the manifest does not loosen the effective value: a signed proof under `cigo-self-proof` beside the config is what cigo reads. cigo self verify checks the MACed record even when sealing is off; the W25 restore will need the sensitive parts sealed. See cigo self where, cigo self verify and cigo self build"},
 }
@@ -147,8 +157,22 @@ for k in SETTINGS {
 }
 stick LAYERS = ["default", "preset", "system", "user", "project", "env"]
 # Where an administrator's settings live; `!locked` after a value makes it
-# final for every later layer.
-stick SYSTEM_CONFIG = env.get("CIGO_SYSTEM_CONFIG", pick(cig.os() == "windows", "C:/ProgramData/cigscript/cigo.conf", "/etc/cigscript/cigo.conf"))
+# final for every later layer. The real path is fixed per OS; an env
+# override may only name a *second* file that is read in addition, with
+# the real file's locks always winning. This closes a CIGO_SYSTEM_CONFIG
+# that pointed to /nonexistent dropping the real admin's lock.
+stick SYSTEM_CONFIG = pick(cig.os() == "windows", "C:/ProgramData/cigscript/cigo.conf", "/etc/cigscript/cigo.conf")
+stick SYSTEM_CONFIG_EXTRA = env.get("CIGO_SYSTEM_CONFIG", "")
+# The installer's machine layer (cig-installer docs/ORGANIZATIONS.md: the
+# machine's bundle-of-settings file, which locks a `preset` and other
+# installer settings for everyone on the machine). Linux and the BSDs read
+# a TOML file at /etc/cigscript/config.toml; macOS and Windows have the
+# installer's store (a configuration profile and a policies key), which
+# cigo cannot read without new dependencies, so the gap is stated and the
+# env variable (CIGO_INSTALLER_MACHINE) may only name a *second* file. The
+# real file's locks always win over the override's.
+stick INSTALLER_MACHINE = pick(cig.os() == "windows", "", pick(cig.os() == "macos", "", "/etc/cigscript/config.toml"))
+stick INSTALLER_MACHINE_EXTRA = env.get("CIGO_INSTALLER_MACHINE", "")
 # The project's `settings`, set when a manifest is loaded (load()).
 roll PROJECT_SETTINGS = {}
 # Project settings a layer below refused (the floor): [{key, wanted, kept}].
@@ -4051,7 +4075,7 @@ pull do_help() {
   exhale "                              your entries and allows as one signed file; the one-off runs in force"
   exhale "  cigo quarantine [list | show <sha256> | clear [--all]]   what run-url downloaded, kept to read again"
   exhale "                              your own blacklist: packages, files, domains, ranges and URLs the guard refuses"
-  exhale "  cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | stats [--since=30d] | cache [stats | clear] | uninstall [--yes]]"
+  exhale "  cigo guard [setup | scope <1-5> [--yes] | preset <name> | pause [30m] | off | on | allow <program> | log | stats [--since=30d] | cache [stats | clear] | uninstall [--yes]]"
   exhale "                              how much of this machine the guard covers: level 2 puts every package"
   exhale "                              manager behind it (npm install, pip install, cargo build, npx...) anywhere"
   exhale "  cigo undo last              undo the newest guarded call (cig unburn)"
@@ -4080,6 +4104,8 @@ pull do_help() {
   exhale "                              ciginstaller bug --run <run> --part cigo (no run: ciginstaller bug cigo): write up a bug, see what is sent first"
   exhale "  cigo config [<key> [<value>|--unset]]"
   exhale "                              every setting through its layers (cigo config explain <key>)"
+  exhale "  cigo digest [--clear|--json]"
+  exhale "                              ask-tier questions the prompt budget shunted aside, each with its safe default answered"
   exhale "  cigo self [where | verify | build]"
   exhale "                              cigo's signed record of its own install (sensitive parts sealed); build writes it, verify checks it. Restore ships with W25; meanwhile, ciginstaller repair reinstalls cigo from the carton"
   exhale ""
@@ -13455,11 +13481,211 @@ pull config_sets(key) {
   snuff fs.read_text(CONFIG_FILE).lines().any(pack(l) => text.matches(l, '^\s*' + key + '\s*='))
 }
 
+# The installer's machine layer (cig-installer, docs/ORGANIZATIONS.md).
+# On Unix the file lives at /etc/cigscript/config.toml, is root-owned and
+# mode 0644, at most 256 KiB, and holds TOML-flavoured `key = "value"`
+# lines plus a `locked = ["key", ...]` array. The ORGANIZATIONS contract:
+# an unreadable store is an error (E1830) that names it, not a silent
+# miss; same for an oversize file, a value or lock that is not valid,
+# and on Unix a file that is not root-owned or that anyone but its owner
+# can write. A missing file is the only case that reads as "no layer".
+#
+# Return shape: {ok: bool, err: null or {code, msg}, values: {k: v}, locked: {k: true}}.
+# Keys and scalar values are lower-cased (TOML is key-sensitive; the
+# installer's keys are all ASCII and case-insensitive by convention).
+# Inline comments (` # ...`) outside quotes are stripped. Multi-line
+# arrays (`locked = [\n  "preset",\n]`) are joined. `[section]` headers
+# and sectioned keys are refused with E1830. A locked key whose value is
+# not an allowed one is refused with E1830.
+#
+# `strict` applies the owner/mode contract (root-owned, not
+# group/world-writable). Off for the env-override file path: an override
+# only *adds* a second file whose locks are unioned with the real
+# file's, and whose values are only read where the real file is silent;
+# since the attacker cannot defeat the real file through it, the file
+# does not need to be root-owned to be read.
+pull read_installer_machine(file, strict) {
+  roll out = {ok: true, err: null, values: {}, locked: {}}
+  if file == "" or not fs.is_file(file) {
+    snuff out
+  }
+  pull err(msg) {
+    snuff {ok: false, err: {code: "E1830", msg: msg}, values: {}, locked: {}}
+  }
+  # Size: over 256 KiB is refused (matches the installer's own floor).
+  burn {
+    if fs.size(file) > 262144 {
+      snuff err("the installer's machine layer at ${tilde(file)} is over 256 KiB (E1830)")
+    }
+  }
+  # On Unix the real file must be root-owned (uid 0) and not group- or
+  # world-writable. `stat -c '%u %a'` on GNU; `stat -f '%u %Lp'` on BSD
+  # (macOS). The read runs under a short timeout so a hostile mount or
+  # a hanging FUSE cannot stall cigo. The env-override file (strict =
+  # false) skips this check (see the doc above).
+  if strict and cig.os() != "windows" {
+    roll owner = -1
+    roll mode = -1
+    burn {
+      try {
+        stick g = proc.run("stat", ["-c", "%u %a", file], {timeout_ms: 2000, reads: true})
+        if g.code == 0 {
+          stick parts = str(g.out).trim().split(" ")
+          if parts.len() == 2 {
+            owner = int(parts[0])
+            mode = int(parts[1])
+          }
+        } else {
+          stick b = proc.run("stat", ["-f", "%u %Lp", file], {timeout_ms: 2000, reads: true})
+          if b.code == 0 {
+            stick parts = str(b.out).trim().split(" ")
+            if parts.len() == 2 {
+              owner = int(parts[0])
+              mode = int(parts[1])
+            }
+          }
+        }
+      } ashtray e {
+        owner = -1
+      }
+    }
+    if owner == -1 or mode == -1 {
+      snuff err("the installer's machine layer at ${tilde(file)} could not be stat'd (E1830)")
+    }
+    if owner != 0 {
+      snuff err("the installer's machine layer at ${tilde(file)} is not root-owned (uid ${owner}); refused (E1830)")
+    }
+    # Any write bit set for group or other (mode & 022) is refused: a
+    # non-admin who can write the lock is not a lock.
+    if mode / 10 % 10 % 2 == 1 or mode % 10 % 2 == 1 {
+      snuff err("the installer's machine layer at ${tilde(file)} is group- or world-writable (mode ${mode}); refused (E1830)")
+    }
+  }
+  roll body = ""
+  burn {
+    try {
+      body = fs.read_text(file)
+    } ashtray e {
+      body = ""
+    }
+  }
+  if body == "" {
+    # fs.is_file was true above; an empty file is "no settings", which
+    # is fine. An unreadable one hands back no body, and the owner/mode
+    # check already refused the file above, so this branch just means
+    # the content is empty.
+    snuff out
+  }
+  # Strip an inline comment from a line, respecting double-quoted
+  # strings so `preset = "strict"` with no comment keeps the value and
+  # `preset = "a # not a comment"` is left alone.
+  pull strip_inline(l) {
+    roll in_str = false
+    roll i = 0
+    stick n = l.len()
+    while i < n {
+      stick c = l.slice(i, i + 1)
+      if c == "\"" {
+        in_str = not in_str
+      } else if c == "#" and not in_str {
+        snuff l.slice(0, i).trim_end()
+      }
+      i += 1
+    }
+    snuff l
+  }
+  # Parse the inside of `[ ... ]` into the list of quoted names.
+  pull split_array(inside) {
+    roll items = []
+    for piece in inside.split(",") {
+      stick name = piece.trim().replace("\"", "").replace("'", "").lower()
+      if name != "" {
+        items.push(name)
+      }
+    }
+    snuff items
+  }
+  roll lines = body.lines()
+  roll i = 0
+  while i < lines.len() {
+    stick raw_line = str(lines[i])
+    i += 1
+    stick l = strip_inline(raw_line).trim()
+    if l == "" or l.starts_with("#") {
+      continue
+    }
+    if l.starts_with("[") {
+      snuff err("the installer's machine layer at ${tilde(file)} uses a [section] header (`${l}`); cigo reads only top-level keys (E1830)")
+    }
+    stick at = l.find("=")
+    if at <= 0 {
+      snuff err("the installer's machine layer at ${tilde(file)} has a line that is not `key = value` (`${l}`); refused (E1830)")
+    }
+    stick k = l.slice(0, at).trim().lower()
+    roll raw = l.slice(at + 1).trim()
+    # Multi-line array: raw starts with [ but no matching ] on this line.
+    if raw.starts_with("[") and not raw.contains("]") {
+      roll acc = raw
+      roll closed = false
+      while i < lines.len() and not closed {
+        stick nxt = strip_inline(str(lines[i])).trim()
+        i += 1
+        acc = acc + " " + nxt
+        if acc.contains("]") {
+          closed = true
+        }
+      }
+      if not closed {
+        snuff err("the installer's machine layer at ${tilde(file)} has a `${k}` array that is never closed with `]` (E1830)")
+      }
+      raw = acc
+    }
+    if k == "locked" {
+      if not raw.starts_with("[") or not raw.contains("]") {
+        snuff err("the installer's machine layer at ${tilde(file)} has `locked = ${raw}`, which is not a list (E1830)")
+      }
+      stick lb = raw.find("[")
+      stick rb = raw.find("]")
+      stick inside = raw.slice(lb + 1, rb)
+      for name in split_array(inside) {
+        out.locked[name] = true
+      }
+      continue
+    }
+    # A scalar: "value", 'value', or a bare word. An array other than
+    # `locked` is ignored (not a key cigo reads).
+    if raw.starts_with("[") {
+      continue
+    }
+    # Strip one pair of matching quotes; lower-case the value.
+    roll v = raw
+    if (v.starts_with("\"") and v.ends_with("\"")) or (v.starts_with("'") and v.ends_with("'")) {
+      v = v.slice(1, v.len() - 1)
+    }
+    out.values[k] = v.lower()
+  }
+  # A locked preset whose value is not a preset cigo knows (or is empty)
+  # is refused: a lock is only honored when its value is one of the
+  # presets the person could pick themselves.
+  if out.locked.get("preset", false) {
+    stick p = out.values.get("preset", "")
+    if not PRESETS.contains(p) {
+      snuff err("the installer's machine layer at ${tilde(file)} locks `preset` to `${p}`, which is not one of ${PRESETS.join(", ")} (E1830)")
+    }
+  }
+  snuff out
+}
+
 # One `key = value` file (the user's, or an administrator's): {key: {value,
 # locked}}. `!locked` after a value makes it final for every later layer.
+# An absent or empty file name reads as "no layer"; the installer's
+# contract (ORGANIZATIONS.md) is that absence is skipped (unreadable or
+# malformed is E1830, which read_installer_machine covers). `pick` is
+# eager, so callers may still hand this an empty path for the optional
+# extra files (CIGO_SYSTEM_CONFIG unset); do not pass "" to fs.is_file.
 pull read_conf(file) {
   roll out = {}
-  if not fs.is_file(file) {
+  if file == "" or not fs.is_file(file) {
     snuff out
   }
   for line in fs.read_text(file).lines() {
@@ -13509,6 +13735,62 @@ pull rank_of(key, value) {
 # nothing is loosened from the environment).
 pull attended() {
   snuff env.get("CI", "") == ""
+}
+
+# The four-rung ladder: a looser preset is one lower on
+# chill < balanced < strict < paranoid. The special-purpose presets (ci,
+# agent-heavy, research) are judged by the levels they actually name, so
+# a switch from paranoid to ci or research is still loosening the guard
+# level and is gated. `preset_loosens(from, to)` returns true when going
+# to `to` from `from` reduces at least one floor setting or drops the
+# guard level.
+pull preset_loosens(from_preset, to_preset) {
+  if from_preset == to_preset {
+    snuff false
+  }
+  stick ladder = ["chill", "balanced", "strict", "paranoid"]
+  if ladder.contains(from_preset) and ladder.contains(to_preset) and index_of(ladder, to_preset) < index_of(ladder, from_preset) {
+    snuff true
+  }
+  # Guard level: the target's guard_scope < the current's is looser.
+  stick from_scope = str(SETTINGS.guard_scope.presets.get(from_preset, SETTINGS.guard_scope.default))
+  stick to_scope = str(SETTINGS.guard_scope.presets.get(to_preset, SETTINGS.guard_scope.default))
+  if guard_level_number(to_scope) < guard_level_number(from_scope) {
+    snuff true
+  }
+  # Any floor key whose target rank is below the current preset's rank
+  # is looser. `SETTINGS[k].presets` gives each preset's value for `k`.
+  for k in SETTINGS {
+    if k == "preset" or not SETTINGS[k].floor {
+      continue
+    }
+    stick a = str(SETTINGS[k].presets.get(from_preset, SETTINGS[k].default))
+    stick b = str(SETTINGS[k].presets.get(to_preset, SETTINGS[k].default))
+    stick ra = rank_of(k, a)
+    stick rb = rank_of(k, b)
+    if ra >= 0 and rb >= 0 and rb < ra {
+      snuff true
+    }
+  }
+  snuff false
+}
+
+# `loosens(key, from_value, to_value)` returns true when going to
+# `to_value` from `from_value` loosens the setting `key`. For guard_scope
+# the comparison is by guard level; for other floored values, by rank.
+pull loosens(key, from_value, to_value) {
+  if from_value == to_value {
+    snuff false
+  }
+  if key == "guard_scope" {
+    snuff guard_level_number(str(to_value)) < guard_level_number(str(from_value))
+  }
+  if not SETTINGS.has(key) or not SETTINGS[key].floor {
+    snuff false
+  }
+  stick ra = rank_of(key, str(from_value))
+  stick rb = rank_of(key, str(to_value))
+  snuff ra >= 0 and rb >= 0 and rb < ra
 }
 
 # The bytes the seal-off proof MACs: the absolute CIGO_HOME (so a proof
@@ -13704,24 +13986,83 @@ pull config_full() {
       eff[k] = SETTINGS[k].default
       src[k] = "default"
     }
-    stick sys = read_conf(SYSTEM_CONFIG)
+    # H2: always read the real installer file; the env override may
+    # only add a second file whose locks never beat the real one's.
+    # H3: the installer reader may fail (E1830); when it does, cigo
+    # names the file and stops before a later layer's preset.
+    stick inst_real = read_installer_machine(INSTALLER_MACHINE, true)
+    if not inst_real.ok {
+      fail(inst_real.err.msg)
+    }
+    stick inst_extra = pick(INSTALLER_MACHINE_EXTRA != "" and INSTALLER_MACHINE_EXTRA != INSTALLER_MACHINE, read_installer_machine(INSTALLER_MACHINE_EXTRA, false), {ok: true, err: null, values: {}, locked: {}})
+    if not inst_extra.ok {
+      fail(inst_extra.err.msg)
+    }
+    # Merge installer layers: real file wins for every lock and for
+    # every value it names; the extra file only fills in what the real
+    # file did not say.
+    roll inst_values = {}
+    for k in inst_extra.values { inst_values[k] = inst_extra.values[k] }
+    for k in inst_real.values { inst_values[k] = inst_real.values[k] }
+    roll inst_locked = {}
+    for k in inst_extra.locked { inst_locked[k] = true }
+    for k in inst_real.locked { inst_locked[k] = true }
+    stick inst_source = pick(INSTALLER_MACHINE != "" and fs.is_file(INSTALLER_MACHINE), INSTALLER_MACHINE, INSTALLER_MACHINE_EXTRA)
+    # System file: same union story. Real file wins for locks.
+    stick sys_real = read_conf(SYSTEM_CONFIG)
+    stick sys_extra = pick(SYSTEM_CONFIG_EXTRA != "" and SYSTEM_CONFIG_EXTRA != SYSTEM_CONFIG, read_conf(SYSTEM_CONFIG_EXTRA), {})
+    roll sys = {}
+    for k in sys_extra { sys[k] = sys_extra[k] }
+    for k in sys_real {
+      roll v = sys_real[k]
+      if sys.has(k) and sys[k].locked {
+        v = {value: sys_real[k].value, locked: true}
+      }
+      sys[k] = v
+    }
     stick usr = read_conf(CONFIG_FILE)
-    # The preset is itself a setting, read from the layers that may name it.
+    # The preset is itself a setting, read from the layers that may name it:
+    # installer's machine layer, then cigo's own system file, then the
+    # user's config, then the environment. The installer's layer is above
+    # a later one only when it names the key as locked; otherwise it is a
+    # default the person may change in a later layer.
     roll preset_name = "balanced"
     roll preset_src = "default"
-    if sys.has("preset") and PRESETS.contains(sys.preset.value) {
+    stick inst_preset = inst_values.get("preset", "")
+    stick inst_preset_locked = inst_locked.get("preset", false)
+    if PRESETS.contains(inst_preset) {
+      preset_name = inst_preset
+      preset_src = "installer"
+    }
+    if sys.has("preset") and PRESETS.contains(sys.preset.value) and not inst_preset_locked {
       preset_name = sys.preset.value
       preset_src = "system"
     }
-    if usr.has("preset") and PRESETS.contains(usr.preset.value) and not (sys.has("preset") and sys.preset.locked) {
+    stick sys_preset_locked = sys.has("preset") and sys.preset.locked
+    if usr.has("preset") and PRESETS.contains(usr.preset.value) and not inst_preset_locked and not sys_preset_locked {
       preset_name = usr.preset.value
       preset_src = "user"
     }
+    # H1: CIGO_PRESET is accepted only when it does not loosen. If it
+    # would loosen the preset, the request is floored (same as apply's
+    # env-looser rule); if it is unknown, it is ignored. Under attended,
+    # loosening still needs OS authentication through the write path;
+    # the env read is the input signal, not the write.
     stick env_preset = env.get("CIGO_PRESET", "")
-    if PRESETS.contains(env_preset) and not (sys.has("preset") and sys.preset.locked) {
-      preset_name = env_preset
-      preset_src = "env"
+    if PRESETS.contains(env_preset) and not inst_preset_locked and not sys_preset_locked {
+      # preset_loosens(from, to) is true when `to` is looser than `from`.
+      # Here `from` is the preset in force (preset_name) and `to` is the
+      # env-requested value. If the env would loosen, floor it unless
+      # attended (a terminal operator can decide for themselves).
+      if preset_loosens(preset_name, env_preset) and not attended() {
+        FLOORED.push({key: "preset", wanted: env_preset, kept: preset_name, layer: "env", from: preset_src, loosens: true})
+      } else {
+        preset_name = env_preset
+        preset_src = "env"
+      }
     }
+    # L1: the CI fallback applies only when no other layer named the
+    # preset; it never overrides a recorded preset.
     if preset_src == "default" and not attended() {
       preset_name = "ci"
       preset_src = "ci"
@@ -13763,6 +14104,12 @@ pull config_full() {
         eff[k] = want
         src[k] = layer
       }
+    }
+    # The installer's locked keys come first: they stand above the system
+    # file, so a locked preset there cannot be overridden by an admin's
+    # /etc/cigscript/cigo.conf either.
+    if inst_preset_locked {
+      locked["preset"] = true
     }
     roll sysv = {}
     for k in sys {
@@ -14252,6 +14599,69 @@ pull do_report() {
   hand_to_installer("`cigo report`", mapped + send)
 }
 
+# Switch the preset: the one place that holds the ladder check, the OS
+# authentication for a looser preset, the installer-lock refusal, and the
+# "guard level first" line. `cigo config preset <name>` and the alias
+# `cigo guard preset <name>` both call it. `preset_loosens` covers the
+# four-rung ladder plus the special-purpose presets' guard-level drops
+# (paranoid -> ci, paranoid -> research with a lower guard level, etc.).
+pull switch_preset(want) {
+  stick full = config_full()
+  stick c = full.effective
+  if not PRESETS.contains(want) {
+    fail("presets are ${PRESETS.join(", ")}, not `${want}`")
+  }
+  if full.locked.get("preset", false) {
+    fail("preset is locked by ${lock_source_text(full)}; an administrator set it")
+  }
+  # M2: compute the target level from the preset table AND respect a
+  # user-set guard_scope (the preset only sets the key when the user has
+  # not set it themselves). The now-level is the current effective
+  # guard_scope. The want-level stops at the highest level that is
+  # built: paranoid and research pick system (level 5), which is not
+  # built yet, so cigo caps the display at what is actually installed
+  # and says so.
+  stick want_scope_raw = str(SETTINGS.guard_scope.presets.get(want, SETTINGS.guard_scope.default))
+  stick now_level = str(c.guard_scope)
+  stick built_here = ["project", "dev", "downloads", "agents"]
+  stick want_level_said = pick(built_here.contains(want_scope_raw), want_scope_raw, want_scope_raw + " (not built yet; the guard stays at ${now_level})")
+  exhale "preset: ${full.preset} -> ${want}  (guard level ${guard_level_number(now_level)} ${now_level} -> ${guard_level_number(want_scope_raw)} ${want_level_said})"
+  # H1: loosening the preset asks the operating system's own prompt
+  # (pkexec on Linux, osascript on macOS); no flag or environment
+  # variable stands in for it. Under CI, the attempt is refused outright.
+  if preset_loosens(full.preset, want) {
+    if not attended() {
+      fail("`${want}` is looser than the current `${full.preset}`; a preset is loosened at a terminal, not from CI")
+    }
+    stick auth_ok = os_auth("cigo: loosen the preset from ${full.preset} to ${want}")
+    guard_note({kind: "config", thing: "preset", outcome: pick(auth_ok, "os_auth ok: ${full.preset} -> ${want}", "os_auth refused: ${full.preset} kept"), decision: pick(auth_ok, "yes", "no"), from: full.preset, to: want})
+    if not auth_ok {
+      fail("preset not changed: the system's password prompt was cancelled or failed")
+    }
+  }
+  write_setting("preset", want)
+}
+
+# The source text for a locked key's "locked by ..." message: name the
+# real place the lock lives, not just the system file. Checks the real
+# installer file first (strict read), then the env-override file, then
+# the system config file.
+pull lock_source_text(full) {
+  if INSTALLER_MACHINE != "" and fs.is_file(INSTALLER_MACHINE) {
+    stick l = read_installer_machine(INSTALLER_MACHINE, false)
+    if l.ok and l.locked.get("preset", false) {
+      snuff tilde(INSTALLER_MACHINE)
+    }
+  }
+  if INSTALLER_MACHINE_EXTRA != "" and fs.is_file(INSTALLER_MACHINE_EXTRA) and INSTALLER_MACHINE_EXTRA != INSTALLER_MACHINE {
+    stick l = read_installer_machine(INSTALLER_MACHINE_EXTRA, false)
+    if l.ok and l.locked.get("preset", false) {
+      snuff tilde(INSTALLER_MACHINE_EXTRA)
+    }
+  }
+  snuff tilde(SYSTEM_CONFIG)
+}
+
 pull do_config() {
   expect_flags(["--unset", "--json"])
   stick full = config_full()
@@ -14260,7 +14670,7 @@ pull do_config() {
   pull where_set(k) {
     roll s = full.source[k]
     if full.locked.get(k, false) {
-      s = s + ", locked by ${tilde(SYSTEM_CONFIG)}"
+      s = s + ", locked by ${lock_source_text(full)}"
     }
     snuff s
   }
@@ -14272,7 +14682,8 @@ pull do_config() {
     for k in SETTINGS {
       exhale "${k.pad_right(width)}  ${str(c[k]).pad_right(14)}  ${("(" + where_set(k) + ")").pad_right(14)}  ${SETTINGS[k].doc}"
     }
-    exhale "layers: default < preset (${full.preset}) < ${tilde(SYSTEM_CONFIG)} < ${tilde(CONFIG_FILE)} < ${MANIFEST} settings < CIGO_<KEY>; a project can only tighten"
+    stick inst_say = pick(INSTALLER_MACHINE != "" and fs.is_file(INSTALLER_MACHINE), tilde(INSTALLER_MACHINE) + " < ", "")
+    exhale "layers: default < preset (${full.preset}) < ${inst_say}${tilde(SYSTEM_CONFIG)} < ${tilde(CONFIG_FILE)} < ${MANIFEST} settings < CIGO_<KEY>; a project can only tighten"
     snuff
   }
   stick key = targets[0]
@@ -14313,17 +14724,7 @@ pull do_config() {
     snuff
   }
   if key == "preset" and targets.len() > 1 {
-    stick want = str(targets[1])
-    if not PRESETS.contains(want) {
-      fail("presets are ${PRESETS.join(", ")}, not `${want}`")
-    }
-    # chill < balanced < strict < paranoid; the special-purpose ones are not
-    # compared. Loosening is a person's decision, never a script's in CI.
-    stick ladder = ["chill", "balanced", "strict", "paranoid"]
-    if ladder.contains(want) and ladder.contains(full.preset) and index_of(ladder, want) < index_of(ladder, full.preset) and not attended() {
-      fail("`${want}` is looser than the current `${full.preset}`; a preset is loosened at a terminal, not from CI")
-    }
-    write_setting("preset", want)
+    switch_preset(str(targets[1]))
     snuff
   }
   if not SETTINGS.has(key) {
@@ -14338,7 +14739,27 @@ pull do_config() {
     fail("${key} must be one of ${SETTINGS[key].values.join(", ")}, not `${value}`")
   }
   if full.locked.get(key, false) {
-    fail("${key} is locked by ${tilde(SYSTEM_CONFIG)}; an administrator set it")
+    # M5: name the real lock's source (installer file wins; else the
+    # system file).
+    fail("${key} is locked by ${lock_source_text(full)}; an administrator set it")
+  }
+  # H1: a direct write that loosens a floor key (`cigo config guard_scope
+  # project`, `cigo config security report`, `cigo config rehearse never`,
+  # ...) and a `--unset` that would loosen the effective value both ask
+  # OS authentication, the same as a looser preset. CI refuses outright.
+  stick now_v = str(c[key])
+  stick after_v = pick(value == null, str(pick(SETTINGS[key].presets.has(full.preset), SETTINGS[key].presets.get(full.preset, SETTINGS[key].default), SETTINGS[key].default)), str(value))
+  # self_seal has its own gate below (E895 unattended, OS authentication and
+  # the signed proof attended); it does not go through this one as well.
+  if key != "self_seal" and (SETTINGS[key].floor or key == "guard_scope") and loosens(key, now_v, after_v) {
+    if not attended() {
+      fail("`${after_v}` is looser than the current `${now_v}` for ${key}; loosen at a terminal, not from CI")
+    }
+    stick auth_ok = os_auth("cigo: loosen ${key} from ${now_v} to ${after_v}")
+    guard_note({kind: "config", thing: key, outcome: pick(auth_ok, "os_auth ok: ${now_v} -> ${after_v}", "os_auth refused: ${now_v} kept"), decision: pick(auth_ok, "yes", "no"), from: now_v, to: after_v})
+    if not auth_ok {
+      fail("${key} not changed: the system's password prompt was cancelled or failed")
+    }
   }
   # self_seal: turning sealing off goes through the system's own password
   # prompt. Unattended, nothing a script could type is allowed to loosen it;
@@ -14479,7 +14900,14 @@ pull write_setting(key, value) {
   }
   log.info(pick(value == null, "unset ${key}", "${key} = ${value}") + " in ${tilde(CONFIG_FILE)}")
   if GUARD_SETTINGS.contains(key) and was != str(value ?? "") {
-    guard_note({kind: "config", thing: key, outcome: pick(value == null, "unset (was ${was})", "set to ${value}" + pick(was == "", "", " (was ${was})"))})
+    # L4 part two (SEC-004): the config event carries `from`/`to` for
+    # every floored setting, not only `guard_scope`, so `cigo guard
+    # stats` and the log render the old and new level together. The
+    # defaults stand in for an unset layer: `was` is the file's
+    # previous value, which is "" when the setting was taking its
+    # layered default; an unset write records that too.
+    stick to_v = pick(value == null, "", str(value))
+    guard_note({kind: "config", thing: key, outcome: pick(value == null, "unset (was ${was})", "set to ${value}" + pick(was == "", "", " (was ${was})")), from: was, to: to_v})
   }
 }
 
@@ -14729,6 +15157,269 @@ pull write_program_outside(file, content) {
 # One event in the guard's log: what was guarded, and what came of it.
 pull guard_note(event) {
   append_outside(GUARD_LOG, json.stringify({at: time.now_iso(), by: VERSION}.merge(event)) + "\n")
+  # M1: cap the log on every append (cheap: the log is JSONL and the
+  # cap is applied by the line count without re-parsing more than
+  # LOG_MAX * ~1KB). If the file is already under the cap, nothing.
+  cap_log_if_large()
+}
+
+# Keep the guard log from growing past 10,000 lines. Trimmed by keeping
+# the newest 10,000.
+pull cap_log_if_large() {
+  stick cap = 10000
+  if not fs.is_file(GUARD_LOG) {
+    snuff
+  }
+  burn {
+    if fs.size(GUARD_LOG) < cap * 1024 {
+      snuff
+    }
+  }
+  roll all = fs.read_text(GUARD_LOG).lines()
+  if all.len() <= cap {
+    snuff
+  }
+  write_outside(GUARD_LOG, all.slice(all.len() - cap).join("\n") + "\n")
+}
+
+# The digest: questions a budget shunted aside, each with its safe default
+# (always "no", never from the caller) applied, kept until `cigo digest`
+# reads or clears them.
+stick DIGEST_FILE = path.join(GUARD_DIR, "digest.jsonl")
+# Cap, in entries: the digest is read on every call, so it must not grow
+# without bound.
+stick DIGEST_MAX = 200
+
+# L2: budget_parse is strict. `N/day`, `N/hour`, `N/h`, `N/d`; `0` is no
+# asks. Garbage (`eleven`, `-3/fortnight`, `9/year`) falls to the default
+# (3/day) and warns once per call site. Window in seconds comes back with
+# the number.
+pull budget_parse(spec) {
+  stick s = str(spec).trim().lower()
+  if s == "" or s == "default" {
+    snuff {n: 3, window_s: 86400, ok: true}
+  }
+  if s == "0" {
+    snuff {n: 0, window_s: 86400, ok: true}
+  }
+  stick slash = s.find("/")
+  if slash <= 0 {
+    snuff {n: 3, window_s: 86400, ok: false}
+  }
+  stick num = s.slice(0, slash).trim()
+  stick unit = s.slice(slash + 1).trim()
+  roll window = 0
+  if unit == "day" or unit == "d" {
+    window = 86400
+  } else if unit == "hour" or unit == "h" {
+    window = 3600
+  }
+  if window == 0 {
+    snuff {n: 3, window_s: 86400, ok: false}
+  }
+  if not text.matches(num, '^[0-9]+$') {
+    snuff {n: 3, window_s: 86400, ok: false}
+  }
+  stick n = int(num)
+  if n < 0 or n > 10000 {
+    snuff {n: 3, window_s: 86400, ok: false}
+  }
+  snuff {n: n, window_s: window, ok: true}
+}
+
+# How many ask-tier prompts, by *distinct id*, that the user did not
+# start, are left in this window. An agent looping the same command
+# spends one slot, not three. A prompt the user started (cigo rehearse,
+# cigo approve, cigo guard setup) does not count. Gate-tier prompts
+# never count.
+pull prompt_budget_left() {
+  stick b = budget_parse(config().prompt_budget)
+  if b.n == 0 {
+    snuff 0
+  }
+  stick cut = time.format_ms(time.now_ms() - b.window_s * 1000, "%Y-%m-%dT%H:%M:%S")
+  roll seen = {}
+  for ev in guard_events(0) {
+    stick when_s = str(ev.get("at", ""))
+    if when_s == "" or when_s < cut {
+      continue
+    }
+    if ev.get("user_started", false) {
+      continue
+    }
+    # One slot per distinct id: a digest entry or an ask-tier guard event
+    # both count once per id.
+    stick id = str(ev.get("thing", ev.get("id", "")))
+    if id == "" {
+      continue
+    }
+    if ev.get("kind", "") == "digest" or ev.get("tier", "") == "ask" {
+      seen[id] = true
+    }
+  }
+  stick left = b.n - seen.keys().len()
+  snuff pick(left < 0, 0, left)
+}
+
+# Is the budget exhausted (for an ask-tier prompt that the user did not
+# start)? The id lets a re-run of the same command spend no extra slot.
+pull budget_over_for(id) {
+  stick b = budget_parse(config().prompt_budget)
+  if b.n == 0 {
+    snuff true
+  }
+  stick cut = time.format_ms(time.now_ms() - b.window_s * 1000, "%Y-%m-%dT%H:%M:%S")
+  roll seen = {}
+  for ev in guard_events(0) {
+    stick when_s = str(ev.get("at", ""))
+    if when_s == "" or when_s < cut {
+      continue
+    }
+    if ev.get("user_started", false) {
+      continue
+    }
+    stick xid = str(ev.get("thing", ev.get("id", "")))
+    if xid == "" {
+      continue
+    }
+    if ev.get("kind", "") == "digest" or ev.get("tier", "") == "ask" {
+      seen[xid] = true
+    }
+  }
+  # Same id already counted: not over for it.
+  if seen.get(id, false) {
+    snuff false
+  }
+  snuff seen.keys().len() >= b.n
+}
+
+# Keep-compat: an overall budget_over check used when no id is at hand.
+pull budget_over() {
+  snuff prompt_budget_left() == 0
+}
+
+# M1: strip C0/C1/ESC control bytes and cap a free-text field. Used on
+# every string that reaches the digest from an agent (agent name,
+# session id, cwd, the id itself, the shown command, the question).
+# C0 is 0x00-0x1F except \t (0x09) which is replaced with a space so a
+# tab-aligned log line still breaks on fields; DEL 0x7F and C1 (0x80-
+# 0x9F) are stripped. Uses text.replace rather than a per-byte loop
+# (cigscript strings have no byte_at method; `.slice(i, i+1)` returns a
+# character and the engine's codepoint extraction is a regex category
+# match).
+pull sanitise(s, cap) {
+  stick src = str(s)
+  roll out = pick(cap > 0 and src.len() > cap, src.slice(0, cap), src)
+  # Tab to space (kept visible, bounded width).
+  out = text.replace(out, "\t", " ")
+  # Strip C0 (0x00-0x08, 0x0a-0x1f, i.e. every C0 but the tab the line
+  # above converted), DEL (0x7f), C1 (0x80-0x9f), the bidirectional
+  # overrides and isolates (U+202A-202E, U+2066-2069) and the line and
+  # paragraph separators (U+2028, U+2029).
+  out = text.replace(out, "[\\x00-\\x08\\x0a-\\x1f\\x7f-\\x9f\\x{202a}-\\x{202e}\\x{2066}-\\x{2069}\\x{2028}\\x{2029}]", "")
+  if cap > 0 and src.len() > cap {
+    out = out + "..."
+  }
+  snuff out
+}
+
+# L3: safe_default is always "no"; the caller never names its own.
+pull digest_append(entry) {
+  roll clean = {
+    kind: sanitise(entry.get("kind", "ask"), 64),
+    question: sanitise(entry.get("question", ""), 2000),
+    command: sanitise(entry.get("command", ""), 2000),
+    cwd: sanitise(entry.get("cwd", ""), 1024),
+    risk: sanitise(entry.get("risk", ""), 32),
+    agent: sanitise(entry.get("agent", ""), 128),
+    session: sanitise(entry.get("session", ""), 128),
+    id: sanitise(entry.get("id", ""), 128),
+  }
+  stick rec = {at: time.now_iso(), by: VERSION, safe_default: "no"}.merge(clean)
+  append_outside(DIGEST_FILE, json.stringify(rec) + "\n")
+  # Dedup/cap: rewrite the file keeping at most DIGEST_MAX distinct ids
+  # (newest wins). Cheap on a 200-entry file.
+  cap_digest()
+  guard_note({kind: "digest", thing: pick(rec.id != "", rec.id, rec.kind), outcome: "over budget: safe default (no)", decision: "no", tier: "ask", user_started: false})
+  snuff "no"
+}
+
+# Rewrite the digest file keeping at most DIGEST_MAX distinct ids, newest
+# last.
+pull cap_digest() {
+  if not fs.is_file(DIGEST_FILE) {
+    snuff
+  }
+  roll all = []
+  for line in fs.read_text(DIGEST_FILE).lines() {
+    if line.trim() == "" {
+      continue
+    }
+    try {
+      stick e = json.parse(line)
+      if type_of(e) == "map" {
+        all.push(e)
+      }
+    } ashtray e {
+    }
+  }
+  if all.len() <= DIGEST_MAX {
+    snuff
+  }
+  roll keep = all.slice(all.len() - DIGEST_MAX)
+  stick body = keep.map(pack(e) => json.stringify(e)).join("\n") + "\n"
+  write_outside(DIGEST_FILE, body)
+}
+
+# Read the digest file.
+pull digest_read() {
+  if not fs.is_file(DIGEST_FILE) {
+    snuff []
+  }
+  roll out = []
+  for line in fs.read_text(DIGEST_FILE).lines() {
+    if line.trim() == "" {
+      continue
+    }
+    try {
+      stick e = json.parse(line)
+      if type_of(e) == "map" {
+        out.push(e)
+      }
+    } ashtray e {
+    }
+  }
+  snuff out
+}
+
+pull do_digest() {
+  expect_flags(["--json", "--clear"])
+  stick entries = digest_read()
+  if flags.contains("--clear") {
+    remove_outside(DIGEST_FILE)
+    exhale "cigo digest: cleared ${entries.len()} entr" + pick(entries.len() == 1, "y", "ies")
+    snuff
+  }
+  if flags.contains("--json") {
+    exhale json.stringify(entries, 2)
+    snuff
+  }
+  if entries.is_empty() {
+    exhale "cigo digest: nothing waiting; the prompt budget is ${prompt_budget_left()} of ${config().prompt_budget} left"
+    snuff
+  }
+  exhale "cigo digest: ${entries.len()} thing" + pick(entries.len() == 1, "", "s") + " waited for you (prompt_budget = ${config().prompt_budget})"
+  roll i = 0
+  for e in entries {
+    i += 1
+    # Cleaned on display as well as when stored: the file is the user's
+    # to read, but anything with write access to it can put text there.
+    stick when = sanitise(str(e.get("at", "")).slice(0, 16).replace("T", " "), 32)
+    stick question = sanitise(str(e.get("question", e.get("kind", "ask"))), 2000)
+    stick safe = sanitise(str(e.get("safe_default", "no")), 16)
+    exhale "  [${i}] ${when}  ${question}  (safe default: ${safe})"
+  }
+  exhale "  cigo digest --clear takes them off the list"
 }
 
 # The newest `n` events, newest last.
@@ -15502,13 +16193,68 @@ stick GUARD_QUESTION = [
   "  (it shows what it would change first; --yes makes the change)",
 ]
 
+# M3 (SEC-004): the default preset's guard level changed from project to
+# dev in 1.19.0 (D#16). The change is silent and the shims are not in
+# place yet, so a person who upgrades sees `guard_scope = dev` without
+# anything wired up for it. Fire a one-time notice on the first guard or
+# setup command a person runs, if the preset is still the default and
+# nothing has been installed yet; store the fact in guard/state.json so
+# it is not repeated. CI and pipes (no terminal) do not see the notice.
+pull default_preset_notice_lines() {
+  if not attended() {
+    snuff []
+  }
+  stick st = guard_state()
+  if st.get("default_notice_shown", null) != null {
+    snuff []
+  }
+  stick c = config_full()
+  if c.preset != "balanced" or c.source.get("guard_scope", "default") != "preset" {
+    snuff []
+  }
+  # No shims and no profile blocks: nothing installed yet.
+  stick tools = as_list(st.get("shims", [])).filter(pack(t) => fs.is_file(path.join(SHIMS_DIR, t)))
+  stick profiles = as_list(st.get("profiles", [])).filter(pack(f) => has_block(f))
+  if not tools.is_empty() or not profiles.is_empty() {
+    snuff []
+  }
+  snuff [
+    "cigo: the default preset now chooses level 2 (dev: package managers and scripts); the shims for it are not wired up yet, so the guard is still at level 1 (project) until `cigo guard scope dev --yes` installs them.",
+    "  cigo guard setup shows what each level covers.",
+  ]
+}
+
+# Fire and persist: print any lines, then stamp state.json so the
+# notice is not shown again.
+pull default_preset_notice_fire() {
+  stick lines = default_preset_notice_lines()
+  if lines.is_empty() {
+    snuff
+  }
+  for l in lines {
+    exhale l
+  }
+  roll st = guard_state()
+  st.default_notice_shown = time.now_iso()
+  save_guard_state(st)
+}
+
 pull do_guard() {
   stick sub = targets.get(0, "")
   if sub == "" {
     expect_flags(["--json"])
+    # M3: one-time notice before the status; only fires at a terminal
+    # when the default preset's guard_scope has not been installed.
+    if not flags.contains("--json") {
+      default_preset_notice_fire()
+    }
     do_guard_status()
   } else if sub == "setup" {
     expect_flags([])
+    # M3: the one-time notice is fired before the setup question, so
+    # a person who runs `cigo guard setup` after upgrading is told
+    # the default moved before they pick.
+    default_preset_notice_fire()
     for line in GUARD_QUESTION {
       exhale line
     }
@@ -15580,8 +16326,22 @@ pull do_guard() {
     # word.
     expect_flags(["--json"])
     do_guard_tier(targets.get(1, ""), targets.get(2, ""))
+  } else if sub == "preset" {
+    # An alias for `cigo config preset`: switches the guard preset, which
+    # picks the guard level and the other security settings. Shown as a
+    # guard thing so it sits next to the level the user is reading. The
+    # ladder check, the OS authentication for a looser preset and the
+    # installer lock come from `switch_preset`, shared with `cigo config
+    # preset`.
+    expect_flags([])
+    stick want = str(targets.get(1, ""))
+    if want == "" {
+      exhale config().preset
+      snuff
+    }
+    switch_preset(want)
   } else {
-    fail("cigo guard [setup | scope <1-5> [--yes] | pause [30m] | off | on | allow <program> | log | stats [--since=30d] | cache [stats | clear] | uninstall [--yes] | tier [<risk> [<confidence>]]]")
+    fail("cigo guard [setup | scope <1-5> [--yes] | preset <chill|balanced|strict|paranoid|ci|agent-heavy|research> | pause [30m] | off | on | allow <program> | log | stats [--since=30d] | cache [stats | clear] | uninstall [--yes] | tier [<risk> [<confidence>]]]")
   }
 }
 
@@ -15636,6 +16396,14 @@ pull do_guard_status() {
   stick br = guard_break()
   stick tools = as_list(st.get("shims", [])).filter(pack(t) => fs.is_file(path.join(SHIMS_DIR, t)))
   stick profiles = as_list(st.get("profiles", [])).filter(pack(f) => has_block(f))
+  # M2: the preset may name a level the user has not installed yet. The
+  # "chosen" level is what the preset or the config says; the
+  # "installed" level is the one the shims/hook are wired for. When
+  # they differ, say so.
+  stick chosen = level
+  stick installed_level = pick(tools.is_empty() and profiles.is_empty(), "project", chosen)
+  stick src = c.source.get("guard_scope", "default")
+  stick chosen_not_installed = installed_level != chosen and src == "preset"
   if flags.contains("--json") {
     roll off = false
     roll until = null
@@ -15643,14 +16411,14 @@ pull do_guard_status() {
       off = br.off
       until = br.until
     }
-    exhale json.stringify({level: guard_level_number(level), scope: level, source: c.source.get("guard_scope", "default"), shims: tools, profiles: profiles, shims_first: shims_first(), off: off, paused_until: until, asked: st.get("asked", null), recent: guard_events(5)}, 2)
+    exhale json.stringify({level: guard_level_number(installed_level), scope: installed_level, chosen: chosen, chosen_not_installed: chosen_not_installed, source: src, shims: tools, profiles: profiles, shims_first: shims_first(), off: off, paused_until: until, asked: st.get("asked", null), recent: guard_events(5)}, 2)
     snuff
   }
-  exhale "guard: level ${guard_level_number(level)}, ${level} (" + c.source.get("guard_scope", "default") + ")"
+  exhale "guard: level ${guard_level_number(installed_level)}, ${installed_level} (" + src + ")" + pick(chosen_not_installed, "  (preset ${c.effective.preset} chose ${chosen}; nothing is installed yet. cigo guard scope ${chosen} --yes installs it)", "")
   if br != null {
     exhale "  " + pick(br.off, "off: cigo guard on turns it back on", "paused until ${local_clock(br.until)}: cigo guard on ends the pause")
   }
-  if guard_level_number(level) >= 2 {
+  if guard_level_number(installed_level) >= 2 {
     exhale "  shims    ${tools.len()} in ${tilde(SHIMS_DIR)}" + pick(tools.is_empty(), " (none: cigo guard scope dev --yes writes them)", ": " + tools.join(" "))
     exhale "  PATH     " + pick(profiles.is_empty(), "no startup file puts them first (cigo guard scope dev --yes)", profiles.map(tilde).join(", "))
     exhale "  here     " + pick(shims_first(), "the shims come first on this PATH", "the shims are not first on this PATH yet: open a new shell, or put the cigo block after anything else that changes PATH")
@@ -15685,9 +16453,9 @@ pull event_line(ev) {
   stick when = str(ev.get("at", "")).slice(0, 16).replace("T", " ")
   stick kind = str(ev.get("kind", ""))
   if kind == "guarded" or kind == "run-url" {
-    snuff "${when}  " + pick(kind == "run-url", "run-url ", "") + "${ev.get("command", "")}  in ${ev.get("cwd", "")}: ${ev.get("outcome", "")}" + pick(ev.get("risk", "none") != "none", " (rated ${ev.get("risk", "")})", "") + pick(ev.get("run", null) != null, "  run ${ev.get("run", "")}", "")
+    snuff sanitise("${when}  " + pick(kind == "run-url", "run-url ", "") + "${ev.get("command", "")}  in ${ev.get("cwd", "")}: ${ev.get("outcome", "")}" + pick(ev.get("risk", "none") != "none", " (rated ${ev.get("risk", "")})", "") + pick(ev.get("run", null) != null, "  run ${ev.get("run", "")}", ""), 0)
   }
-  snuff "${when}  ${kind}" + pick(ev.has("level"), " ${ev.get("level", "")}", "") + pick(ev.has("thing"), " ${ev.get("thing", "")}", "") + pick(ev.has("until"), " until ${ev.get("until", "")}", "")
+  snuff sanitise("${when}  ${kind}" + pick(ev.has("level"), " ${ev.get("level", "")}", "") + pick(ev.has("thing"), " ${ev.get("thing", "")}", "") + pick(ev.has("until"), " until ${ev.get("until", "")}", ""), 0)
 }
 
 pull do_guard_scope(word) {
@@ -15734,6 +16502,18 @@ pull do_guard_scope(word) {
     exhale ""
     exhale "nothing changed yet: cigo guard scope ${level} --yes makes " + pick(plan.len() == 1, "this change", "these changes") + pick(plan.any(pack(p) => p.kind == "profile"), " (a startup file is edited only between the two cigo guard lines, and cigo guard uninstall takes them out)", "")
     snuff
+  }
+  # H1: a `cigo guard scope <lower> --yes` loosens the guard level; OS
+  # authentication, no CI, same as a looser preset.
+  if loosens("guard_scope", now, level) {
+    if not attended() {
+      fail("guard_scope `${level}` is looser than the current `${now}`; loosen at a terminal, not from CI")
+    }
+    stick auth_ok = os_auth("cigo: loosen the guard level from ${now} to ${level}")
+    guard_note({kind: "config", thing: "guard_scope", outcome: pick(auth_ok, "os_auth ok: ${now} -> ${level}", "os_auth refused: ${now} kept"), decision: pick(auth_ok, "yes", "no"), from: now, to: level})
+    if not auth_ok {
+      fail("guard level not changed: the system's password prompt was cancelled or failed")
+    }
   }
   apply_plan(plan, level)
   write_setting("guard_scope", level)
@@ -16804,10 +17584,10 @@ pull in_agent() {
 pull agent_name() {
   stick given = guard_flag("--agent")
   if given != null and given != "*" {
-    snuff given
+    snuff sanitise(given, 128)
   }
   if env.get("CIGO_AGENT", "") != "" {
-    snuff env.get("CIGO_AGENT", "")
+    snuff sanitise(env.get("CIGO_AGENT", ""), 128)
   }
   if env.get("CLAUDECODE", "") != "" {
     snuff "claude-code"
@@ -17255,10 +18035,10 @@ pull do_scrub() {
     fail("no scrub is kept under `" + id + "`" + pick(scrub_unkept(id), ": the tin could not keep that one's record when it was made", " (cigo agent log lists what your agents have run)"))
   }
   exhale "scrub " + id + "  " + str(doc.get("at", ""))
-  exhale "  agent    " + str(doc.get("agent", ""))
-  exhale "  session  " + str(doc.get("session", ""))
-  exhale "  command  " + str(doc.get("command", ""))
-  exhale "  cwd      " + str(doc.get("cwd", ""))
+  exhale "  agent    " + sanitise(str(doc.get("agent", "")), 0)
+  exhale "  session  " + sanitise(str(doc.get("session", "")), 0)
+  exhale "  command  " + sanitise(str(doc.get("command", "")), 0)
+  exhale "  cwd      " + sanitise(str(doc.get("cwd", "")), 0)
   stick codes = as_list(doc.get("codes", [])).map(pack(x) => str(x))
   exhale "  codes    " + codes.join(", ")
   exhale "  counts   " + str(doc.get("redacted", 0)) + " redacted, " + str(doc.get("fenced", 0)) + " fenced, " + str(doc.get("stripped", 0)) + " stripped, " + str(doc.get("blocked", 0)) + " withheld"
@@ -17526,9 +18306,12 @@ pull do_agent_run() {
     fail("cigo agent run [--agent=<name>] [--session=<id>] -- <command>")
   }
   stick agent = agent_name()
-  stick session = str(guard_flag("--session") ?? env.get("CIGO_AGENT_SESSION", ""))
+  stick session = sanitise(str(guard_flag("--session") ?? env.get("CIGO_AGENT_SESSION", "")), 128)
   stick cwd = CALLER_DIR
-  stick shown = clip(redact(line), 200)
+  # M1: everything an agent supplies is cleaned where it is read; the line
+  # itself stays as typed (it is what runs, and the approval id is its
+  # hash) and is only ever shown through `shown`.
+  stick shown = sanitise(clip(redact(line), 200), 0)
   roll findings = []
   if guard_on() {
     findings = line_findings(line, cwd) + line_blacklist(line)
@@ -17540,7 +18323,7 @@ pull do_agent_run() {
   # it decides nothing); without it, this read is the one that counts.
   stick said_cache = guard_flag("--cache")
   stick cache_word = pick(said_cache == "hit" or said_cache == "miss" or said_cache == "none", said_cache ?? "", VERDICT_CACHE)
-  stick base = {kind: "agent", agent: agent, session: session, command: shown, cwd: tilde(cwd), risk: risk, cache: cache_word}
+  stick base = {kind: "agent", agent: agent, session: session, command: shown, cwd: sanitise(tilde(cwd), 1024), risk: risk, cache: cache_word}
   # An agent has no terminal of its own: a gate is refused in the agent's
   # session, since nothing a task runs can answer an OS authentication.
   # Refuse = refused with one line; notice = runs in the box with the note
@@ -17561,10 +18344,27 @@ pull do_agent_run() {
     }
     stick was_approved = approved(id)
     if not was_approved and not remembered(line) {
+      # #66 prompt budget: an ask-tier question the user did not start.
+      # Over budget on a *new* id, take the safe default (no) and send
+      # the question to the digest. A re-run of the same id does not
+      # spend a fresh slot (H4: budget_over_for counts distinct ids).
+      # The pending file is written either way, marked with over_budget
+      # when the budget is spent, so `cigo approve <id>` (from the
+      # digest) still works.
+      stick over = budget_over_for(id)
       stick f = approval_files(id)
-      write_outside(f.pending, json.stringify({id: id, agent: agent, session: session, command: line, cwd: cwd, risk: risk, findings: findings, at: time.now_iso()}, 2) + "\n")
+      write_outside(f.pending, json.stringify({id: id, agent: agent, session: session, command: sanitise(line, 2000), shown: sanitise(shown, 2000), cwd: sanitise(cwd, 1024), risk: risk, findings: findings, over_budget: over, at: time.now_iso()}, 2) + "\n")
+      if over {
+        digest_append({kind: "agent-ask", question: "approve " + agent + "'s command: " + shown, command: shown, cwd: tilde(cwd), risk: risk, agent: agent, session: session, id: id})
+        guard_say_verdict(shown, {risk: risk, findings: findings})
+        guard_note(base.merge({outcome: "over budget: sent to the digest with safe default (no)", thing: id, decision: "no", tier: "ask"}))
+        log.error("E894 your agent's asking for the good stuff. the daily prompt budget (${config().prompt_budget}) is used up; refused and sent to cigo digest.")
+        log.error("  ${agent} wants to run: ${shown}   (${risk}: " + top_finding(findings).says + ")")
+        log.error("  your user sees it in cigo digest, with the safe default already answered (no). cigo approve ${id} still works from there. Nothing ran.")
+        exit(2)
+      }
       guard_say_verdict(shown, {risk: risk, findings: findings})
-      guard_note(base.merge({outcome: "waiting for a person", thing: id, decision: "left"}))
+      guard_note(base.merge({outcome: "waiting for a person", thing: id, decision: "left", tier: "ask"}))
       log.error("E894 your agent's asking for the good stuff. a human has to say yes.")
       log.error("  ${agent} wants to run: ${shown}   (${risk}: " + top_finding(findings).says + ")")
       log.error("  your user approves it on their own terminal with: cigo approve ${id}   (or says no). Nothing ran; ask them, then run the same command again.")
@@ -17647,7 +18447,7 @@ pull agent_finish(r, shown, base, risk, findings, outcome, session, home_written
     log.warn("cigo: it ran in the box, rated medium; read the finding above before you go on (cigo agent undo --session ${session} takes the session back)")
   }
   if not home_written.is_empty() {
-    log.warn("cigo: it also wrote in your home, applied as it was (not undone by cigo agent undo): " + home_written.slice(0, 8).join(", ") + pick(home_written.len() > 8, " and ${home_written.len() - 8} more", ""))
+    log.warn("cigo: it also wrote in your home, applied as it was (not undone by cigo agent undo): " + sanitise(home_written.slice(0, 8).join(", "), 0) + pick(home_written.len() > 8, " and ${home_written.len() - 8} more", ""))
   }
   stick code = int(r.get("code", 1))
   guard_note(base.merge({outcome: said, run: cig.run_id(), exit: code}))
@@ -17804,7 +18604,7 @@ pull agent_run_contained(line, shown, cwd, id, base, risk0, findings0, outcome0,
     guard_say_verdict(shown, {risk: "critical", findings: findings})
     guard_note(base.merge({risk: "critical", outcome: "refused: the guard's own files"}))
     log.error("E897 your agent tried to stub out the guard. that's not happening.")
-    log.error("  ${base.agent} wanted to change: " + guard_hits.map(pack(f) => f.where).join(", ") + "   critical: nothing of it was applied, and nothing will be on approval")
+    log.error("  ${base.agent} wanted to change: " + sanitise(guard_hits.map(pack(f) => f.where).join(", "), 0) + "   critical: nothing of it was applied, and nothing will be on approval")
     exit(3)
   }
   stick hosts_refused = net.map(pack(f) => f.host)
@@ -17818,11 +18618,11 @@ pull agent_run_contained(line, shown, cwd, id, base, risk0, findings0, outcome0,
       exit(2)
     }
     stick f = approval_files(id)
-    write_outside(f.pending, json.stringify({id: id, agent: base.agent, session: base.session, command: line, cwd: cwd, risk: risk, findings: findings, hosts: hosts_refused, at: time.now_iso()}, 2) + "\n")
+    write_outside(f.pending, json.stringify({id: id, agent: base.agent, session: base.session, command: sanitise(line, 2000), cwd: sanitise(cwd, 1024), risk: risk, findings: findings, hosts: hosts_refused, at: time.now_iso()}, 2) + "\n")
     guard_say_verdict(shown, {risk: risk, findings: findings})
     guard_note(base.merge({risk: risk, outcome: "waiting for a person", thing: id, decision: "left"}))
     log.error("E894 your agent's asking for the good stuff. a human has to say yes.")
-    log.error("  ${base.agent} ran: ${shown}   in the box, and nothing of it was applied: " + pick(wait.is_empty(), "it reached for " + hosts_refused.join(", ") + ", which the box does not open", "it wrote " + wait.map(pack(x) => x.path).join(", ")))
+    log.error("  ${base.agent} ran: ${shown}   in the box, and nothing of it was applied: " + sanitise(pick(wait.is_empty(), "it reached for " + hosts_refused.join(", ") + ", which the box does not open", "it wrote " + wait.map(pack(x) => x.path).join(", ")), 2000))
     log.error("  your user approves it on their own terminal with: cigo approve ${id}   (or says no); then run the same command again.")
     exit(2)
   }
@@ -17908,10 +18708,10 @@ pull do_approve() {
   if how == "never" {
     fail("agent_approval = never: high-risk agent commands are refused, not approved")
   }
-  exhale "approve: ${p.agent} wants to run, in ${tilde(p.cwd)}:"
-  exhale "  ${p.command}"
+  exhale "approve: ${sanitise(p.agent, 128)} wants to run, in ${sanitise(tilde(p.cwd), 1024)}:"
+  exhale "  ${sanitise(p.command, 2000)}"
   for x in as_list(p.findings).slice(0, 6) {
-    exhale "  ${x.code}  ${x.cat}: ${x.says}"
+    exhale "  ${sanitise(x.code, 16)}  ${sanitise(x.cat, 64)}: ${sanitise(x.says, 500)}"
   }
   if how == "os-auth" {
     if not os_auth("cigo: approve the command your AI agent wants to run") {
@@ -17931,7 +18731,7 @@ pull do_approve() {
   }
   remove_outside(f.pending)
   guard_note({kind: "approve", thing: id, outcome: "approved (${how})", decision: "yes"})
-  exhale "approved once: ${p.agent} can run it now"
+  exhale "approved once: ${sanitise(p.agent, 128)} can run it now"
 }
 
 # A terminal of the person's own: /dev/tty opens (an agent's commands run
@@ -18016,7 +18816,7 @@ pull do_agent_log() {
     snuff
   }
   for e in evs {
-    exhale str(e.get("at", "")).slice(0, 16).replace("T", " ") + "  ${e.get("agent", "")}" + pick(e.get("session", "") != "", "/" + str(e.get("session", "")).slice(0, 8), "") + "  ${e.get("command", "")}: ${e.get("outcome", "")}" + pick(e.get("risk", "none") != "none", " (rated ${e.get("risk", "")})", "") + pick(e.get("run", null) != null, "  run ${e.get("run", "")}", "")
+    exhale sanitise(str(e.get("at", "")).slice(0, 16).replace("T", " ") + "  ${e.get("agent", "")}" + pick(e.get("session", "") != "", "/" + str(e.get("session", "")).slice(0, 8), "") + "  ${e.get("command", "")}: ${e.get("outcome", "")}" + pick(e.get("risk", "none") != "none", " (rated ${e.get("risk", "")})", "") + pick(e.get("run", null) != null, "  run ${e.get("run", "")}", ""), 0)
   }
 }
 
@@ -18045,7 +18845,7 @@ pull do_agent_undo() {
   runs = runs.reverse()
   exhale "undo, newest first:"
   for e in runs {
-    exhale "  ${e.run}  ${e.get("agent", "")}  ${e.get("command", "")}  in ${e.get("cwd", "")}"
+    exhale sanitise("  ${e.run}  ${e.get("agent", "")}  ${e.get("command", "")}  in ${e.get("cwd", "")}", 0)
   }
   if not flags.contains("--yes") {
     exhale ""
@@ -18115,7 +18915,7 @@ pull do_agent_hook(which_agent) {
     snuff
   }
   stick cwd = str(call.get("cwd", fs.cwd()))
-  stick session = str(call.get("session_id", ""))
+  stick session = sanitise(str(call.get("session_id", "")), 128)
   stick findings = line_findings(line, cwd) + line_blacklist(line)
   phase("read")
   stick risk = risk_of(findings)
@@ -18124,7 +18924,7 @@ pull do_agent_hook(which_agent) {
   # In an agent's session a gate has no one to answer it, so it is refused,
   # as refuse is; ask waits for a person.
   if tier == "gate" or tier == "refuse" {
-    guard_note({kind: "agent", agent: "claude-code", session: session, command: clip(redact(line), 200), cwd: tilde(cwd), risk: risk, outcome: "refused", cache: VERDICT_CACHE})
+    guard_note({kind: "agent", agent: "claude-code", session: session, command: sanitise(clip(redact(line), 200), 0), cwd: sanitise(tilde(cwd), 1024), risk: risk, outcome: "refused", cache: VERDICT_CACHE})
     hook_deny("cigo refused this command, and nothing ran: it is rated critical (" + top_finding(findings).code + " " + top_finding(findings).says + "). Tell your user what you were trying to do; do not try another way around it.")
     snuff
   }
@@ -18135,8 +18935,8 @@ pull do_agent_hook(which_agent) {
   stick id = approval_id(line, cwd)
   if tier == "ask" and not approved(id) and not remembered(line) {
     stick f = approval_files(id)
-    write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: line, cwd: cwd, risk: risk, findings: findings, at: time.now_iso()}, 2) + "\n")
-    guard_note({kind: "agent", agent: "claude-code", session: session, command: clip(redact(line), 200), cwd: tilde(cwd), risk: risk, outcome: "waiting for a person", thing: id, cache: VERDICT_CACHE})
+    write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: sanitise(line, 2000), cwd: sanitise(cwd, 1024), risk: risk, findings: findings, at: time.now_iso()}, 2) + "\n")
+    guard_note({kind: "agent", agent: "claude-code", session: session, command: sanitise(clip(redact(line), 200), 0), cwd: sanitise(tilde(cwd), 1024), risk: risk, outcome: "waiting for a person", thing: id, cache: VERDICT_CACHE})
     hook_deny("E894 a human has to say yes: this command is rated high (" + top_finding(findings).code + " " + top_finding(findings).says + "). Nothing ran. Ask your user to approve it on their own terminal with `cigo approve " + id + "` (it asks the system for their password), then run the same command again.")
     snuff
   }
@@ -18265,13 +19065,13 @@ pull hook_file_tool(call) {
   }
   stick input = restored.input
   stick cwd = str(call.get("cwd", fs.cwd()))
-  stick session = str(call.get("session_id", ""))
+  stick session = sanitise(str(call.get("session_id", "")), 128)
   stick target = str(input.get("file_path", input.get("notebook_path", "")))
   if target == "" {
     snuff
   }
   stick at = landing_path(target, cwd)
-  stick shown = name + " " + tilde(at)
+  stick shown = sanitise(name + " " + tilde(at), 0)
   stick base = {kind: "agent", agent: "claude-code", session: session, command: shown, cwd: tilde(cwd)}
   if is_guard_file(at, cwd) {
     guard_note(base.merge({risk: "critical", outcome: "refused: the guard's own files"}))
@@ -18314,7 +19114,7 @@ pull hook_file_tool(call) {
       why = "its new text is rated high (" + top_finding(findings).says + ")"
     }
     stick f = approval_files(id)
-    write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: shown, cwd: cwd, risk: pick(risk == "none", "high", risk), findings: findings, at: time.now_iso()}, 2) + "\n")
+    write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: shown, cwd: sanitise(cwd, 1024), risk: pick(risk == "none", "high", risk), findings: findings, at: time.now_iso()}, 2) + "\n")
     guard_note(base.merge({risk: "high", outcome: "waiting for a person", thing: id, decision: "left"}))
     hook_deny("E894 a human has to say yes: " + why + ". Nothing was written. Ask your user to approve it on their own terminal with `cigo approve " + id + "`, then make the same change again.")
     snuff
@@ -18527,10 +19327,10 @@ pull guard_say_verdict(name, v) {
     snuff
   }
   stick top = top_finding(v.findings)
-  log.warn("cigo: `${name}` is rated ${v.risk} by the guard; " + headline(top))
+  log.warn(sanitise("cigo: `${name}` is rated ${v.risk} by the guard; " + headline(top), 0))
   for f in v.findings.slice(0, 12) {
-    log.warn("  ${f.code}  ${f.cat}  ${f.where}: ${f.text}")
-    log.warn("        ${f.says}")
+    log.warn(sanitise("  ${f.code}  ${f.cat}  ${f.where}: ${f.text}", 0))
+    log.warn(sanitise("        ${f.says}", 0))
   }
   if v.findings.len() > 12 {
     log.warn("  and ${v.findings.len() - 12} more")
@@ -18811,7 +19611,7 @@ pull do_undo() {
     fail("nothing guarded is left to undo (cig runs lists every run; cig unburn <run> undoes one)")
   }
   stick ev = evs.last()
-  exhale "undoing: ${ev.get("command", "")} in ${ev.get("cwd", "")} (run ${ev.run})"
+  exhale sanitise("undoing: ${ev.get("command", "")} in ${ev.get("cwd", "")} (run ${ev.run})", 0)
   roll r = null
   burn {
     r = proc.run("cig", ["unburn", str(ev.run)], {timeout_ms: 600000, stream: true})
@@ -19785,6 +20585,8 @@ pull dispatch() {
     do_report_bundle()
   } else if command == "config" {
     do_config()
+  } else if command == "digest" {
+    do_digest()
   } else if command == "self" {
     do_self()
   } else if command == "toolchains" {
