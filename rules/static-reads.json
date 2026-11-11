@@ -1,0 +1,273 @@
+{
+  "name": "static-reads",
+  "notes": {
+    "weight_format": "decimal-string"
+  },
+  "rules": [
+    {
+      "cat": "fetch-and-run",
+      "code": "E874",
+      "id": "fetch-run-sh",
+      "re": "(curl|wget)\\s[^|\\n]*\\|\\s*(sudo\\s+)?(ba|z|da)?sh\\b",
+      "says": "downloads and runs whatever that server sends today",
+      "w": "0.6"
+    },
+    {
+      "cat": "fetch-and-run",
+      "code": "E874",
+      "id": "fetch-run-iex",
+      "re": "(?i)\\b(iwr|invoke-webrequest|invoke-restmethod)\\b[^|\\n]*\\|\\s*iex\\b",
+      "says": "downloads and runs whatever that server sends today",
+      "w": "0.6"
+    },
+    {
+      "cat": "fetch-and-run",
+      "code": "E874",
+      "id": "fetch-run-python",
+      "re": "python3?\\s+-c\\s+.{0,4}\\$\\((curl|wget)\\s",
+      "says": "runs code fetched from the network",
+      "w": "0.6"
+    },
+    {
+      "cat": "fetch-and-run",
+      "code": "E874",
+      "id": "fetch-run-http",
+      "re": "(curl|wget)\\s[^|\\n]*\\bhttp://[^|\\n]*\\|\\s*(sudo\\s+)?(ba|z|da)?sh\\b",
+      "says": "downloads and runs a script over plain http, which anyone on the way can swap",
+      "w": "0.8"
+    },
+    {
+      "cat": "fetch-and-run",
+      "code": "E874",
+      "id": "fetch-run-staged",
+      "re": "(curl|wget)\\s[^\\n]*(-o|-O|--output(-document)?)[=\\s]*\\S+[^\\n]*&&\\s*chmod\\s+([ugoa]*\\+x|[0-7]{3,4})\\s+\\S+[^\\n]*&&\\s*[\"\\x27]?(\\.{0,2}/|\\$)",
+      "says": "downloads a program, marks it executable and runs it",
+      "w": "0.7"
+    },
+    {
+      "cat": "fetch-and-run",
+      "code": "E874",
+      "id": "fetch-run-code",
+      "re": "\\b(exec|eval|compile)\\s*\\(\\s*(urllib\\.request\\.)?urlopen\\(|\\b(exec|eval)\\s*\\(\\s*requests\\.get\\(|\\beval\\s*\\(\\s*await\\b[^\\n]*\\bfetch\\(|\\bnew\\s+Function\\s*\\([^\\n]*\\bfetch\\(",
+      "says": "runs code it fetched from the network",
+      "w": "0.7"
+    },
+    {
+      "cat": "obfuscation",
+      "code": "E875",
+      "id": "obf-decode-run",
+      "re": "base64\\s+(-d|--decode)[^\\n]*\\|\\s*(sudo\\s+)?(ba|z|da)?sh\\b|\\beval\\s*\\(\\s*(atob|Buffer\\.from)\\s*\\(|\\bexec\\s*\\(\\s*(base64\\.b64decode|bytes\\.fromhex|codecs\\.decode)",
+      "says": "decodes something and runs it, so the text cannot be read as it is",
+      "w": "0.7"
+    },
+    {
+      "cat": "obfuscation",
+      "code": "E875",
+      "id": "obf-charcodes",
+      "re": "String\\.fromCharCode\\((\\s*\\d+\\s*,){8,}|(\\\\x[0-9a-fA-F]{2}){16,}",
+      "says": "code assembled from character codes or hex escapes",
+      "w": "0.6"
+    },
+    {
+      "cat": "credentials",
+      "code": "E871",
+      "id": "cred-ssh",
+      "re": "(~|\\$HOME|%USERPROFILE%)[/\\\\]+\\.ssh([/\\\\]*(\\*|id_[A-Za-z0-9_]+)?)(\\s|$|[\"\\x27;|&)])|/\\.ssh/id_[A-Za-z0-9_]+(\\s|$|[\"\\x27;|&)])",
+      "says": "names an SSH private key, or the whole folder",
+      "w": "0.8"
+    },
+    {
+      "cat": "credentials",
+      "code": "E871",
+      "id": "cred-cloud",
+      "re": "\\.aws[/\\\\]credentials|\\.config[/\\\\]gcloud|\\.azure[/\\\\]|\\.kube[/\\\\]config|\\.docker[/\\\\]config\\.json|\\.git-credentials|(~|\\$HOME)[/\\\\]\\.netrc\\b|(~|\\$HOME)[/\\\\]\\.npmrc\\b|\\.pypirc\\b|\\.cargo[/\\\\]credentials",
+      "says": "names a cloud, registry or git credential file",
+      "w": "0.8"
+    },
+    {
+      "cat": "credentials",
+      "code": "E871",
+      "id": "cred-browser",
+      "re": "(Login Data|logins\\.json|key[34]\\.db|Local State|[Cc]ookies(\\.sqlite)?)\\b|\\.mozilla[/\\\\]firefox[/\\\\]|google-chrome[/\\\\]|chromium[/\\\\]|BraveSoftware[/\\\\]|Microsoft[/\\\\]Edge[/\\\\]|Library[/\\\\](Safari|Keychains)\\b|\\.password-store\\b|\\b(1Password|Bitwarden|KeePassXC?)\\b",
+      "says": "names a browser's profile or credential store, a keychain or a password manager's",
+      "w": "0.7"
+    },
+    {
+      "cat": "persistence",
+      "code": "E873",
+      "id": "persist-rc",
+      "re": ">>?\\s*(~|\\$HOME|%USERPROFILE%)[/\\\\]\\.(bashrc|bash_profile|profile|zshrc|zprofile|zshenv)\\b|\\.config[/\\\\]fish[/\\\\]config\\.fish",
+      "says": "writes a shell startup file, which runs again at every login",
+      "w": "0.8"
+    },
+    {
+      "cat": "persistence",
+      "code": "E873",
+      "id": "persist-sched",
+      "re": "\\bcrontab\\s+-|/etc/cron\\.|[/\\\\]systemd[/\\\\]user[/\\\\]|LaunchAgents[/\\\\]|CurrentVersion\\\\Run\\b|\\\\Startup\\\\|schtasks\\s+/create",
+      "says": "schedules itself to run again later",
+      "w": "0.8"
+    },
+    {
+      "cat": "persistence",
+      "code": "E873",
+      "id": "persist-hook",
+      "re": "\\.git[/\\\\]hooks[/\\\\]",
+      "says": "writes a git hook, which runs on the next commit or push",
+      "w": "0.8"
+    },
+    {
+      "cat": "exfiltration",
+      "code": "E872",
+      "id": "exfil-sites",
+      "re": "(?i)(pastebin\\.com|transfer\\.sh|ngrok\\.io|requestbin|webhook\\.site|pipedream\\.net|hooks\\.slack\\.com|discord(app)?\\.com/api/webhooks|api\\.telegram\\.org/bot|burpcollaborator|oastify\\.com)",
+      "says": "talks to a paste site, a webhook catcher or a chat webhook",
+      "w": "0.8"
+    },
+    {
+      "cat": "exfiltration",
+      "code": "E872",
+      "id": "exfil-env",
+      "re": "\\b(env|printenv)\\b\\s*\\|\\s*(curl|wget|nc|ncat|socat)\\b|\\b(curl|wget)\\s[^\\n]*(-d|--data[a-z-]*|-F|--form|--post-data)[=\\s]*[\"\\x27]?[^\"\\x27\\n]*\\$\\{?[A-Za-z_]*(TOKEN|SECRET|PASSWORD|API_?KEY|ACCESS_?KEY)",
+      "says": "sends the environment, or a secret from it, to the network",
+      "w": "0.9"
+    },
+    {
+      "cat": "credentials",
+      "code": "E871",
+      "id": "cred-env",
+      "re": "\\b(env|printenv)\\b\\s*\\|\\s*(curl|wget|nc|ncat|socat)\\b|\\b(curl|wget)\\s[^\\n]*(-d|--data[a-z-]*|-F|--form|--post-data)[=\\s]*[\"\\x27]?[^\"\\x27\\n]*\\$\\{?[A-Za-z_]*(TOKEN|SECRET|PASSWORD|API_?KEY|ACCESS_?KEY)",
+      "says": "reads the environment's secrets to send them",
+      "w": "0.9"
+    },
+    {
+      "cat": "exfiltration",
+      "code": "E872",
+      "id": "exfil-socket",
+      "re": "\\|\\s*(nc|ncat|socat|telnet)\\s|\\bopenssl\\s+s_client\\b",
+      "says": "pipes into a raw network connection",
+      "w": "0.6"
+    },
+    {
+      "cat": "remote-control",
+      "code": "E872",
+      "id": "rev-shell",
+      "re": "/dev/(tcp|udp)/|\\b(ba|z|da)?sh\\s+-i\\b[^\\n]*[<>]&|\\bpty\\.spawn\\(",
+      "says": "opens a shell to someone else's machine: a reverse shell",
+      "w": "1.0"
+    },
+    {
+      "cat": "exfiltration",
+      "code": "E872",
+      "id": "exfil-rawip",
+      "re": "https?://(\\d{1,3}\\.){3}\\d{1,3}(:\\d+)?(/|\\s|$)",
+      "says": "talks to a raw address rather than a named host",
+      "w": "0.6"
+    },
+    {
+      "cat": "destructive",
+      "code": "E877",
+      "id": "destr-rm",
+      "re": "\\brm\\s+(-[a-zA-Z]*r[a-zA-Z]*\\s+|-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*\\s+)(--\\s+)?[\"\\x27]?(/\\*?|~/?\\*?|\\$\\{?HOME\\}?/?\\*?|\\*)(\\s|$|[\"\\x27;&|])",
+      "says": "removes the home, the root or everything here, recursively",
+      "w": "0.9"
+    },
+    {
+      "cat": "privilege",
+      "code": "E878",
+      "id": "priv-sudo",
+      "re": "(^|[;&|(\\s])(sudo|doas)\\s|\\bchmod\\s+[ugoa]*\\+s\\b|\\bsetuid\\s*\\(",
+      "says": "asks for root in a step that has no business becoming root",
+      "w": "0.6"
+    },
+    {
+      "cat": "privilege",
+      "code": "E878",
+      "id": "priv-setid",
+      "re": "\\bchmod\\s+([ugoa]*\\+[rwx]*s[rwx]*|0?[2-7][0-7]{3})\\s|\\bsetcap\\s",
+      "says": "makes a set-id file, or gives a program capabilities: it runs with rights its caller does not have",
+      "w": "0.8"
+    },
+    {
+      "cat": "backdoor",
+      "code": "E878",
+      "id": "priv-setid-shell",
+      "re": "\\bcp\\s+/(usr/)?bin/(ba|z|da|k)?sh\\s+\\S+[^\\n]*\\bchmod\\s+[ugoa]*\\+[rwx]*s",
+      "says": "makes a set-id copy of a shell: a way back in with its owner's rights",
+      "w": "1.0"
+    },
+    {
+      "cat": "self-defense",
+      "code": "E879",
+      "id": "self-tin",
+      "re": "\\b(rm|unlink|mv|cp|chmod|chown|truncate|shred|rmdir|del|tee)\\s[^\\n]*\\.cig(script|-orchestrator)[/\\\\](tin|runs|keys|config|inbox|trust)\\b|>\\s*[^\\s]*\\.cig(script|-orchestrator)[/\\\\](tin|runs|keys|config|inbox|trust)\\b|\\b(p?kill|killall)\\s+[^\\n]*\\b(cig|cigo)\\b",
+      "says": "acts on cig's or cigo's own state, or kills them by name",
+      "w": "1.0"
+    },
+    {
+      "cat": "self-defense",
+      "code": "E897",
+      "id": "self-guard",
+      "re": "(?:\\b(?:sed\\s+(?:-[a-zA-Z]*i[a-zA-Z]*|--in-place)\\S*|rm|unlink|mv|cp|tee|truncate|shred|chmod|chown|chattr|ln|install|rsync|dd|perl\\s+-[a-zA-Z]*i\\S*)\\b[^\\n;|&]*|>>?\\s*)[\"\\x27]?(?:~|\\$HOME|\\$\\{HOME\\}|/home/[^/\\s\"\\x27]+|/root)?/?\\.?(?:claude/settings(?:\\.local)?\\.json|config/cigscript\\b|cig-orchestrator\\b|cigscript\\b|local/share/cig-orchestrator\\b|local/bin/cigo?\\b)",
+      "says": "changes the guard's own files (the hook's settings, cigscript's config and blacklists, cig's and cigo's own folders)",
+      "w": "1.0"
+    },
+    {
+      "cat": "prompt-injection",
+      "code": "E886",
+      "id": "pi-addressed",
+      "re": "(?i)\\b(ignore|disregard)\\s+(all\\s+|any\\s+|the\\s+)?(previous|prior|above|earlier)\\s+(instructions|prompts|rules)|\\byou are (an?|the) (ai|assistant|language model)\\b|\\bas an ai\\b|\\bsystem prompt\\b|<\\|im_start\\|>|\\[INST\\]|<<SYS>>",
+      "says": "text addressed to an AI agent, telling it what to do",
+      "w": "0.7"
+    },
+    {
+      "cat": "prompt-injection",
+      "code": "E887",
+      "id": "pi-invisible",
+      "re": "[\\x{E0020}-\\x{E007F}]{4,}|[\\x{200B}\\x{200C}\\x{200D}\\x{2060}]{3,}|[\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}]",
+      "says": "invisible Unicode text, which a reader cannot see and an agent can",
+      "w": "0.8"
+    },
+    {
+      "cat": "prompt-injection",
+      "code": "E886",
+      "id": "pi-template",
+      "re": "<\\|(start_header_id|end_header_id|eot_id|system|user|assistant|tool_call|im_end)\\|>|</?(tool_call|function_calls|tool_use)>",
+      "says": "a chat template or a tool call written into text, to pass as the agent's own conversation",
+      "w": "0.7"
+    },
+    {
+      "cat": "prompt-injection",
+      "code": "E886",
+      "id": "pi-image",
+      "re": "!\\[[^\\]\\n]*\\]\\(\\s*https?://[^)\\s]*[?&][^)\\s=]+=[^)\\s]*(\\$\\{?[A-Za-z_]|\\{\\{|%7[Bb])",
+      "says": "a Markdown image whose address carries data out the moment an agent shows it",
+      "w": "0.7"
+    },
+    {
+      "cat": "prompt-injection",
+      "code": "E887",
+      "id": "pi-homoglyph",
+      "re": "\\b[A-Za-z_]+[\\x{0370}-\\x{03FF}\\x{0400}-\\x{04FF}]+[A-Za-z_]*\\b|\\b[\\x{0370}-\\x{03FF}\\x{0400}-\\x{04FF}]+[A-Za-z_]+\\b",
+      "says": "a word mixing Latin with look-alike Cyrillic or Greek letters, which reads as one name and is another",
+      "w": "0.6"
+    },
+    {
+      "cat": "evasion",
+      "code": "E888",
+      "id": "evade-container",
+      "re": "/proc/(1|self)/cgroup\\b|/\\.dockerenv\\b|/run/\\.containerenv\\b|\\bsystemd-detect-virt\\b|/sys/class/dmi/id/(product_name|sys_vendor|board_vendor)\\b|\\bdmidecode\\b[^\\n]*-s\\s+system-",
+      "says": "checks whether it runs in a container or a virtual machine, as code that behaves when watched does",
+      "w": "0.5"
+    },
+    {
+      "cat": "evasion",
+      "code": "E888",
+      "id": "evade-sleep",
+      "re": "(^|[;&|(\\s])sleep\\s+(\\d{3,}|[3-9]\\d)\\b|\\btime\\.sleep\\(\\s*(\\d{3,}|[3-9]\\d)(\\.\\d+)?\\s*\\)|\\bsetTimeout\\([^\\n]*,\\s*\\d{5,}\\s*\\)",
+      "says": "waits half a minute or more before it goes on, which outlasts a quick look",
+      "w": "0.4"
+    }
+  ],
+  "schema": "cigo-rules-1"
+}

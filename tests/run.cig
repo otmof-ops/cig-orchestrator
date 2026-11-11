@@ -116,7 +116,7 @@ pull hop_env(dir, program, words, more) {
       # folder, never your own. OSV is never asked: off, and under CI
       # (where the environment cannot loosen it) pointed at nothing, so it
       # fails at once; a test that wants it points it at a fixture.
-      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CIG_SEAL_KEY: "file", CI: "", DEMO_REMOTE: dir + "-remote", CIGO_REHEARSE: "never", CIGO_OSV: "off", CIGO_OSV_API: "file:///nonexistent/osv-api", CIGO_OSV_DUMPS: "file:///nonexistent/osv-dumps", CIGO_REGISTRY_META: "off", CIGO_REGISTRY_NPM: "file:///nonexistent/registry-npm", CIGO_REGISTRY_PYPI: "file:///nonexistent/registry-pypi", CIGO_REGISTRY_CRATES: "file:///nonexistent/registry-crates", CIGO_BLACKLIST_DIR: path.join(work, "blacklist.d"), CIG_INTERNAL_TRACKER_DIR: path.join(work, "tracker")}.merge(more),
+      env: {CIGSCRIPT_HOME: home, NO_COLOR: "1", CIG_DOCTOR: "0", CIG_SEAL_KEY: "file", CI: "", DEMO_REMOTE: dir + "-remote", CIGO_REHEARSE: "never", CIGO_OSV: "off", CIGO_OSV_API: "file:///nonexistent/osv-api", CIGO_OSV_DUMPS: "file:///nonexistent/osv-dumps", CIGO_REGISTRY_META: "off", CIGO_REGISTRY_NPM: "file:///nonexistent/registry-npm", CIGO_REGISTRY_PYPI: "file:///nonexistent/registry-pypi", CIGO_REGISTRY_CRATES: "file:///nonexistent/registry-crates", CIGO_BLACKLIST_DIR: path.join(work, "blacklist.d"), CIG_INTERNAL_TRACKER_DIR: path.join(work, "tracker"), CIGO_FLOOR_CACHE: "off"}.merge(more),
       timeout_ms: 120000,
     })
   }
@@ -1887,6 +1887,98 @@ test("a windows checkout runs the launcher: scripts are LF, the Windows files CR
   never_says(fs.read_text(launcher), "\r")
   says(fs.read_text(path.join(root, "bin/cigo.launch.ps1")), "CIGO_TOOL")
   says(fs.read_text(path.join(root, "bin/cigo.cmd")), "%~dpn0.launch.ps1")
+})
+
+test("W8: hook_program_rules_equal_orchestrate_rules", pack() {
+  # scripts/gen-rules.cig regenerates rules/*.json from the tables in
+  # orchestrate.cig (TIER_MATRIX, RULES, TOP_NPM, TOP_PYPI, TOP_CRATES).
+  # This asks `cigo __dump-rules` for each one and compares its bytes
+  # with the file: a drift means someone changed a table without running
+  # the generator, and the error below says so.
+  for name in ["tier-matrix", "static-reads", "packages"] {
+    stick file = path.join(root, "rules", name + ".json")
+    assert(fs.is_file(file), "rules/" + name + ".json is missing; run scripts/gen-rules.cig")
+    stick on_disk = fs.read_text(file)
+    roll r = null
+    burn {
+      r = proc.run(proc.which("cig"), ["run", tool, "--", "__dump-rules", name], {timeout_ms: 120000, reads: true, env: {NO_COLOR: "1", CIGSCRIPT_HOME: home, CIG_SEAL_KEY: "file", CI: "", CIG_INTERNAL_TRACKER_DIR: path.join(work, "tracker")}})
+    }
+    assert(r != null and r.code == 0, "cigo __dump-rules " + name + " failed: " + str(r.get("err", "")).trim())
+    roll live = str(r.out).replace("\r\n", "\n")
+    if not live.ends_with("\n") {
+      live = live + "\n"
+    }
+    stick want = on_disk.replace("\r\n", "\n")
+    assert(live == want, "rules/" + name + ".json is out of date; run scripts/gen-rules.cig")
+  }
+})
+
+test("W3: the launcher's floor cache keeps cig --version to one subprocess", pack() {
+  # The launcher checks cig's version on every call (#117). The cache
+  # under CIGO_HOME/cig-floor, keyed by path, size and mtime, keeps the
+  # fork to one: the second call is a hit, and only a change to the
+  # binary brings the subprocess back.
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick stub = dir + "-cig-stub"
+  stick counter = dir + "-cig-stub.counter"
+  burn {
+    fs.mkdir(stub)
+    # A stand-in cig: --version alone writes to the counter and prints a
+    # version the launcher takes as new enough; any other arg list is a
+    # silent exit, so the launcher's `exec cig run orchestrate.cig …`
+    # does not pay for the real tool here.
+    fs.write_text(path.join(stub, "cig"),
+      "#!/bin/sh\n" +
+      "if [ \"$#\" -eq 1 ] && [ \"$1\" = \"--version\" ]; then\n" +
+      "  printf 'x\\n' >> '" + counter + "'\n" +
+      "  echo 'cig 9.9.9'\n" +
+      "  exit 0\n" +
+      "fi\n" +
+      "exit 0\n"
+    )
+    proc.run("chmod", ["+x", path.join(stub, "cig")], {timeout_ms: 10000})
+  }
+  pull floor_count() {
+    if not fs.is_file(counter) {
+      snuff 0
+    }
+    snuff fs.read_text(counter).lines().filter(pack(l) => l != "").len()
+  }
+  stick cigo_h = dir + "-cigo-home"
+  # The suite turns the floor cache off by default (so one test's cache
+  # file does not land on another test's home); this test wants it on.
+  stick env2 = {PATH: stub + path_sep + env.get("PATH", ""), CIGO_HOME: cigo_h, CIGO_FLOOR_CACHE: "on"}
+  stick r1 = launch_env(dir, launcher, ["--version"], env2)
+  exits(r1, 0)
+  assert(floor_count() == 1, "first call: counter " + str(floor_count()) + ", expected 1")
+  stick cache = path.join(cigo_h, "cig-floor")
+  assert(fs.is_file(cache), "cig-floor cache was not written to " + cache)
+  stick r2 = launch_env(dir, launcher, ["--version"], env2)
+  exits(r2, 0)
+  assert(floor_count() == 1, "second call (a hit): counter " + str(floor_count()) + ", expected 1")
+  # Touch the stub: a new mtime is a miss, and the counter goes up.
+  burn {
+    proc.run("touch", ["-d", "2027-01-01T00:00:00Z", path.join(stub, "cig")], {timeout_ms: 10000})
+  }
+  stick r3 = launch_env(dir, launcher, ["--version"], env2)
+  exits(r3, 0)
+  assert(floor_count() == 2, "after touch: counter " + str(floor_count()) + ", expected 2")
+  # Enlarge the stub: a new size is a miss too.
+  burn {
+    stick cig_path = path.join(stub, "cig")
+    fs.write_text(cig_path, fs.read_text(cig_path) + "# padding so size changes\n")
+    proc.run("chmod", ["+x", cig_path], {timeout_ms: 10000})
+  }
+  stick r4 = launch_env(dir, launcher, ["--version"], env2)
+  exits(r4, 0)
+  assert(floor_count() == 3, "after size change: counter " + str(floor_count()) + ", expected 3")
+  # The cache's one line names the resolved cig and its version.
+  stick cached = fs.read_text(cache).trim()
+  says(cached, "9.9.9")
+  says(cached, path.join(stub, "cig"))
 })
 
 test("--max-steps without a number is an error, not a loop; --max-steps=N is accepted", pack() {
@@ -7771,8 +7863,10 @@ test("agent: the hook's read of a command is kept as a verdict pass: the same li
   stick second = hook(line)
   assert(second.out == first.out, "a read from the cache said something else:\n" + first.out + "\n" + second.out)
   assert(caches() == ["miss", "hit"], json.stringify(caches()))
-  # One byte more is another line.
-  hook(line + " ")
+  # One byte that changes a token is another line (#117 W11: whitespace is
+  # canonicalized, so a trailing space is the same line, but changing the
+  # URL's path is a new question).
+  hook(line + "x")
   assert(caches().len() == 3 and caches()[2] == "miss", json.stringify(caches()))
   stick st = agent_cmd(dir, ["guard", "cache", "stats", "--json"], {})
   exits(st, 0)
@@ -7814,6 +7908,131 @@ test("the verdict cache gives every detection corpus sample, read as a command l
   }
   assert(n >= 52, "the corpus is short: ${n}")
   assert(differ.is_empty(), "a read from the cache differs from a fresh one: ${differ.join(", ")}")
+})
+
+test("W11: canonical_forms_share_an_entry", pack() {
+  # The hook key canonicalizes runs of whitespace OUTSIDE quotes: `ls
+  # -la .` with one or two spaces land on the same entry, so the
+  # second call is a hit.
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  pull check(line) {
+    stick r = hop_env(dir, "sh", ["-c", 'printf "%s" "$1" | cig run "$2" -- guard check-line --json', "sh", line, tool], guard_env(dir, NOT_AN_AGENT))
+    exits(r, 0)
+    snuff json.parse(r.out)
+  }
+  stick mark = str(time.now_ms())
+  stick a = check("ls  -la  ." + " #" + mark)
+  stick b = check("ls -la . #" + mark)
+  assert(a.cache == "miss" and b.cache == "hit", "a=" + a.cache + " b=" + b.cache + "; a.findings=" + json.stringify(a.findings))
+})
+
+test("W11: quoted_whitespace_is_not_canonicalized", pack() {
+  # Whitespace inside quotes is bytes the shell keeps: `echo "a  b"`
+  # and `echo "a b"` are different commands. Both calls miss.
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  pull check(line) {
+    stick r = hop_env(dir, "sh", ["-c", 'printf "%s" "$1" | cig run "$2" -- guard check-line --json', "sh", line, tool], guard_env(dir, NOT_AN_AGENT))
+    exits(r, 0)
+    snuff json.parse(r.out)
+  }
+  stick mark = str(time.now_ms())
+  stick a = check("echo \"a  b\" #q-" + mark)
+  stick b = check("echo \"a b\" #q-" + mark)
+  assert(a.cache == "miss" and b.cache == "miss", "quoted whitespace shared an entry: a=" + a.cache + " b=" + b.cache)
+})
+
+test("W11: rule_change_invalidates", pack() {
+  # The hook key mixes in a once-per-process hash of every table and
+  # constant the scan uses. CIGO_SUITE=1 lets the suite stir the hash
+  # (CIGO_RULES_SALT) to prove the first call under a new salt misses
+  # with no VERSION bump and no file change.
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  pull check(line, salt) {
+    stick more = {CIGO_SUITE: "1", CIGO_RULES_SALT: salt}
+    stick r = hop_env(dir, "sh", ["-c", 'printf "%s" "$1" | cig run "$2" -- guard check-line --json', "sh", line, tool], guard_env(dir, NOT_AN_AGENT).merge(more))
+    exits(r, 0)
+    snuff json.parse(r.out)
+  }
+  stick line = "echo invalidate-" + str(time.now_ms())
+  stick a1 = check(line, "salt-a")
+  assert(a1.cache == "miss", "first with salt-a: " + a1.cache)
+  stick a2 = check(line, "salt-a")
+  assert(a2.cache == "hit", "second with salt-a: " + a2.cache)
+  stick b1 = check(line, "salt-b")
+  assert(b1.cache == "miss", "first with salt-b: " + b1.cache + " (an in-memory rule change did not invalidate the key)")
+})
+
+test("W11: planted_entry_from_an_earlier_schema_is_a_miss", pack() {
+  # A fresh home holds no verdict pass; the first read of a line is a
+  # miss. This is the behaviour an older-schema entry (v cigo-verdict-1
+  # or -2) is ignored by: the new key's shape is different and the MAC
+  # is under a new subkey, so a stored older entry cannot answer a new
+  # lookup. Measured here as miss-on-first-call: no pass survived the
+  # new home.
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  pull check(line) {
+    stick r = hop_env(dir, "sh", ["-c", 'printf "%s" "$1" | cig run "$2" -- guard check-line --json', "sh", line, tool], guard_env(dir, NOT_AN_AGENT))
+    exits(r, 0)
+    snuff json.parse(r.out)
+  }
+  stick a = check("echo planted-" + str(time.now_ms()))
+  assert(a.cache == "miss", "first call on a fresh home: " + a.cache)
+})
+
+test("W11: verdict_cache_off_means_no_lookup", pack() {
+  # cigo config verdict_cache off (the paranoid preset's default): the
+  # cache is never read and `cache` reads as `none` on every call.
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  exits(agent_cmd(dir, ["config", "verdict_cache", "off"], {}), 0)
+  pull check(line) {
+    stick r = hop_env(dir, "sh", ["-c", 'printf "%s" "$1" | cig run "$2" -- guard check-line --json', "sh", line, tool], guard_env(dir, NOT_AN_AGENT))
+    exits(r, 0)
+    snuff json.parse(r.out)
+  }
+  stick line = "echo off-" + str(time.now_ms())
+  stick a = check(line)
+  stick b = check(line)
+  assert(a.cache == "none" and b.cache == "none", "verdict_cache off still cached: a=" + a.cache + " b=" + b.cache)
+})
+
+test("W11: ask_is_never_answered_from_cache", pack() {
+  # The cache stores the scan's findings only; the tier is decided
+  # live from them (tier_for), so an ask-tier line still gets its
+  # findings from the cache if they were stored. But the paranoid
+  # agent never caches an ask-worthy line in practice, because the
+  # findings themselves are what land it as ask. This asserts the
+  # read's bytes are stable call to call so the tier never flips.
+  if on_windows {
+    snuff
+  }
+  stick dir = guard_setup()
+  pull check(line) {
+    stick r = hop_env(dir, "sh", ["-c", 'printf "%s" "$1" | cig run "$2" -- guard check-line --json', "sh", line, tool], guard_env(dir, NOT_AN_AGENT))
+    exits(r, 0)
+    snuff json.parse(r.out)
+  }
+  # cred-ssh: weight 0.8, risk high, confidence high, tier ask.
+  stick line = "cat ~/.ssh/id_ed25519 # ask-" + str(time.now_ms())
+  stick a = check(line)
+  assert(a.tier == "ask", "expected tier ask, got " + a.tier)
+  stick b = check(line)
+  assert(b.tier == "ask" and b.risk == a.risk, "second call changed tier/risk: " + b.tier + "/" + b.risk + " vs " + a.tier + "/" + a.risk)
+  assert(json.stringify(b.findings) == json.stringify(a.findings), "second call changed findings")
 })
 
 test("agent: scope agents --agents=claude-code adds the hook to Claude Code's settings and keeps the rest; uninstall takes it out; a linked settings file is left to you", pack() {

@@ -11,17 +11,58 @@ $needsMajor = 1
 $needsMinor = 20
 $needsPatch = 0
 
-if (-not (Get-Command cig -ErrorAction SilentlyContinue)) {
+$cigCmd = Get-Command cig -ErrorAction SilentlyContinue
+if (-not $cigCmd) {
     [Console]::Error.WriteLine('cigo: cig is not on PATH; install CigScript first: https://github.com/otmof-ops/cig-script')
     exit 127
 }
 
-$verOut = ''
-try { $verOut = (& cig --version 2>$null | Select-Object -First 1) } catch { }
-$verOut = [string]$verOut
-$verFields = $verOut -split '\s+'
+# The cig the launcher would reach, with the launcher's path and its bytes.
+$cigReal = ''
+try { $cigReal = (Get-Item -LiteralPath $cigCmd.Source).FullName } catch { $cigReal = [string]$cigCmd.Source }
+$cigSize = -1
+$cigMtime = ''
+try {
+    $cigItem = Get-Item -LiteralPath $cigReal -ErrorAction Stop
+    $cigSize = [int64]$cigItem.Length
+    $cigMtime = [string]$cigItem.LastWriteTimeUtc.Ticks
+} catch { }
+
+# The launcher floor cache (#117 W3): $env:CIGO_HOME\cig-floor, one line
+# `<abs cig path>|<size>|<mtime>|<version>`. A hit (path, size, mtime
+# match) reuses the kept version and runs no subprocess; a miss asks `cig
+# --version` and writes the cache atomically. An unwritable CIGO_HOME is
+# the no-cache case. A failure is never cached, so a `needs_*` bump still
+# refuses an old cig. `CIGO_FLOOR_CACHE=off` disables it.
+$floorCacheOn = $true
+switch -regex ($env:CIGO_FLOOR_CACHE) {
+    '^(off|0|no|false)$' { $floorCacheOn = $false }
+}
+$cigoHomeDir = $env:CIGO_HOME
+if (-not $cigoHomeDir) { $cigoHomeDir = Join-Path $HOME '.cig-orchestrator' }
+$floorCache = Join-Path $cigoHomeDir 'cig-floor'
 $version = ''
-if ($verFields.Count -ge 2) { $version = $verFields[1] }
+$floorHit = $false
+if ($floorCacheOn -and $cigSize -ge 0 -and $cigMtime -ne '' -and (Test-Path -LiteralPath $floorCache)) {
+    try {
+        $cachedLine = (Get-Content -LiteralPath $floorCache -TotalCount 1 -ErrorAction Stop).Trim()
+        $expectPrefix = "$cigReal|$cigSize|$cigMtime|"
+        if ($cachedLine.StartsWith($expectPrefix)) {
+            $cachedVersion = $cachedLine.Substring($expectPrefix.Length)
+            if ($cachedVersion -match '^\d+\.\d+\.\d+') {
+                $version = $cachedVersion
+                $floorHit = $true
+            }
+        }
+    } catch { }
+}
+$verOut = ''
+if (-not $floorHit) {
+    try { $verOut = (& cig --version 2>$null | Select-Object -First 1) } catch { }
+    $verOut = [string]$verOut
+    $verFields = $verOut -split '\s+'
+    if ($verFields.Count -ge 2) { $version = $verFields[1] }
+}
 
 if ($version -match '^(\d+)\.(\d+)\.(\d+)') {
     $major = [int]$Matches[1]
@@ -34,6 +75,16 @@ if ($version -match '^(\d+)\.(\d+)\.(\d+)') {
     if ($tooOld) {
         [Console]::Error.WriteLine("cigo: cig $version is too old; cig-orchestrator needs $needsMajor.$needsMinor.$needsPatch or newer (cig update)")
         exit 2
+    }
+    if ($floorCacheOn -and -not $floorHit -and $cigSize -ge 0 -and $cigMtime -ne '') {
+        try {
+            New-Item -ItemType Directory -Force -Path $cigoHomeDir | Out-Null
+            $floorTmp = "$floorCache.$PID.tmp"
+            Set-Content -LiteralPath $floorTmp -Value "$cigReal|$cigSize|$cigMtime|$version" -Encoding utf8 -ErrorAction Stop
+            Move-Item -LiteralPath $floorTmp -Destination $floorCache -Force -ErrorAction Stop
+        } catch {
+            try { Remove-Item -LiteralPath $floorTmp -ErrorAction SilentlyContinue } catch { }
+        }
     }
 } else {
     [Console]::Error.WriteLine("cigo: could not read the version of cig (``cig --version`` said: $verOut)")
@@ -76,7 +127,7 @@ if ($i -lt $argsList.Count) { $rest = @($argsList[$i..($argsList.Count - 1)]) }
 $cmd = 'help'
 if ($rest.Count -gt 0) { $cmd = [string]$rest[0] }
 
-$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'uninstall', 'doctor', 'crash', 'config', 'blacklist', 'quarantine', 'guard', 'undo', 'run-url', 'agent', 'approve', '--help', '-h', '--version')
+$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'uninstall', 'doctor', 'crash', 'config', 'blacklist', 'quarantine', 'guard', 'undo', 'run-url', 'agent', 'approve', '__dump-rules', '--help', '-h', '--version')
 # From the home folder itself (or a drive's root), cig would take all of it
 # as the run's pack and watch every file in it around each step: these run
 # from an empty folder of cigo's instead, told where you are.

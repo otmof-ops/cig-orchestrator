@@ -1,0 +1,49 @@
+{
+  "confidences": [
+    "exact",
+    "high",
+    "medium",
+    "low"
+  ],
+  "matrix": {
+    "critical": {
+      "exact": "gate",
+      "high": "refuse",
+      "low": "refuse",
+      "medium": "refuse"
+    },
+    "high": {
+      "exact": "ask",
+      "high": "ask",
+      "low": "ask",
+      "medium": "ask"
+    },
+    "low": {
+      "exact": "silent",
+      "high": "silent",
+      "low": "silent",
+      "medium": "silent"
+    },
+    "medium": {
+      "exact": "notice",
+      "high": "notice",
+      "low": "notice",
+      "medium": "notice"
+    },
+    "none": {
+      "exact": "silent",
+      "high": "silent",
+      "low": "silent",
+      "medium": "silent"
+    }
+  },
+  "name": "tier-matrix",
+  "risks": [
+    "none",
+    "low",
+    "medium",
+    "high",
+    "critical"
+  ],
+  "schema": "cigo-rules-1"
+}

@@ -459,7 +459,8 @@ cigo guard allow <program>    that program is not read any more (its shim goes)
 cigo guard allow <file|sha256> those bytes are not rehearsed again (run-url, the hook): a script you have read
 cigo guard log [--all|--json] what was guarded, and what came of it
 cigo guard stats [--since=30d] [--json]
-                              the log counted: prompts per day, per kind, per code; for asks and gates,
+                              the log counted: prompts per day, per kind, per code; the verdict cache's
+                              hit rate per day (a dash for a day with no lookups); for asks and gates,
                               approved yes / declined / left; and how often a notice was followed by a
                               change of setting
 cigo guard cache [stats | clear] [--json]
@@ -1300,6 +1301,7 @@ holds the before-bytes of what a task's `touches` named) under
 | `CIG_DOCTOR=0` | the same as `--no-doctor` |
 | `CIGSCRIPT_HOME` | where cig keeps run records, instead of `~/.cigscript` |
 | `CIGO_HOME` | where cigo keeps its config and crash reports, instead of `~/.cig-orchestrator` |
+| `CIGO_FLOOR_CACHE=off` | the launcher's `cig --version` floor cache in `$CIGO_HOME/cig-floor` is not read or written for this call (the suite sets it so one test's writes never land on another's home) |
 | `CIGO_VERSIONS=0` | no version warnings |
 | `CIGO_BOX=0`, `CIGO_BOX=1` | tasks on the tin, or in the box, where the manifest and the task say nothing (the default is the box on Linux and the tin elsewhere) |
 | `CIGO_BLACKLIST_DIR` | where your blacklists live, instead of `~/.config/cigscript/blacklist.d` (the suite uses it) |
