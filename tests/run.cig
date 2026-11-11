@@ -2037,7 +2037,7 @@ test("__doctor says what a rehearsal can use here: the isolation, each registry'
     assert(box.severity == "ok" or (box.severity == "note" and box.found.starts_with("no contained box: ")), json.stringify(box))
   } else {
     assert(box.severity == "note", json.stringify(box))
-    says(box.found, "the rehearsal needs cig 1.12.0 or later on Linux")
+    says(box.found, "the contained box needs cig 1.12.0 or later on Linux")
   }
   # The stubs stand in for npm, pip and cargo.
   assert(finding_of(d, "rehearse-npm").severity == "ok", json.stringify(finding_of(d, "rehearse-npm")))
@@ -3593,7 +3593,7 @@ pull rehearsal_here() {
 
 pull no_box_here(r) {
   stick seen = r.out + r.err
-  if seen.contains("E777") or seen.contains("the rehearsal is not possible here") or seen.contains("the contained box is not possible here") {
+  if seen.contains("E777") or seen.contains("the rehearsal is not possible here") or seen.contains("the contained box is not possible here") or seen.contains("rehearsing without isolation") {
     exhale "        (the contained box cannot be had here; the rehearsal tests step aside)"
     snuff true
   }
