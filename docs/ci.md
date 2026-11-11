@@ -10,6 +10,42 @@ install `cig` from its own release, the binary for the runner and its `.sha256`,
 and run `cigo` from its release tarball, as this repository's own
 [CI](../.github/workflows/ci.yml) does.
 
+## The setup action
+
+On a GitHub-hosted Linux or macOS runner, one line installs cig and cigo:
+
+```yaml
+- uses: otmof-ops/cig-orchestrator/setup@v1
+```
+
+cig comes from its release, checked against the checksum published beside
+it; cigo is the checkout of the action itself, so `@v1` is the cigo of the
+newest `v1.x` release (the `v1` tag moves with each release; pin
+`@v1.18.0`, or a commit, to stop it moving). Two inputs: `cig-version` (a
+release tag, `v1.20.0` by default) and `userns` (on Linux, `true` by default:
+turns off Ubuntu's restriction on unprivileged user namespaces so cig can make
+its box, which `cigo rehearse` needs; the runner is thrown away afterwards).
+Windows runners use the steps further down.
+
+The four lines that check a pull request's new packages and show them in the
+Security tab (the `permissions` and `fetch-depth` are what it needs):
+
+```yaml
+permissions: { contents: read, security-events: write }
+steps:
+  - uses: actions/checkout@v4
+    with: { fetch-depth: 0 }
+  - uses: otmof-ops/cig-orchestrator/setup@v1
+  - run: cigo rehearse --changed --base origin/${{ github.base_ref }} --sarif rehearse.sarif
+  - uses: github/codeql-action/upload-sarif@v3
+    with: { sarif_file: rehearse.sarif }
+```
+
+`--sarif <file>` names the file; the exit code is the risk, `high` or worse by
+default under CI, so the job fails on a package that earns it and the
+Security tab says why either way (add `if: always()` to the upload to see
+it on a failure).
+
 ## GitHub Actions
 
 ```yaml

