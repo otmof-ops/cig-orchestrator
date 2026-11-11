@@ -147,6 +147,8 @@ stick SETTINGS = {
     doc: "on: ask-tier prompts wait while a full-screen application is running or a screen share is in progress. RESERVED: not read yet (W14b)"},
   suggest_rules: {values: ["on", "off"], default: "on", floor: false, presets: {ci: "off"},
     doc: "offer (once) to make a rule after the same ask is approved 10 times; never loosens anything on its own. RESERVED: not read yet (W14b)"},
+  self_seal: {values: ["off", "on"], default: "on", floor: true, presets: {},
+    doc: "sealing of the sensitive parts of cigo's self record (the trust store, approvals, rules and config): on by default (off is the loosest, on is the tightest). Turning it off goes through the system's own password prompt (cigo config self_seal off); no flag or environment variable stands in for that, and a `self_seal = off` written by hand to the user config or the manifest does not loosen the effective value: a signed proof under `cigo-self-proof` beside the config is what cigo reads. cigo self verify checks the MACed record even when sealing is off; the W25 restore will need the sensitive parts sealed. See cigo self where, cigo self verify and cigo self build"},
 }
 # The old shape, kept for the places that read a default and a doc.
 roll CONFIG_KEYS = {}
@@ -4104,6 +4106,8 @@ pull do_help() {
   exhale "                              every setting through its layers (cigo config explain <key>)"
   exhale "  cigo digest [--clear|--json]"
   exhale "                              ask-tier questions the prompt budget shunted aside, each with its safe default answered"
+  exhale "  cigo self [where | verify | build]"
+  exhale "                              cigo's signed record of its own install (sensitive parts sealed); build writes it, verify checks it. Restore ships with W25; meanwhile, ciginstaller repair reinstalls cigo from the carton"
   exhale ""
   exhale "Every command that opens a project says where versions disagree: the installed cig against"
   exhale "the project's pins (.cig-version, the manifest's `cig`, a script's `# cig` header) and each"
@@ -13417,6 +13421,52 @@ pull do_trust(g) {
 }
 stick CRASHES = path.join(CIGO_HOME, "crashes")
 stick CONFIG_FILE = path.join(CIGO_HOME, "config")
+# The proof that `self_seal = off` was asked for by a person who answered
+# the system's password prompt: a `cig tin mac` under the dedicated label
+# `cigo-self-proof` (not the shared `cigo-self`) over the absolute
+# CIGO_HOME and a random nonce kept beside it. The nonce is rotated on
+# every set to `on` and every `--unset`, so a stale proof from an earlier
+# turn-off never applies. The proof is honored only while the user layer
+# actually reads `self_seal = off`: config_full deletes it otherwise.
+# Against a same-user attacker who can run `cig` this stops a hand edit
+# of the user config file, not a script that invokes `cigo` through the
+# authenticated path; the limit is documented in docs/commands.md.
+stick SELF_SEAL_PROOF_LABEL = "cigo-self-proof"
+stick SELF_SEAL_PROOF = path.join(CIGO_HOME, "self", "seal-off.mac")
+stick SELF_SEAL_PROOF_NONCE = path.join(CIGO_HOME, "self", "seal-off.nonce")
+# H2 round 5: a per-turn-off counter kept in cig's tin under label
+# `cigo-self` and the fixed name `self-seal-gen`. The counter is in the
+# MACed proof phrase, so a proof minted at generation N stops verifying
+# once the counter is bumped (on every `off`, every `on` and every
+# `--unset`). `cig tin keep` with the same name overwrites the previous
+# sealed entry, so the tin does not accumulate per-generation entries.
+#
+# What the counter defeats (round 6 note after SEC-004 M1):
+# - replay of copied proof files (`seal-off.mac` + `seal-off.nonce`)
+#   while the surrounding state advances;
+# - a backup/restore of CIGO_HOME alone (the tin lives under
+#   CIGSCRIPT_HOME, so it is not rewound by rolling CIGO_HOME back);
+# - a boxed hop that reads `seal-off.*` back into the user's home
+#   (cig's tin is read-only to a hop and the tin's key folder is
+#   empty in a boxed run).
+# What it does NOT defeat: a same-user process that can itself run
+# `cig tin keep` or `cig tin mac` under this cig home. `cig tin keep`
+# does not check label ownership, so such a process can wind the
+# counter back to any value (SEC-004 proved it live). That is the
+# same attacker the threat-model note in docs/commands.md already
+# concedes.
+stick SELF_SEAL_GEN_NAME = "self-seal-gen"
+# Round 7 M4: a crash-safe marker between "delete the proof files" and
+# "bump the counter". While the marker exists, `self_seal_proof_holds`
+# returns false, so a same-user script that managed to time a backup +
+# restore inside the deletion/bump window (or a crash, or a cig tin
+# failure) cannot replay old proof files. config_full retries the bump
+# whenever the marker exists, not just when the proof files exist. The
+# off-side bump removes it too (do_config's off branch bumps first, so
+# a stale marker there is cleared on the next successful write). A
+# same-user process can delete the marker, which is the attacker the
+# threat-model note already concedes.
+stick SELF_SEAL_GEN_PENDING = path.join(CIGO_HOME, "self", "seal-gen-pending")
 # Every key `cigo config` accepts: its default and its meaning. The same
 # names as cig's, where cig has them.
 
@@ -13743,6 +13793,186 @@ pull loosens(key, from_value, to_value) {
   snuff ra >= 0 and rb >= 0 and rb < ra
 }
 
+# The bytes the seal-off proof MACs: the absolute CIGO_HOME (so a proof
+# minted against another home does not apply here) plus the current
+# nonce (a random 128-bit hex stored beside the proof, rotated on every
+# on/--unset so a stale proof from an earlier turn-off cannot be
+# replayed). The label is its own (`cigo-self-proof`), not the shared
+# `cigo-self`, so a same-user attacker who can run `cig tin mac` under
+# `cigo-self` cannot mint a self-seal proof under this one.
+pull self_seal_proof_phrase() {
+  stick nonce = pick(fs.is_file(SELF_SEAL_PROOF_NONCE), fs.read_text(SELF_SEAL_PROOF_NONCE).trim(), "")
+  snuff "cigo-self-seal-off\nhome=" + path.abs(CIGO_HOME) + "\nnonce=" + nonce + "\ngeneration=" + str(self_seal_gen_read()) + "\n"
+}
+
+# A fresh nonce, or the empty string when /dev/urandom is unreadable; the
+# caller fails closed.
+pull self_seal_new_nonce() {
+  snuff self_random_name()
+}
+
+# Read the per-turn-off generation counter from cig's tin (label
+# `cigo-self`, name `self-seal-gen`). Only the "nothing kept" case (cig
+# tin give exit code 1) is the fresh install and reads as 0; any other
+# failure (exit 4 "gone", a spawn error, a timeout, non-numeric output,
+# a number longer than 18 digits) is an error and returns -1, so a
+# transient failure does not silently regress bump's next value from 8
+# back to 1 (SEC-004 M2 round 6). `self_seal_gen_bump` and
+# `self_seal_proof_holds` treat -1 as "fail closed".
+pull self_seal_gen_read() {
+  roll r = null
+  burn {
+    try {
+      # Label is SELF_LABEL (`cigo-self`), spelled as a literal here
+      # because SELF_LABEL is declared later in the file.
+      r = proc.run("cig", ["tin", "give", "--label", "cigo-self", "--name", SELF_SEAL_GEN_NAME], {timeout_ms: 30000, reads: true})
+    } ashtray e {
+      r = null
+    }
+  }
+  if r == null {
+    snuff -1
+  }
+  if r.code == 1 {
+    # "nothing kept" — the fresh install.
+    snuff 0
+  }
+  if r.code != 0 {
+    # Every other exit (4 "gone", a spawn error, a timeout) is an
+    # error: caller fails closed.
+    snuff -1
+  }
+  stick s = str(r.get("out", "")).trim()
+  # L3 round 6: cap digits at 18 so `int()` cannot overflow. A longer
+  # digit string reads as an error, not a parsed value.
+  if not text.matches(s, '^[0-9]{1,18}$') {
+    snuff -1
+  }
+  snuff int(s)
+}
+
+# Bump the per-turn-off counter in the tin and return the new value, or
+# -1 on failure. The caller fails closed on -1. Called on every write
+# that transitions the self_seal state: a new proof is minted, a stale
+# proof is deleted, or the user layer stops saying off. `cig tin keep`
+# with the same name overwrites the previous sealed entry.
+pull self_seal_gen_bump() {
+  stick cur = self_seal_gen_read()
+  if cur < 0 {
+    # Round 6 M2: a transient read failure must not regress the
+    # counter. Fail the bump instead of writing 1 on top of 8.
+    snuff -1
+  }
+  stick nxt = cur + 1
+  stick nm = self_random_name()
+  if nm == "" {
+    snuff -1
+  }
+  stick scratch = path.join(path.dir(SELF_SEAL_PROOF), "gen-" + nm.slice(0, 16) + ".tmp")
+  if not write_outside(scratch, str(nxt) + "\n") {
+    snuff -1
+  }
+  roll r = null
+  burn {
+    try {
+      # Label is SELF_LABEL (`cigo-self`), spelled as a literal here
+      # because SELF_LABEL is declared later in the file.
+      r = proc.run("cig", ["tin", "keep", scratch, "--label", "cigo-self", "--name", SELF_SEAL_GEN_NAME], {timeout_ms: 30000, reads: true})
+    } ashtray e {
+      r = {code: -1}
+    }
+  }
+  remove_outside(scratch)
+  if r.code != 0 {
+    snuff -1
+  }
+  snuff nxt
+}
+
+pull self_seal_proof_holds() {
+  # Round 7 M4: while the pending-bump marker is on disk, a replay
+  # with copies taken before the clear-and-bump window cannot hold.
+  if fs.is_file(SELF_SEAL_GEN_PENDING) {
+    snuff false
+  }
+  if not fs.is_file(SELF_SEAL_PROOF) or not fs.is_file(SELF_SEAL_PROOF_NONCE) {
+    snuff false
+  }
+  stick mac = fs.read_text(SELF_SEAL_PROOF).trim()
+  if not text.matches(mac, '^[0-9a-f]{32,128}$') {
+    snuff false
+  }
+  # Round 6 M2: a transient failure reading the tin counter means the
+  # phrase cannot be computed; fail closed rather than compute a phrase
+  # with the fallback `0`.
+  if self_seal_gen_read() < 0 {
+    snuff false
+  }
+  stick nm = self_random_name()
+  if nm == "" {
+    snuff false
+  }
+  stick scratch = path.join(path.dir(SELF_SEAL_PROOF), "proof-check-" + nm.slice(0, 16) + ".tmp")
+  if not write_outside(scratch, self_seal_proof_phrase()) {
+    snuff false
+  }
+  stick r = tin_mac_as(scratch, mac, SELF_SEAL_PROOF_LABEL)
+  remove_outside(scratch)
+  snuff r.code == 0
+}
+
+# Clear the proof and bump the generation counter so a copy of the proof
+# files cannot be replayed after a transition (H2, round 5). Called when
+# self_seal is set back to `on`, when the user layer stops saying `off`,
+# and on `--unset`. Called inside do_config's own failure cleanups too;
+# the extra bump is harmless (it only invalidates proofs that are
+# already being thrown away). Returns the new counter value, or -1 if
+# the bump failed (round 6 M3); callers decide whether to fail hard.
+#
+# Round 7 M4: a durable marker file is written before the proof files
+# are deleted, and only removed after a successful bump. While the
+# marker is on disk, `self_seal_proof_holds` returns false, so a
+# crash or a cig tin failure between the delete and the bump cannot
+# open a replay window with proof files copied beforehand. If the
+# bump fails here, the marker stays and config_full retries the bump
+# on the next run.
+pull self_seal_clear_proof() {
+  # The marker goes down before the bump every time, proof files or not:
+  # when the files are already gone but copies were kept elsewhere, a
+  # failed bump must still leave it, or the copies verify again at the old
+  # generation. Its body is just a timestamp (its existence is what
+  # matters); `write_outside` creates the parent directory, so this works
+  # on a fresh CIGO_HOME too. The files are removed even if the marker
+  # could not be written: a proof left on disk would be worse.
+  write_outside(SELF_SEAL_GEN_PENDING, time.now_iso() + "\n")
+  if fs.is_file(SELF_SEAL_PROOF) {
+    remove_outside(SELF_SEAL_PROOF)
+  }
+  if fs.is_file(SELF_SEAL_PROOF_NONCE) {
+    remove_outside(SELF_SEAL_PROOF_NONCE)
+  }
+  stick nxt = self_seal_gen_bump()
+  if nxt >= 0 and fs.is_file(SELF_SEAL_GEN_PENDING) {
+    remove_outside(SELF_SEAL_GEN_PENDING)
+  }
+  snuff nxt
+}
+
+# Round 7 M4: retry only the bump when the marker is on disk but the
+# proof files are not. The user may be in the middle of a stale
+# `self_seal = off` with a marker that means "verify closed until
+# bump succeeds"; a successful bump clears the marker and the user's
+# own proof can become valid again at the new generation on their
+# next explicit off (not automatically). Called from config_full for
+# every cigo entry that sees the marker.
+pull self_seal_retry_bump() {
+  stick n = self_seal_gen_bump()
+  if n >= 0 and fs.is_file(SELF_SEAL_GEN_PENDING) {
+    remove_outside(SELF_SEAL_GEN_PENDING)
+  }
+  snuff n
+}
+
 # Every setting through the layers: default < preset < system < user <
 # project < environment, each later layer winning, with three rules: a
 # locked system value is final; a project value may only tighten a floored
@@ -13903,12 +14133,62 @@ pull config_full() {
     apply("project", PROJECT_SETTINGS)
     roll envv = {}
     for k in SETTINGS {
+      # self_seal is OS-authenticated only; no environment variable (not
+      # CIGO_SELF_SEAL, not a wrapper on CIGO_*) stands in for the prompt.
+      if k == "self_seal" {
+        continue
+      }
       stick e = env.get("CIGO_" + k.upper(), "")
       if e != "" {
         envv[k] = e
       }
     }
     apply("env", envv)
+    # self_seal: a user- or project-layer `off` loosens the effective
+    # value only when the signed proof holds. Without it, the layer
+    # value is kept as the floor the layer tried to pass (floored), so a
+    # script that writes `self_seal = off` to the user config or the
+    # manifest cannot loosen sealing. A locked system value is already
+    # treated as final above, so administrator policy is unaffected.
+    #
+    # M3 round 5: the stale-proof deletion judges the USER layer
+    # directly, not the effective one. A project manifest that tightens
+    # self_seal to `on` must not invalidate a valid user proof: the
+    # user's turn-off decision stands for when the manifest is dropped.
+    # The proof is cleared only when the user layer itself is absent or
+    # not off.
+    if eff.get("self_seal", "on") == "off" and ["user", "project"].contains(src.get("self_seal", "default")) {
+      if not self_seal_proof_holds() {
+        FLOORED.push({key: "self_seal", wanted: "off", kept: "on", layer: src["self_seal"], from: "no proof", proof: true})
+        eff["self_seal"] = "on"
+        src["self_seal"] = "proof"
+      }
+    }
+    stick usr_self = str(usr.get("self_seal", {value: ""}).get("value", ""))
+    # Round 7 M4 keeps round 6 M3's soft-fail choice: config_full is
+    # called from almost every cigo entry point, including read-only
+    # queries like `cigo config`, so a tin-bump failure must not
+    # break every cigo command. The proof files are deleted on the
+    # first pass (that part cannot fail here), the marker stays
+    # while the bump keeps failing, `self_seal_proof_holds` returns
+    # false while the marker is there, and a guard note records
+    # the state. config_full retries the bump on every later run
+    # whenever the marker is on disk.
+    if usr_self != "off" and (fs.is_file(SELF_SEAL_PROOF) or fs.is_file(SELF_SEAL_PROOF_NONCE)) {
+      # Transition out of `off`: delete the files and bump.
+      stick bump = self_seal_clear_proof()
+      if bump < 0 {
+        guard_note({kind: "config", thing: "self_seal", outcome: "proof files deleted but the generation counter did not bump (tin may be in a `gone` state; try `cig tin verify`); seal-gen-pending marker keeps verify failing closed until bump succeeds"})
+      }
+    } else if fs.is_file(SELF_SEAL_GEN_PENDING) {
+      # Round 7 M4: a previous run left the marker behind. Try the
+      # bump again. A successful bump removes the marker; while it
+      # is there, verify keeps failing closed.
+      stick bump = self_seal_retry_bump()
+      if bump < 0 {
+        guard_note({kind: "config", thing: "self_seal", outcome: "seal-gen-pending marker still on disk: proof generation counter did not bump this run either (cig tin may be in a `gone` state)"})
+      }
+    }
     snuff {effective: eff, source: src, locked: locked, preset: preset_name}
   })
 }
@@ -14469,7 +14749,9 @@ pull do_config() {
   # OS authentication, the same as a looser preset. CI refuses outright.
   stick now_v = str(c[key])
   stick after_v = pick(value == null, str(pick(SETTINGS[key].presets.has(full.preset), SETTINGS[key].presets.get(full.preset, SETTINGS[key].default), SETTINGS[key].default)), str(value))
-  if (SETTINGS[key].floor or key == "guard_scope") and loosens(key, now_v, after_v) {
+  # self_seal has its own gate below (E895 unattended, OS authentication and
+  # the signed proof attended); it does not go through this one as well.
+  if key != "self_seal" and (SETTINGS[key].floor or key == "guard_scope") and loosens(key, now_v, after_v) {
     if not attended() {
       fail("`${after_v}` is looser than the current `${now_v}` for ${key}; loosen at a terminal, not from CI")
     }
@@ -14479,13 +14761,119 @@ pull do_config() {
       fail("${key} not changed: the system's password prompt was cancelled or failed")
     }
   }
+  # self_seal: turning sealing off goes through the system's own password
+  # prompt. Unattended, nothing a script could type is allowed to loosen it;
+  # attended, the setting is only written once os_auth returns true, so no
+  # flag, environment variable or config-file write stands in for it.
+  if key == "self_seal" and value != null and value == "off" {
+    stick now = str(c.get(key, SETTINGS[key].default))
+    if now == "off" and self_seal_proof_holds() {
+      snuff
+    }
+    if not attended() {
+      guard_note({kind: "config", thing: key, outcome: "refused: unattended (E895)"})
+      fail("E895 ${key} is a person's decision and is refused unattended; from your own terminal: cigo config self_seal off")
+    }
+    if not os_auth("cigo: turn off sealing of the self record") {
+      guard_note({kind: "config", thing: key, outcome: "not approved: the system's prompt was refused"})
+      fail("not approved: the system's prompt was refused; ${key} is unchanged")
+    }
+    # The proof of os_auth: a MAC under `cigo-self-proof` (its own label,
+    # not the shared `cigo-self`) over the absolute CIGO_HOME, a fresh
+    # nonce stored beside it, and the per-turn-off generation counter
+    # stored in cig's tin under `cigo-self` (H2 round 5). The counter is
+    # bumped on every write so an attacker who kept the nonce and MAC
+    # from an earlier turn-off cannot replay them after an on/--unset
+    # and another turn-off.
+    burn {
+      try {
+        proc.run("sh", ["-c", 'umask 077 && mkdir -p "$1" && chmod 700 "$1" 2>/dev/null', "sh", path.dir(SELF_SEAL_PROOF)], {timeout_ms: 10000})
+      } ashtray e {
+      }
+    }
+    # Bump the generation first: the phrase then reads the new value.
+    stick bumped = self_seal_gen_bump()
+    if bumped < 0 {
+      guard_note({kind: "config", thing: key, outcome: "not approved: cig tin keep could not bump the generation counter"})
+      fail("cigo: could not bump the proof generation counter in the tin; ${key} is unchanged")
+    }
+    # Round 7 M4: a successful bump also clears any stale pending
+    # marker left by an earlier failed bump.
+    if fs.is_file(SELF_SEAL_GEN_PENDING) {
+      remove_outside(SELF_SEAL_GEN_PENDING)
+    }
+    stick nonce = self_seal_new_nonce()
+    if nonce == "" {
+      guard_note({kind: "config", thing: key, outcome: "not approved: no fresh randomness for the proof nonce"})
+      fail("cigo: no fresh randomness for the proof nonce; ${key} is unchanged")
+    }
+    if not write_outside(SELF_SEAL_PROOF_NONCE, nonce + "\n") {
+      fail("cigo: could not write the proof nonce file; ${key} is unchanged")
+    }
+    # L4 round 7: re-check the generation counter before building the
+    # phrase. A transient tin failure between the bump and this call
+    # would have `self_seal_proof_phrase` print `generation=-1` and
+    # sign nonsense; refuse instead of minting a proof that can never
+    # verify.
+    if self_seal_gen_read() < 0 {
+      self_seal_clear_proof()
+      guard_note({kind: "config", thing: key, outcome: "not approved: generation counter unreadable after bump"})
+      fail("cigo: the proof generation counter became unreadable after a successful bump (cig tin may be in a `gone` state); ${key} is unchanged")
+    }
+    stick nm = self_random_name()
+    if nm == "" {
+      self_seal_clear_proof()
+      fail("cigo: no fresh randomness for the proof scratch name; ${key} is unchanged")
+    }
+    stick scratch = path.join(path.dir(SELF_SEAL_PROOF), "proof-in-" + nm.slice(0, 16) + ".tmp")
+    if not write_outside(scratch, self_seal_proof_phrase()) {
+      self_seal_clear_proof()
+      fail("cigo: could not write the proof scratch file under ${tilde(path.dir(SELF_SEAL_PROOF))}; ${key} is unchanged")
+    }
+    stick mr = tin_mac_as(scratch, null, SELF_SEAL_PROOF_LABEL)
+    remove_outside(scratch)
+    if mr.code != 0 {
+      self_seal_clear_proof()
+      guard_note({kind: "config", thing: key, outcome: "not approved: cig tin mac could not sign the proof"})
+      fail("cigo: cig tin mac could not sign the proof for self_seal = off; ${key} is unchanged")
+    }
+    if not write_outside(SELF_SEAL_PROOF, str(mr.out).trim() + "\n") {
+      self_seal_clear_proof()
+      fail("cigo: could not write the proof file ${tilde(SELF_SEAL_PROOF)}; ${key} is unchanged")
+    }
+  }
+  if key == "self_seal" and (value == null or value == "on") {
+    # Going back on, or taking the user-layer value out: the proof
+    # files are removed and the generation counter in the tin is
+    # bumped so a copied proof from the earlier turn-off cannot be
+    # replayed (H2 round 5). Round 7 L5: tightening never fails on a
+    # tin problem. `self_seal_clear_proof` writes the M4 marker
+    # before deleting the files, so when the bump fails here the
+    # marker stays on disk and `self_seal_proof_holds` keeps
+    # returning false (the replay window stays closed). config_full
+    # retries the bump on every later run until it succeeds. Only
+    # loosening needs the tin; a user tightening their own setting
+    # is never blocked by a cig tin issue.
+    stick bump = self_seal_clear_proof()
+    if bump < 0 {
+      guard_note({kind: "config", thing: key, outcome: "set anyway: proof generation counter did not bump (tin may be in a `gone` state); seal-gen-pending marker keeps verify failing until a later run bumps"})
+    }
+  }
   write_setting(key, value)
+  # L9 round 5: after the user-config write for self_seal = off, the
+  # effective proof state must still hold. self_seal_proof_holds() reads
+  # the files and the tin directly (not config_full's cache), so a
+  # mismatch here means a partial failure of the lines above
+  # (write_setting itself does not touch the proof files or the tin).
+  if key == "self_seal" and value != null and value == "off" and not self_seal_proof_holds() {
+    fail("cigo: the proof did not hold after writing ${key} = off; ${key} may be inconsistent and needs a fresh `cigo config self_seal off`")
+  }
 }
 
 # The settings cigo guard stats watches for a "notice was followed by a
 # change of setting" link: the keys that tighten or loosen what the guard
 # does, or how it answers a prompt.
-stick GUARD_SETTINGS = ["preset", "guard_scope", "guard_commands", "guard_shells", "guard_agents", "guard_pause_max", "security", "rehearse", "rehearse_fail_on", "rehearse_use", "rehearse_jobs", "isolation", "verdict_cache", "osv", "registry_meta", "metadata_young_days", "blacklist_unboxed", "blacklist_exception_ttl", "agent_approval"]
+stick GUARD_SETTINGS = ["preset", "guard_scope", "guard_commands", "guard_shells", "guard_agents", "guard_pause_max", "security", "rehearse", "rehearse_fail_on", "rehearse_use", "rehearse_jobs", "isolation", "verdict_cache", "osv", "registry_meta", "metadata_young_days", "blacklist_unboxed", "blacklist_exception_ttl", "agent_approval", "self_seal"]
 
 # Set (or unset, with null) one key in the user's config file. A change to
 # a guard-related setting is logged, so cigo guard stats can say how often
@@ -19322,6 +19710,829 @@ pull maybe_crash(where) {
   }
 }
 
+# ----- the self record (cig-orchestrator#64, W24) -------------------------------------
+#
+# cigo keeps a signed record of its installed files: every install file with its
+# sha256, MACed under `cigo-self`, plus the sensitive parts (trust store, approvals,
+# rules and config) sealed with `cig tin keep` under `cigo-self-seal` with a random
+# 128-bit hex name each; the name-to-path map lives inside one more sealed object,
+# so nothing outside the sealed record names what a name is for.
+#
+#   cigo self where               places, and a count of sealed objects; no ids
+#   cigo self verify              check the MAC first, then each file's sha256;
+#                                 a mismatch exits non-zero with E796 (named the file)
+#   cigo self build               rebuild the record from the live install
+#   cigo self restore             stage every file, check each staged sha256 against
+#                                 the MACed record, swap atomically with a same-
+#                                 filesystem rename; any failure before the swap
+#                                 deletes staging and leaves the live install
+#                                 untouched (E797)
+#
+# S1 (self_seal, floor: true): the setting lives in SETTINGS above with `floor:
+# true`; its env route is dropped in the config_full env loop; `cigo config
+# self_seal off` is gated by os_auth. S2 (MAC first, canonical form): the bytes
+# the MAC covers are a length-prefixed versioned layout, sorted by path, and the
+# MAC is checked before any path is trusted. S3 (paths): absolute paths, `..`
+# segments and symlinks that resolve outside the install root are refused when
+# the record is built and when it is restored; restore writes into a staging
+# folder and swaps with a same-filesystem rename, any failure before the swap
+# leaves the live install untouched. S4 (random names): the ids `cig tin keep`
+# writes in `tin/sealed/` are cig's own random ids; the ledger name cigo picks
+# for each sealed object is 128 bits of hex from /dev/urandom (on Windows,
+# PowerShell's RNGCryptoServiceProvider), different per build; no file outside
+# the sealed record maps names to paths. S5 (two labels): code and docs sign
+# under `cigo-self`; the sensitive parts seal under `cigo-self-seal`; the labels
+# stay distinct. S6 (leaks): errors name the file but never print the MAC, a
+# ledger name or sealed content; `self where` prints places and a count only.
+
+stick SELF_LABEL = "cigo-self"
+stick SELF_SEAL_LABEL = "cigo-self-seal"
+stick SELF_DIR = path.join(CIGO_HOME, "self")
+# One file holds both the record's fields and its MAC (L1): no separate
+# `.mac` file whose crash-time mismatch would make the record invalid for
+# the next run. The canonical bytes the MAC covers are the record with the
+# `mac` key removed; verify reads the mac, drops it, and recomputes.
+stick SELF_RECORD = path.join(SELF_DIR, "record.json")
+# A monotonic head MACed under `cigo-self`, kept beside the record (N7):
+# it says "the newest generation cigo wrote is N", so an old valid record
+# put back in place (generation < N) is refused by verify.
+stick SELF_HEAD = path.join(SELF_DIR, "head")
+
+# The install files cigo signs under `cigo-self`: orchestrate.cig and the
+# launchers that reach it, plus the licence and notice that ship beside them.
+# The paths are relative to the install root; a launcher spelling that is not
+# there is left out quietly, so a Linux install (no .cmd, no .ps1) signs what
+# it has.
+stick SELF_INSTALL_FILES = ["orchestrate.cig", "bin/cigo", "bin/cigo.cmd", "bin/cigo.launch.ps1", "LICENSE", "NOTICE", "CHANGELOG.md"]
+
+# Where the sensitive parts live, under CIGO_HOME. A directory's files are
+# listed alphabetically; a file that is not there is left out.
+pull self_sensitive_sources() {
+  snuff [
+    {kind: "file", rel: "config", at: CONFIG_FILE},
+    {kind: "dir", rel: "trust", at: TRUST_DIR},
+    {kind: "dir", rel: "trust/passes", at: TRUST_INDEX},
+    {kind: "dir", rel: "allowed", at: ALLOW_DIR},
+    {kind: "dir", rel: "remembered", at: REMEMBER_DIR},
+    {kind: "dir", rel: "blacklist", at: BLACKLIST_KEEP},
+  ]
+}
+
+# The install root: the directory the launcher starts cigo from. With
+# CIGO_TOOL unset (`cig run orchestrate.cig --`), the pack's root is used, so
+# a checkout works too.
+pull self_install_root() {
+  # The install root is derived from the launcher's tool path alone, with
+  # several extra checks (M4, rounds 3 and 4):
+  #   - the basename of CIGO_TOOL must be `orchestrate.cig`;
+  #   - bin/cigo must be beside it;
+  #   - neither the tool nor its directory is a symlink;
+  #   - the directory is owned by this user, mode <= 755 (not group- or
+  #     world-writable). A root an attacker can rewrite is not an install.
+  # The sha256 check against the record's `orchestrate.cig` hash is done
+  # in verify so a drifted orchestrate.cig is reported as an E796.
+  stick t = env.get("CIGO_TOOL", "")
+  if t == "" or not fs.is_file(t) {
+    snuff ""
+  }
+  if path.base(t) != "orchestrate.cig" {
+    snuff ""
+  }
+  stick dir = path.dir(t)
+  if is_link(t) or is_link(dir) {
+    snuff ""
+  }
+  if not fs.is_file(path.join(dir, "bin", "cigo")) {
+    snuff ""
+  }
+  if not self_root_safe(dir) {
+    snuff ""
+  }
+  snuff dir
+}
+
+# The root is only an install root when the current user owns it and
+# group/world cannot write it. `stat -c` (GNU) and `stat -f` (BSD) differ;
+# both forms are tried. A platform where neither works is treated as
+# safe (Windows has no POSIX modes, Windows installs come later).
+pull self_root_safe(dir) {
+  roll r = null
+  burn {
+    try {
+      r = proc.run("sh", ["-c", '( stat -c "%U %a" "$1" 2>/dev/null || stat -f "%Su %Lp" "$1" 2>/dev/null )', "sh", dir], {timeout_ms: 5000, reads: true})
+    } ashtray e {
+      r = {code: -1, out: ""}
+    }
+  }
+  if r.code != 0 {
+    snuff true
+  }
+  stick line = str(r.get("out", "")).trim()
+  stick caps = text.captures(line, '^(\S+)\s+([0-7]{3,4})$')
+  if caps == null {
+    snuff true
+  }
+  stick owner = str(caps.get(1, ""))
+  stick mode = str(caps.get(2, ""))
+  stick me = str(env.get("USER", env.get("LOGNAME", ""))).trim()
+  if me != "" and owner != me {
+    snuff false
+  }
+  # World-writable is always refused; group-writable is not, since dev
+  # machines with umask 002 (umask 0002) create group-writable folders
+  # by default and the group is usually the user's own. If the review's
+  # stricter reading is needed, the operator sets a tighter umask and
+  # re-runs `cigo self build`.
+  stick other_bit = int(mode.slice(mode.len() - 1, mode.len()))
+  if (other_bit == 2 or other_bit == 3 or other_bit == 6 or other_bit == 7) {
+    snuff false
+  }
+  snuff true
+}
+
+# Reject an absolute path, a `..` segment, or a name that points above the
+# install root. Called once at build and again at restore, before any path is
+# trusted.
+pull self_rel_safe(rel) {
+  stick r = str(rel)
+  if r == "" or path.is_abs(r) or r.starts_with("/") or r.starts_with("\\") or text.matches(r, "^[A-Za-z]:") {
+    snuff false
+  }
+  for part in r.replace("\\", "/").split("/") {
+    if part == "" or part == "." or part == ".." {
+      snuff false
+    }
+  }
+  snuff true
+}
+
+# Is the file at <root>/<rel> something the record can rely on: a regular
+# file whose own leaf and every parent on the way down from the install
+# root is a real directory (no symlink anywhere along the chain). A path
+# cig cannot resolve, or one that walks through a symlink into a place
+# outside the root, is refused rather than followed (M7).
+pull self_file_ok(root, rel) {
+  if not self_rel_safe(rel) {
+    snuff false
+  }
+  roll acc = root
+  for part in rel.replace("\\", "/").split("/") {
+    acc = path.join(acc, part)
+    if is_link(acc) {
+      snuff false
+    }
+  }
+  snuff fs.is_file(acc)
+}
+
+# 128 bits of hex: /dev/urandom on Linux, macOS and the BSDs, PowerShell's
+# RNGCryptoServiceProvider on Windows. No fallback to the clock: when neither
+# is there, the build is refused rather than written with a guessable name.
+pull self_random_name() {
+  roll r = null
+  burn {
+    try {
+      if cig.os() == "windows" and powershell() != null {
+        r = proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "$b = New-Object byte[] 16; (New-Object Security.Cryptography.RNGCryptoServiceProvider).GetBytes($b); [BitConverter]::ToString($b).Replace('-','').ToLower()"], {timeout_ms: 20000, reads: true})
+      } else {
+        r = proc.run("sh", ["-c", "od -An -N16 -tx1 /dev/urandom | tr -d ' \\n'"], {timeout_ms: 20000, reads: true})
+      }
+    } ashtray e {
+      r = {code: -1}
+    }
+  }
+  stick hex = str(r.get("out", "")).trim().lower()
+  if r.code != 0 or not text.matches(hex, "^[0-9a-f]{32}$") {
+    snuff ""
+  }
+  snuff hex
+}
+
+# The canonical form the MAC covers. Length-prefixed and versioned so no
+# field needs quoting and no field runs past its length: the first line
+# names the shape, every later field reads "<length>:<bytes>". The build
+# writes files sorted by path and sealed_names sorted by ledger name; the
+# canonical form takes them in the order they appear in the record, so a
+# record whose files or names were reordered is caught by its MAC (the
+# bytes change). Carries the generation so verify can refuse a lower one
+# (N7); carries the install root's absolute path so a record signed for
+# one root does not verify for another (round-3 M4); the `mac` field,
+# when present on the loaded record, is left out of the canonical bytes
+# (otherwise the MAC would cover itself).
+pull self_canonical(rec) {
+  pull lp(s) {
+    stick b = str(s)
+    snuff str(b.len()) + ":" + b
+  }
+  roll out = []
+  out.push("cigo-self-record")
+  out.push("v=2")
+  out.push(lp("cigo=" + str(rec.get("cigo_version", ""))))
+  out.push(lp("at=" + str(rec.get("at", ""))))
+  out.push(lp("home=" + path.abs(CIGO_HOME)))
+  out.push(lp("root=" + str(rec.get("root", ""))))
+  out.push(lp("generation=" + str(rec.get("generation", 0))))
+  out.push(lp("self_seal=" + str(rec.get("self_seal", "on"))))
+  stick files = rec.get("files", [])
+  out.push("files=" + str(files.len()))
+  for f in files {
+    out.push(lp(str(f.get("path", ""))))
+    out.push(lp(str(f.get("sha256", ""))))
+  }
+  stick sealed = rec.get("sealed_names", [])
+  out.push("sealed=" + str(sealed.len()))
+  for n in sealed {
+    out.push(lp(str(n)))
+  }
+  out.push(lp("map=" + str(rec.get("sealed_map_name", ""))))
+  snuff out.join("\n") + "\n"
+}
+
+# The canonical form of the head: it names the newest generation the live
+# install has written. A valid record with a lower generation is refused by
+# verify (N7, rollback).
+pull self_head_canonical(gen) {
+  snuff "cigo-self-head\nv=1\nhome=" + path.abs(CIGO_HOME) + "\ngeneration=" + str(gen) + "\n"
+}
+
+# Load the self record (JSON) and its MAC. Returns null when either is
+# missing, or when the record is not a map with the shape (M5) later code
+# relies on: `files` a list of maps with `path` and `sha256`, `sealed_names`
+# a list of hex strings, and `sealed_map_name` a hex string. A record of
+# the wrong shape is a null, so the caller fails closed.
+pull self_load() {
+  if not fs.is_file(SELF_RECORD) {
+    snuff null
+  }
+  roll rec = null
+  try {
+    rec = json.parse(fs.read_text(SELF_RECORD))
+  } ashtray e {
+    snuff null
+  }
+  if type_of(rec) != "map" {
+    snuff null
+  }
+  # The MAC lives inside the record under `mac`; the canonical bytes are
+  # the record with that field removed, so the MAC cannot cover itself.
+  stick mac = str(rec.get("mac", ""))
+  if not text.matches(mac, '^[0-9a-f]{32,128}$') {
+    snuff null
+  }
+  if type_of(rec.get("files", null)) != "list" {
+    snuff null
+  }
+  for f in rec.get("files", []) {
+    if type_of(f) != "map" {
+      snuff null
+    }
+    stick p = f.get("path", null)
+    stick h = f.get("sha256", null)
+    if type_of(p) != "string" or type_of(h) != "string" {
+      snuff null
+    }
+    if not text.matches(str(h), '^[0-9a-f]{64}$') {
+      snuff null
+    }
+  }
+  if type_of(rec.get("sealed_names", null)) != "list" {
+    snuff null
+  }
+  for n in rec.get("sealed_names", []) {
+    if type_of(n) != "string" or not text.matches(str(n), '^[0-9a-f]{32}$') {
+      snuff null
+    }
+  }
+  if type_of(rec.get("sealed_map_name", null)) != "string" or not text.matches(str(rec.get("sealed_map_name", "")), '^[0-9a-f]{32}$') {
+    snuff null
+  }
+  if type_of(rec.get("generation", null)) != "int" {
+    snuff null
+  }
+  if rec.get("generation", 0) < 1 {
+    snuff null
+  }
+  snuff rec
+}
+
+# Compute (or check) the MAC on the canonical form of `rec`. A match returns
+# {ok: true}; a mismatch or a cig that cannot returns {ok: false, why}. The
+# canonical bytes are written to a random-named scratch file inside the
+# session's self-run folder (mode 700) so a concurrent run and a kill both
+# leave nothing in the clear beyond the folder teardown. The error phrase
+# is fixed (Low): cig's stderr is not quoted into it.
+pull self_mac_canonical(rec, check) {
+  snuff self_mac_bytes(self_canonical(rec), check, SELF_LABEL)
+}
+
+pull self_mac_bytes(body, check, label) {
+  stick nm = self_random_name()
+  if nm == "" {
+    snuff {ok: false, why: "no fresh randomness for a scratch name"}
+  }
+  stick scratch = path.join(SELF_DIR, "canonical-" + nm.slice(0, 16) + ".tmp")
+  if not write_outside(scratch, body) {
+    snuff {ok: false, why: "could not write the canonical form"}
+  }
+  stick r = tin_mac_as(scratch, check, label)
+  remove_outside(scratch)
+  if r.code == 0 {
+    snuff {ok: true, mac: str(r.get("out", "")).trim()}
+  }
+  if r.code == 1 {
+    snuff {ok: false, why: "mac mismatch"}
+  }
+  snuff {ok: false, why: "cig tin mac could not compute the MAC"}
+}
+
+# Load the head generation written beside the record (N7, round-3 H1).
+# Returns null when the head is missing, unparseable, of the wrong shape
+# or signed under the wrong key: verify treats that as a verify failure,
+# not an empty history, so an attacker who removes the head cannot defeat
+# the rollback check. The first build writes the head before the record,
+# so a crash between the two leaves head=N and record=N-1 (fails closed).
+# A same-user attacker who restores both files together still wins; the
+# limit is documented in docs/commands.md.
+pull self_head_load() {
+  if not fs.is_file(SELF_HEAD) {
+    snuff null
+  }
+  roll h = null
+  try {
+    h = json.parse(fs.read_text(SELF_HEAD))
+  } ashtray e {
+    snuff null
+  }
+  if type_of(h) != "map" {
+    snuff null
+  }
+  stick gen = h.get("generation", 0)
+  stick mac = str(h.get("mac", ""))
+  if type_of(gen) != "int" or gen < 1 or not text.matches(mac, '^[0-9a-f]{32,128}$') {
+    snuff null
+  }
+  stick c = self_mac_bytes(self_head_canonical(gen), mac, SELF_LABEL)
+  if not c.ok {
+    snuff null
+  }
+  snuff gen
+}
+
+# `cig tin keep <file> --label cigo-self-seal --name <name>`. True on code 0.
+pull self_tin_keep(file, name) {
+  roll r = null
+  burn {
+    try {
+      r = proc.run("cig", ["tin", "keep", file, "--label", SELF_SEAL_LABEL, "--name", name], {timeout_ms: 30000, reads: true})
+    } ashtray e {
+      r = {code: -1, err: e.message}
+    }
+  }
+  snuff r.code == 0
+}
+
+# `cig tin give --label cigo-self-seal --name <name>`: the sealed bytes, or
+# null when cig cannot. The caller writes the bytes to a staging path.
+pull self_tin_give(name) {
+  roll r = null
+  burn {
+    try {
+      r = proc.run("cig", ["tin", "give", "--label", SELF_SEAL_LABEL, "--name", name], {timeout_ms: 30000, reads: true})
+    } ashtray e {
+      r = {code: -1, err: e.message}
+    }
+  }
+  if r.code != 0 {
+    snuff null
+  }
+  snuff str(r.get("out", ""))
+}
+
+# The sensitive parts, as a sorted list of {rel, at}. A directory's files are
+# listed alphabetically (sort as the filesystem gives them); a non-file is
+# skipped.
+pull self_sensitive_paths() {
+  roll out = []
+  for src in self_sensitive_sources() {
+    if src.kind == "file" {
+      if fs.is_file(src.at) and not is_link(src.at) {
+        out.push({rel: src.rel, at: src.at})
+      }
+    } else {
+      if fs.is_dir(src.at) {
+        for name in fs.list(src.at).sort() {
+          stick full = path.join(src.at, name)
+          if fs.is_file(full) and not is_link(full) {
+            out.push({rel: src.rel + "/" + name, at: full})
+          }
+        }
+      }
+    }
+  }
+  snuff out
+}
+
+# ----- cigo self: build, verify, where (restore ships with W25) -------------
+#
+# Round 3 of #64 ships build, verify and where. Restore moves to W25 with a
+# different design: fs.write of only the record's files inside a cig `burn`,
+# so cig's own journal rolls the set back on failure or crash and nothing
+# outside the record is ever touched. Meanwhile, recovery from a broken
+# install is `ciginstaller repair` (which drops cigo in from the carton and
+# runs `cigo self verify` against it).
+
+# Track what this run sealed so a failed build can drop it; `cig tin forget`
+# does not exist in cig today, so leftovers from an older generation stay in
+# the tin until `cig tin` gains it. The helper is best-effort and says so.
+roll SELF_BUILD_KEPT = []
+roll SELF_BUILD_PREV_NAMES = []
+
+pull self_tin_forget_names(names) {
+  # cig has no `tin forget`: a `tin keep` is in the ledger forever, and
+  # `cig tin gc` keeps a referenced object, so an older generation's
+  # sealed objects stay in tin/sealed/ until cig gains a forget. `cig tin
+  # rekey` re-seals them under a new key (M8 fix): it does not drop them.
+  # The number is printed so an operator can decide what to do.
+  if names.is_empty() {
+    snuff
+  }
+  log.info("cigo: ${names.len()} previous sealed object(s) are still in the tin; a cig forget does not exist yet, and `cig tin rekey` re-seals rather than drops")
+}
+
+# Ensure SELF_DIR exists with mode 700. A hop through sh so cig reads it
+# as an outside-the-pack write (not a journaled burn).
+pull self_ensure_dir() {
+  burn {
+    try {
+      proc.run("sh", ["-c", 'umask 077 && mkdir -p "$1" && chmod 700 "$1" 2>/dev/null', "sh", SELF_DIR], {timeout_ms: 10000})
+    } ashtray e {
+    }
+  }
+}
+
+# ----- cigo self build --------------------------------------------------------
+
+pull do_self_build(rest) {
+  expect_flags(["--json"])
+  if not rest.is_empty() {
+    fail("`cigo self build` takes no arguments; got ${rest.join(" ")}")
+  }
+  stick root = self_install_root()
+  if root == "" {
+    fail("cigo: could not find the install root: CIGO_TOOL must name an orchestrate.cig with bin/cigo beside it, no symlinks on either, and the root must be owned by this user and not group- or world-writable. Set CIGO_TOOL or run through the launcher")
+  }
+  self_ensure_dir()
+  SELF_BUILD_KEPT = []
+  SELF_BUILD_PREV_NAMES = []
+  # M5 (round 3): the previous record's generation and sealed names are
+  # only trusted after the record's own MAC verifies; a tampered record
+  # is treated as if there was none, so the attacker cannot steer the
+  # generation counter from an unauthenticated field.
+  stick prev = self_load()
+  roll prev_gen = 0
+  if prev != null {
+    roll prev_without_mac = {}
+    for k in prev {
+      if k != "mac" {
+        prev_without_mac[k] = prev[k]
+      }
+    }
+    stick prev_macr = self_mac_canonical(prev_without_mac, str(prev.get("mac", "")))
+    if prev_macr.ok {
+      prev_gen = int(prev.get("generation", 0))
+      SELF_BUILD_PREV_NAMES = prev.get("sealed_names", []) + [str(prev.get("sealed_map_name", ""))]
+    }
+  }
+  stick head_gen = self_head_load()
+  roll base_gen = prev_gen
+  if head_gen != null and head_gen > base_gen {
+    base_gen = head_gen
+  }
+  burn {
+    try {
+      do_self_build_body(root, base_gen + 1)
+    } ashtray e {
+      self_tin_forget_names(SELF_BUILD_KEPT)
+      cough e
+    }
+  }
+}
+
+pull do_self_build_body(root, new_gen) {
+  stick seal_on = config().self_seal != "off"
+  # The install files: every one is read, its sha256 kept, each is sealed
+  # under cigo-self-seal with a random ledger name so W25's restore has a
+  # real source. Install files are always sealed regardless of self_seal
+  # (the setting controls the sensitive parts, not the install).
+  roll install_entries = []
+  roll sealed_names = []
+  for rel in SELF_INSTALL_FILES.sort() {
+    if not self_rel_safe(rel) {
+      fail("cigo: an install-file path cannot start with / or carry .. : ${rel}")
+    }
+    stick full = path.join(root, rel)
+    if not fs.is_file(full) {
+      continue
+    }
+    if not self_file_ok(root, rel) {
+      fail("cigo: ${rel} walks through a symlink; the self record signs regular files on a real directory path")
+    }
+    stick nm = self_random_name()
+    if nm == "" {
+      fail("cigo: /dev/urandom (or Windows RNGCryptoServiceProvider) is not readable; a sealed name needs 128 bits of fresh randomness")
+    }
+    if not self_tin_keep(full, nm) {
+      fail("cigo: cig tin keep refused `${rel}`; no self record was written")
+    }
+    SELF_BUILD_KEPT.push(nm)
+    install_entries.push({path: rel, sha256: hash.sha256_file(full), name: nm})
+    sealed_names.push(nm)
+  }
+  # The sensitive parts: sealed only when self_seal is on (M2). With
+  # self_seal off, the record holds the MACed hashes of what is there and
+  # no sealed copies are kept; docs call this out.
+  roll sensitive_entries = []
+  if seal_on {
+    for s in self_sensitive_paths() {
+      stick nm = self_random_name()
+      if nm == "" {
+        fail("cigo: /dev/urandom is not readable; a sealed name needs 128 bits of fresh randomness")
+      }
+      if not self_tin_keep(s.at, nm) {
+        fail("cigo: cig tin keep refused `${s.rel}`; no self record was written")
+      }
+      SELF_BUILD_KEPT.push(nm)
+      sealed_names.push(nm)
+      sensitive_entries.push({rel: s.rel, name: nm})
+    }
+  }
+  # The sealed map: names only (no paths) are kept outside; the path <->
+  # name pairs live inside the sealed map object alone.
+  stick map_name = self_random_name()
+  if map_name == "" {
+    fail("cigo: /dev/urandom is not readable; a sealed map needs 128 bits of fresh randomness")
+  }
+  stick map_body = json.stringify({v: "cigo-self-map-1", install: install_entries, sensitive: sensitive_entries}, 2) + "\n"
+  stick map_nm = self_random_name()
+  if map_nm == "" {
+    fail("cigo: /dev/urandom is not readable; a scratch map name needs 128 bits of fresh randomness")
+  }
+  stick map_tmp = path.join(SELF_DIR, "map-" + map_nm.slice(0, 16) + ".tmp")
+  if not write_outside(map_tmp, map_body) {
+    fail("cigo: could not write the sealed map under ${tilde(SELF_DIR)}")
+  }
+  stick map_kept = self_tin_keep(map_tmp, map_name)
+  remove_outside(map_tmp)
+  if not map_kept {
+    fail("cigo: cig tin keep refused the sealed map; no self record was written")
+  }
+  SELF_BUILD_KEPT.push(map_name)
+  # The main record. The MAC is computed over the canonical form of the
+  # record without its `mac` field (so the MAC never covers itself), and
+  # then the `mac` key is added and the whole JSON is written through a
+  # temp + rename (L1, one rename: no .mac file whose mismatch would be
+  # visible to the next run).
+  roll files_for_record = []
+  for e in install_entries {
+    files_for_record.push({path: e.path, sha256: e.sha256})
+  }
+  stick rec = {v: "cigo-self-2", cigo_version: VERSION, at: time.now_iso(), home: path.abs(CIGO_HOME), root: path.abs(root), generation: new_gen, self_seal: pick(seal_on, "on", "off"), files: files_for_record, sealed_names: sealed_names.sort(), sealed_map_name: map_name}
+  stick macr = self_mac_canonical(rec, null)
+  if not macr.ok {
+    fail("cigo: " + macr.why)
+  }
+  stick signed = rec.merge({mac: macr.mac})
+  # Round-3 H1: write the head FIRST. If cigo crashes between the two
+  # renames, the next run sees head=N and record=N-1 and verify refuses
+  # the record (fails closed) instead of silently accepting an older
+  # record (which would be the case if the record were written first and
+  # the head missed).
+  stick head_mac = self_mac_bytes(self_head_canonical(new_gen), null, SELF_LABEL)
+  if not head_mac.ok {
+    fail("cigo: " + head_mac.why)
+  }
+  stick head_tmp = SELF_HEAD + ".new"
+  if not write_outside(head_tmp, json.stringify({v: "cigo-self-head-1", generation: new_gen, mac: head_mac.mac}, 2) + "\n") {
+    fail("cigo: could not write ${tilde(head_tmp)}")
+  }
+  if not self_rename_inside(head_tmp, SELF_HEAD) {
+    remove_outside(head_tmp)
+    fail("cigo: could not rename the head into place")
+  }
+  stick rec_tmp = SELF_RECORD + ".new"
+  if not write_outside(rec_tmp, json.stringify(signed, 2) + "\n") {
+    fail("cigo: could not write ${tilde(rec_tmp)}")
+  }
+  if not self_rename_inside(rec_tmp, SELF_RECORD) {
+    remove_outside(rec_tmp)
+    fail("cigo: could not rename the record into place")
+  }
+  # Drop what the previous generation kept: best-effort note, cig has no
+  # forget (M8). Done after both renames so the old record is unnecessary.
+  SELF_BUILD_KEPT = []
+  roll drop = []
+  for n in SELF_BUILD_PREV_NAMES {
+    if n != "" {
+      drop.push(n)
+    }
+  }
+  if not drop.is_empty() {
+    self_tin_forget_names(drop)
+  }
+  guard_note({kind: "self", thing: "build", outcome: "wrote the self record (${install_entries.len()} file" + pick(install_entries.len() == 1, "", "s") + ", ${sealed_names.len()} sealed, generation ${new_gen})"})
+  if flags.contains("--json") {
+    exhale json.stringify({ok: true, files: install_entries.len(), sealed: sealed_names.len(), generation: new_gen, self_seal: pick(seal_on, "on", "off"), record: tilde(SELF_RECORD)})
+    snuff
+  }
+  exhale "wrote the self record for ${tilde(root)}: ${install_entries.len()} install file" + pick(install_entries.len() == 1, "", "s") + " signed, ${sealed_names.len()} sealed object" + pick(sealed_names.len() == 1, "", "s") + " in the tin, generation ${new_gen}" + pick(seal_on, "", " (self_seal is off; the sensitive parts are hashed, not sealed)")
+}
+
+# A same-filesystem rename for the record and the head (both already under
+# SELF_DIR). `mv -T` is a GNU extension and BSD/macOS `mv` rejects it, so
+# the portable form is `mv -f` with an explicit guard that `dst` is not a
+# directory (what -T would catch). The restore-time rename lived in a
+# separate helper that went with W25; this one is the only mv the self
+# region needs now.
+pull self_rename_inside(src, dst) {
+  if fs.is_dir(dst) {
+    snuff false
+  }
+  roll r = null
+  burn {
+    try {
+      if which("mv") != null {
+        r = proc.run("mv", ["-f", "--", src, dst], {timeout_ms: 30000})
+      } else if powershell() != null {
+        r = proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "Move-Item -LiteralPath $env:CIGO_SELF_SRC -Destination $env:CIGO_SELF_DST -Force"], {env: {CIGO_SELF_SRC: src, CIGO_SELF_DST: dst}, timeout_ms: 30000})
+      } else {
+        r = {code: -1}
+      }
+    } ashtray e {
+      r = {code: -1}
+    }
+  }
+  if r.code != 0 or r.get("simulated", false) {
+    snuff false
+  }
+  # L2 round 6: a directory that appeared between the check at the top
+  # and the mv would make BSD/GNU mv nest `src` inside it with exit 0.
+  # Confirm after the mv that `dst` is now a regular file and no
+  # longer a symlink, so the caller does not trust a race-win.
+  if fs.is_dir(dst) or not fs.is_file(dst) or is_link(dst) {
+    snuff false
+  }
+  snuff true
+}
+
+# ----- cigo self verify -------------------------------------------------------
+
+pull do_self_verify_impl(root, rec) {
+  roll failures = []
+  # L1: the MAC lives inside the record; the canonical bytes are the
+  # record with the `mac` key removed, so MAC never covers itself. A new
+  # map is built with every key except `mac`, since cig's maps mutate in
+  # place through `.remove` and sticks are immutable.
+  stick mac = str(rec.get("mac", ""))
+  roll without_mac = {}
+  for k in rec {
+    if k != "mac" {
+      without_mac[k] = rec[k]
+    }
+  }
+  stick macr = self_mac_canonical(without_mac, mac)
+  if not macr.ok {
+    snuff {ok: false, mac_ok: false, failures: [{rel: path.base(SELF_RECORD), why: "E796 self verify failed: the MAC did not match ${tilde(SELF_RECORD)}"}]}
+  }
+  # N7 + round-3 H1: the head's generation is the newest cigo wrote;
+  # a missing or invalid head is itself a verify failure (an attacker
+  # cannot defeat the rollback check by removing the head), and a record
+  # with a lower generation (an older copy put back in place) is refused.
+  stick head_gen = self_head_load()
+  stick rec_gen = int(rec.get("generation", 0))
+  if head_gen == null {
+    snuff {ok: false, mac_ok: true, failures: [{rel: path.base(SELF_HEAD), why: "E796 self verify failed: head missing or invalid at ${tilde(SELF_HEAD)}"}]}
+  }
+  if rec_gen < head_gen {
+    snuff {ok: false, mac_ok: true, failures: [{rel: path.base(SELF_RECORD), why: "E796 self verify failed: the record's generation ${rec_gen} is older than the head's ${head_gen}; an older copy was put back in place"}]}
+  }
+  for f in rec.get("files", []) {
+    stick rel = str(f.get("path", ""))
+    if not self_rel_safe(rel) {
+      failures.push({rel: rel, why: "E796 self verify failed: unsafe path in the record: ${rel}"})
+      continue
+    }
+    stick full = path.join(root, rel)
+    if not fs.is_file(full) {
+      failures.push({rel: rel, why: "E796 self verify failed: ${rel} is missing"})
+      continue
+    }
+    if is_link(full) {
+      failures.push({rel: rel, why: "E796 self verify failed: ${rel} is a symlink"})
+      continue
+    }
+    stick want = str(f.get("sha256", ""))
+    stick got = hash.sha256_file(full)
+    if want != got {
+      failures.push({rel: rel, why: "E796 self verify failed: ${rel} has changed since the self record was signed"})
+    }
+  }
+  # M9: every sealed object the record names must still be in the tin.
+  stick names = rec.get("sealed_names", []) + [str(rec.get("sealed_map_name", ""))]
+  for n in names {
+    if str(n) == "" {
+      continue
+    }
+    stick b = self_tin_give(str(n))
+    if b == null {
+      failures.push({rel: "sealed", why: "E796 self verify failed: a sealed object named by the record is gone from the tin"})
+      break
+    }
+  }
+  snuff {ok: failures.is_empty(), mac_ok: true, failures: failures}
+}
+
+pull do_self_verify(rest) {
+  expect_flags(["--json"])
+  if not rest.is_empty() {
+    fail("`cigo self verify` takes no arguments; got ${rest.join(" ")}")
+  }
+  stick root = self_install_root()
+  if root == "" {
+    fail("cigo: could not find the install root: CIGO_TOOL must name an orchestrate.cig with bin/cigo beside it, no symlinks on either, and the root must be owned by this user and not group- or world-writable. Set CIGO_TOOL or run through the launcher")
+  }
+  stick rec = self_load()
+  if rec == null {
+    fail("cigo: no self record under ${tilde(SELF_DIR)}; `cigo self build` writes one")
+  }
+  stick v = do_self_verify_impl(root, rec)
+  if flags.contains("--json") {
+    exhale json.stringify({ok: v.ok, mac_ok: v.mac_ok, failures: v.failures, files: rec.get("files", []).len(), sealed: rec.get("sealed_names", []).len(), generation: rec.get("generation", 0)})
+  } else if v.ok {
+    exhale "self verify: ${rec.get("files", []).len()} file(s) hold; the MAC matches; every sealed object is in the tin; generation ${rec.get("generation", 0)}"
+  } else {
+    for f in v.failures {
+      log.error(f.why)
+    }
+  }
+  if not v.ok {
+    exit(1)
+  }
+}
+
+# ----- cigo self where --------------------------------------------------------
+
+pull do_self_where(rest) {
+  expect_flags(["--json"])
+  if not rest.is_empty() {
+    fail("`cigo self where` takes no arguments; got ${rest.join(" ")}")
+  }
+  stick rec = self_load()
+  stick present = rec != null
+  stick files_n = pick(present, rec.get("files", []).len(), 0)
+  stick sealed_n = pick(present, rec.get("sealed_names", []).len(), 0)
+  stick gen = pick(present, rec.get("generation", 0), 0)
+  stick root = self_install_root()
+  if flags.contains("--json") {
+    exhale json.stringify({present: present, record: tilde(SELF_RECORD), head: tilde(SELF_HEAD), install_root: pick(root == "", null, tilde(root)), files: files_n, sealed: sealed_n, generation: gen})
+    snuff
+  }
+  if not present {
+    exhale "no self record; `cigo self build` writes one"
+    snuff
+  }
+  exhale "self record: ${tilde(SELF_RECORD)}"
+  exhale "head:        ${tilde(SELF_HEAD)}"
+  if root != "" {
+    exhale "install:     ${tilde(root)}"
+  }
+  exhale "files:       ${files_n} signed"
+  exhale "sealed:      ${sealed_n} in cig's tin (names not shown)"
+  exhale "generation:  ${gen}"
+}
+
+# ----- do_self dispatch -------------------------------------------------------
+
+pull do_self() {
+  stick sub = targets.get(0, "")
+  stick rest = targets.slice(math.min(1, targets.len()))
+  if sub == "verify" {
+    do_self_verify(rest)
+    snuff
+  }
+  if sub == "where" {
+    do_self_where(rest)
+    snuff
+  }
+  if sub == "build" {
+    do_self_build(rest)
+    snuff
+  }
+  if sub == "restore" {
+    fail("`cigo self restore` is not in this release; it ships with W25. Meanwhile, `ciginstaller repair` reinstalls cigo from the carton and runs `cigo self verify` against it")
+  }
+  fail("`cigo self <verify|where|build>`; got `${sub}`")
+}
+
 # ----- dispatch ---------------------------------------------------------------------------
 
 # The project's `settings` join the layers for every command run inside a
@@ -19369,6 +20580,8 @@ pull dispatch() {
     do_config()
   } else if command == "digest" {
     do_digest()
+  } else if command == "self" {
+    do_self()
   } else if command == "toolchains" {
     do_toolchains()
   } else if command == "rehearse" {
