@@ -43,9 +43,26 @@ repository root lists versions it must not pick.
     dedicated label `cigo-self-proof` (not the shared `cigo-self`) over
     the absolute `CIGO_HOME` and a random nonce stored beside it. The
     nonce is rotated on every `on` / `--unset`; `config_full` deletes
-    the proof the moment the user layer stops saying `off`, so a stale
-    proof cannot be replayed after a hand edit back to `on` and later
-    back to `off`. A proof minted in one `CIGO_HOME` does not verify in
+    the proof the moment the **user layer** stops saying `off` (a
+    project manifest that tightens to `on` does not clear a valid user
+    proof, so the user's turn-off decision stands for when the manifest
+    is dropped). The MAC also covers a per-turn-off generation counter
+    kept in cig's tin under `cigo-self`, bumped on every write, and a
+    crash-safe `seal-gen-pending` marker under `~/.cig-orchestrator/
+    self/` sits between the proof-file delete and the bump: while the
+    marker is on disk, verify fails closed, and config_full retries
+    the bump on every later run until it succeeds. `cigo config
+    self_seal on` and `--unset` (tightening) never fail on a tin
+    problem; only `off` (loosening) can. Together these defeat a
+    replay of copied `seal-off.*` files, a backup/restore of
+    `CIGO_HOME` alone, and a boxed hop that reads the proof files
+    back into the user's home (cig's tin is read-only to a hop and
+    the key folder is empty in a boxed run). They do **not** defeat a
+    same-user process that can itself run `cig tin keep` or `cig tin
+    mac` under this cig home, or delete the marker file: `cig tin
+    keep` has no label ownership, so such a process can wind the
+    counter back to any value. That is the same attacker the
+    threat-model note in `docs/commands.md` already concedes. A proof minted in one `CIGO_HOME` does not verify in
     another. No flag, environment variable or hand-written user-config
     / manifest `self_seal = off` loosens the effective value without a
     valid proof.

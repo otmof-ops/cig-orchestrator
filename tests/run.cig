@@ -8230,7 +8230,9 @@ test("self: a stale proof after a hand edit back to on is deleted and does not l
     fs.write_text(path.join(ch, "self", "seal-off.nonce"), "deadbeef" + "0" * 24 + "\n")
   }
   stick home_abs = path.abs(ch)
-  stick phrase = "cigo-self-seal-off\nhome=" + home_abs + "\nnonce=deadbeef" + "0" * 24 + "\n"
+  # H2 round 5: the generation counter is in the phrase. A fresh tin has
+  # no `self-seal-gen` entry, which cigo reads as 0.
+  stick phrase = "cigo-self-seal-off\nhome=" + home_abs + "\nnonce=deadbeef" + "0" * 24 + "\ngeneration=0\n"
   stick phrase_file = path.join(ch, "self", "phrase.tmp")
   burn {
     fs.write_text(phrase_file, phrase)
@@ -8291,7 +8293,8 @@ test("self: a proof copied from another CIGO_HOME does not verify", pack() {
   }
   # Sign a proof for home B.
   stick b_abs = path.abs(ch_b)
-  stick b_phrase = "cigo-self-seal-off\nhome=" + b_abs + "\nnonce=feedface" + "0" * 24 + "\n"
+  # H2 round 5: generation=0 for a fresh tin, as in the earlier test.
+  stick b_phrase = "cigo-self-seal-off\nhome=" + b_abs + "\nnonce=feedface" + "0" * 24 + "\ngeneration=0\n"
   stick b_phrase_file = path.join(ch_b, "self", "phrase.tmp")
   burn {
     fs.write_text(b_phrase_file, b_phrase)
@@ -8368,6 +8371,357 @@ test("self: verify holds on the real-size install (orchestrate.cig and bin/cigo 
   stick vd = self_tool(dir, root, ["self", "verify"], {})
   assert(vd.code != 0, "verify did not catch a drifted orchestrate.cig: ${vd.out} ${vd.err}")
   says(vd.err, "E796")
+})
+
+test("self: a copied proof does not hold after on and a fresh turn-off (H2 round 5)", pack() {
+  # H2 round 5: a same-user attacker who saved a copy of seal-off.mac
+  # and seal-off.nonce while sealing was off cannot replay them after
+  # the user turns sealing back on and then off again. The per-turn-off
+  # generation counter in cig's tin is in the MACed phrase, and a
+  # bumped counter makes the old MAC not verify under the current
+  # phrase. The tin is not rolled back by a file copy of CIGO_HOME.
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign with cig tin mac)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep(dir, root)
+  stick ch = cigo_home(dir)
+  stick home_abs = path.abs(ch)
+  stick mac_env = {CIGSCRIPT_HOME: path.join(ch, "cig-home"), CIG_SEAL_KEY: "file", NO_COLOR: "1"}
+  burn {
+    fs.mkdir(path.join(ch, "self"))
+  }
+  # Seed the generation counter in the tin at 7: an attacker simulates
+  # the state after an earlier turn-off (os_auth not reachable from
+  # tests, so the scenario is reached the hard way).
+  stick gen_file = path.join(ch, "self", "gen.tmp")
+  burn {
+    fs.write_text(gen_file, "7\n")
+  }
+  stick g1 = hop_env(dir, "cig", ["tin", "keep", gen_file, "--label", "cigo-self", "--name", "self-seal-gen"], mac_env)
+  if g1.code != 0 {
+    exhale "      (skipped: cig tin keep could not seal the gen counter; ${g1.err.trim()})"
+    snuff
+  }
+  burn { fs.rm(gen_file) }
+  # Mint proof A at generation 7, nonce A.
+  stick nonce_a = "deadbeef" + "7" * 24
+  burn {
+    fs.write_text(path.join(ch, "self", "seal-off.nonce"), nonce_a + "\n")
+  }
+  stick phrase_a = "cigo-self-seal-off\nhome=" + home_abs + "\nnonce=" + nonce_a + "\ngeneration=7\n"
+  stick phrase_file = path.join(ch, "self", "phrase.tmp")
+  burn { fs.write_text(phrase_file, phrase_a) }
+  stick signed_a = hop_env(dir, "cig", ["tin", "mac", phrase_file, "--label", "cigo-self-proof"], mac_env)
+  burn { fs.rm(phrase_file) }
+  if signed_a.code != 0 {
+    exhale "      (skipped: cig tin mac could not sign proof A; ${signed_a.err.trim()})"
+    snuff
+  }
+  burn {
+    fs.write_text(path.join(ch, "self", "seal-off.mac"), signed_a.out.trim() + "\n")
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+  }
+  stick off_now = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(off_now, 0)
+  assert(off_now.out.trim() == "off", "proof A did not take effect at gen=7: ${off_now.out}")
+  # Snapshot the proof files: an attacker's backup.
+  stick backup_mac = fs.read_text(path.join(ch, "self", "seal-off.mac"))
+  stick backup_nonce = fs.read_text(path.join(ch, "self", "seal-off.nonce"))
+  # Simulate the operator turning sealing back on: delete the proof,
+  # bump the counter in the tin to 8 (what cigo's on/--unset path does).
+  burn {
+    fs.rm(path.join(ch, "self", "seal-off.mac"))
+    fs.rm(path.join(ch, "self", "seal-off.nonce"))
+    fs.write_text(gen_file, "8\n")
+  }
+  stick g2 = hop_env(dir, "cig", ["tin", "keep", gen_file, "--label", "cigo-self", "--name", "self-seal-gen"], mac_env)
+  assert(g2.code == 0, "could not bump gen to 8: ${g2.err.trim()}")
+  burn { fs.rm(gen_file) }
+  burn {
+    fs.write_text(path.join(ch, "config"), "self_seal = on\n")
+  }
+  stick on_again = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(on_again, 0)
+  assert(on_again.out.trim() == "on", "self_seal did not read on after flipping back: ${on_again.out}")
+  # Attacker restores the backup proof files and the user config back to off.
+  burn {
+    fs.write_text(path.join(ch, "self", "seal-off.mac"), backup_mac)
+    fs.write_text(path.join(ch, "self", "seal-off.nonce"), backup_nonce)
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+  }
+  # self_seal must stay on: the stored MAC covered generation=7 in the
+  # phrase, the tin now says generation=8, so the MAC does not verify.
+  stick replay = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(replay, 0)
+  assert(replay.out.trim() == "on", "a copied proof held after a gen bump: ${replay.out}")
+})
+
+test("self: a project tightening to on does not clear a valid user proof (M3 round 5)", pack() {
+  # M3 round 5: config_full's stale-proof clear judges the user layer
+  # directly. A project manifest that tightens self_seal to `on` must
+  # leave a user's valid proof intact, so the user's turn-off decision
+  # stands for when the manifest is dropped.
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign with cig tin mac)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep(dir, root)
+  stick ch = cigo_home(dir)
+  stick home_abs = path.abs(ch)
+  stick mac_env = {CIGSCRIPT_HOME: path.join(ch, "cig-home"), CIG_SEAL_KEY: "file", NO_COLOR: "1"}
+  burn {
+    fs.mkdir(path.join(ch, "self"))
+    fs.write_text(path.join(ch, "self", "seal-off.nonce"), "0123456789abcdef" + "0" * 16 + "\n")
+    # The user layer says off. A project manifest tightens to on.
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({settings: {self_seal: "on"}, tasks: {}}, 2))
+  }
+  stick phrase = "cigo-self-seal-off\nhome=" + home_abs + "\nnonce=0123456789abcdef" + "0" * 16 + "\ngeneration=0\n"
+  stick phrase_file = path.join(ch, "self", "phrase.tmp")
+  burn { fs.write_text(phrase_file, phrase) }
+  stick signed = hop_env(dir, "cig", ["tin", "mac", phrase_file, "--label", "cigo-self-proof"], mac_env)
+  burn { fs.rm(phrase_file) }
+  if signed.code != 0 {
+    exhale "      (skipped: cig tin mac could not sign; ${signed.err.trim()})"
+    snuff
+  }
+  burn {
+    fs.write_text(path.join(ch, "self", "seal-off.mac"), signed.out.trim() + "\n")
+  }
+  # The effective value is on (manifest tightened), but the proof must
+  # remain on disk and the user config must still say off.
+  stick with_manifest = hop_env(dir, tool_prog("cig"), tool_args(["config", "self_seal"]), self_env(dir, root, {CI: "1"}))
+  exits(with_manifest, 0)
+  assert(with_manifest.out.trim() == "on", "manifest did not tighten self_seal to on: ${with_manifest.out}")
+  assert(fs.is_file(path.join(ch, "self", "seal-off.mac")), "project tightening cleared the valid user proof: seal-off.mac is gone")
+  assert(fs.is_file(path.join(ch, "self", "seal-off.nonce")), "project tightening cleared the user proof nonce")
+  # Drop the manifest tightening: the user's off takes effect with the
+  # same proof (still on disk, still valid).
+  burn {
+    fs.rm(path.join(dir, "cig-tasks.json"))
+  }
+  stick no_manifest = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(no_manifest, 0)
+  assert(no_manifest.out.trim() == "off", "the user's off did not take effect after the manifest was dropped: ${no_manifest.out}")
+})
+
+test("self: cigo config self_seal on and --unset bump the counter and defeat a replay (L1 round 6)", pack() {
+  # L1 round 6: the earlier H2 test bumped the counter by hand, so a
+  # regression that drops the bump from self_seal_clear_proof would not
+  # be caught. This test exercises cigo's own code paths: `cigo config
+  # self_seal on` and `cigo config self_seal --unset` both bump the
+  # counter in the tin, and a backed-up proof cannot replay against the
+  # advanced counter.
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign with cig tin mac)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep(dir, root)
+  stick ch = cigo_home(dir)
+  stick home_abs = path.abs(ch)
+  stick mac_env = {CIGSCRIPT_HOME: path.join(ch, "cig-home"), CIG_SEAL_KEY: "file", NO_COLOR: "1"}
+  # Helper: mint a proof file at the current tin generation.
+  pull mint_proof_at(gen, nonce) {
+    burn {
+      fs.mkdir(path.join(ch, "self"))
+      fs.write_text(path.join(ch, "self", "seal-off.nonce"), nonce + "\n")
+    }
+    stick p = "cigo-self-seal-off\nhome=" + home_abs + "\nnonce=" + nonce + "\ngeneration=" + str(gen) + "\n"
+    stick f = path.join(ch, "self", "phrase.tmp")
+    burn { fs.write_text(f, p) }
+    stick s = hop_env(dir, "cig", ["tin", "mac", f, "--label", "cigo-self-proof"], mac_env)
+    burn { fs.rm(f) }
+    snuff s
+  }
+  pull read_gen() {
+    stick g = hop_env(dir, "cig", ["tin", "give", "--label", "cigo-self", "--name", "self-seal-gen"], mac_env)
+    if g.code != 0 {
+      snuff -1
+    }
+    snuff int(g.out.trim())
+  }
+  # Phase 1: a fresh tin, so the generation reads as 0 (give exit 1).
+  stick s0 = mint_proof_at(0, "11" + "aa" + "0" * 28)
+  if s0.code != 0 {
+    exhale "      (skipped: cig tin mac could not sign proof A; ${s0.err.trim()})"
+    snuff
+  }
+  burn {
+    fs.write_text(path.join(ch, "self", "seal-off.mac"), s0.out.trim() + "\n")
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+  }
+  stick off_a = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(off_a, 0)
+  assert(off_a.out.trim() == "off", "proof A did not take effect: ${off_a.out}")
+  # Snapshot before cigo bumps anything.
+  stick backup_mac_a = fs.read_text(path.join(ch, "self", "seal-off.mac"))
+  stick backup_nonce_a = fs.read_text(path.join(ch, "self", "seal-off.nonce"))
+  # cigo config self_seal on: clears the proof, bumps the counter.
+  stick r_on = self_tool(dir, root, ["config", "self_seal", "on"], {CI: "1"})
+  exits(r_on, 0)
+  assert(not fs.is_file(path.join(ch, "self", "seal-off.mac")), "seal-off.mac not deleted after cigo config self_seal on")
+  assert(not fs.is_file(path.join(ch, "self", "seal-off.nonce")), "seal-off.nonce not deleted after cigo config self_seal on")
+  stick gen_after_on = read_gen()
+  assert(gen_after_on >= 1, "counter did not advance after cigo config self_seal on: ${gen_after_on}")
+  # Attacker restores the backup and sets user config back to off.
+  burn {
+    fs.write_text(path.join(ch, "self", "seal-off.mac"), backup_mac_a)
+    fs.write_text(path.join(ch, "self", "seal-off.nonce"), backup_nonce_a)
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+  }
+  stick replay_a = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(replay_a, 0)
+  assert(replay_a.out.trim() == "on", "a copied proof held after cigo config self_seal on: ${replay_a.out}")
+  # Phase 2: mint a fresh proof at the current counter and test --unset.
+  stick cur = read_gen()
+  assert(cur >= 1, "counter unreadable before phase 2: ${cur}")
+  burn {
+    # Delete the stale copied files so the mint helper writes fresh.
+    if fs.is_file(path.join(ch, "self", "seal-off.mac")) {
+      fs.rm(path.join(ch, "self", "seal-off.mac"))
+    }
+    if fs.is_file(path.join(ch, "self", "seal-off.nonce")) {
+      fs.rm(path.join(ch, "self", "seal-off.nonce"))
+    }
+  }
+  stick s1 = mint_proof_at(cur, "22" + "bb" + "0" * 28)
+  if s1.code != 0 {
+    exhale "      (skipped: cig tin mac could not sign proof B; ${s1.err.trim()})"
+    snuff
+  }
+  burn {
+    fs.write_text(path.join(ch, "self", "seal-off.mac"), s1.out.trim() + "\n")
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+  }
+  stick off_b = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(off_b, 0)
+  assert(off_b.out.trim() == "off", "proof B did not take effect at gen=${cur}: ${off_b.out}")
+  stick backup_mac_b = fs.read_text(path.join(ch, "self", "seal-off.mac"))
+  stick backup_nonce_b = fs.read_text(path.join(ch, "self", "seal-off.nonce"))
+  # cigo config self_seal --unset: clears the proof, bumps the counter,
+  # and removes the self_seal line from the user config.
+  stick r_un = self_tool(dir, root, ["config", "self_seal", "--unset"], {CI: "1"})
+  exits(r_un, 0)
+  assert(not fs.is_file(path.join(ch, "self", "seal-off.mac")), "seal-off.mac not deleted after --unset")
+  assert(not fs.is_file(path.join(ch, "self", "seal-off.nonce")), "seal-off.nonce not deleted after --unset")
+  stick gen_after_un = read_gen()
+  assert(gen_after_un > cur, "counter did not advance after --unset: ${cur} -> ${gen_after_un}")
+  # Attacker restores the backup and writes self_seal = off back in.
+  burn {
+    fs.write_text(path.join(ch, "self", "seal-off.mac"), backup_mac_b)
+    fs.write_text(path.join(ch, "self", "seal-off.nonce"), backup_nonce_b)
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+  }
+  stick replay_b = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(replay_b, 0)
+  assert(replay_b.out.trim() == "on", "a copied proof held after --unset: ${replay_b.out}")
+})
+
+test("self: a failed bump leaves the seal-gen-pending marker and defeats a replay (M4 round 7)", pack() {
+  # M4 round 7: a bump failure during self_seal_clear_proof writes a
+  # marker file under CIGO_HOME/self/seal-gen-pending and leaves the
+  # proof files deleted. While the marker exists, self_seal_proof_holds
+  # returns false, so proof copies restored after the fact do not
+  # replay. The next cigo call with a working tin retries the bump,
+  # clears the marker, and the copies still do not hold (the counter
+  # advanced).
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign with cig tin mac)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep(dir, root)
+  stick ch = cigo_home(dir)
+  stick home_abs = path.abs(ch)
+  stick cig_home = path.join(ch, "cig-home")
+  stick mac_env = {CIGSCRIPT_HOME: cig_home, CIG_SEAL_KEY: "file", NO_COLOR: "1"}
+  # Mint a valid proof at generation 0 and set the user config to off.
+  burn {
+    fs.mkdir(path.join(ch, "self"))
+    fs.write_text(path.join(ch, "self", "seal-off.nonce"), "33" + "cc" + "0" * 28 + "\n")
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+  }
+  stick phrase = "cigo-self-seal-off\nhome=" + home_abs + "\nnonce=33" + "cc" + "0" * 28 + "\ngeneration=0\n"
+  stick phrase_file = path.join(ch, "self", "phrase.tmp")
+  burn { fs.write_text(phrase_file, phrase) }
+  stick signed = hop_env(dir, "cig", ["tin", "mac", phrase_file, "--label", "cigo-self-proof"], mac_env)
+  burn { fs.rm(phrase_file) }
+  if signed.code != 0 {
+    exhale "      (skipped: cig tin mac could not sign; ${signed.err.trim()})"
+    snuff
+  }
+  burn {
+    fs.write_text(path.join(ch, "self", "seal-off.mac"), signed.out.trim() + "\n")
+  }
+  # Confirm the proof holds first.
+  stick off_now = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(off_now, 0)
+  assert(off_now.out.trim() == "off", "proof did not take effect: ${off_now.out}")
+  # Back up the proof files for the replay attempt later.
+  stick backup_mac = fs.read_text(path.join(ch, "self", "seal-off.mac"))
+  stick backup_nonce = fs.read_text(path.join(ch, "self", "seal-off.nonce"))
+  # Plant a cig stub on PATH that intercepts `tin keep` (every bump
+  # goes through keep) and exits with code 4 ("gone"). `tin give`
+  # falls through to the real cig; only keep fails, which is enough
+  # to make `self_seal_gen_bump` return -1.
+  stick stub_dir = path.join(dir, "stub-bin")
+  burn { fs.mkdir(stub_dir) }
+  # Find the real cig path via `command -v` so the stub can exec it
+  # without recursing. Tests inherit PATH, so `command -v cig` works.
+  roll real_cig = "/usr/local/bin/cig"
+  burn {
+    stick w = proc.run("sh", ["-c", "command -v cig"], {timeout_ms: 5000, reads: true})
+    if w.code == 0 {
+      real_cig = str(w.get("out", "")).trim()
+    }
+  }
+  stick stub_src = "#!/bin/sh\nif [ \"$1\" = \"tin\" ] && [ \"$2\" = \"keep\" ]; then\n  exit 4\nfi\nexec \"" + real_cig + "\" \"$@\"\n"
+  burn {
+    fs.write_text(path.join(stub_dir, "cig"), stub_src)
+    proc.run("chmod", ["+x", path.join(stub_dir, "cig")], {timeout_ms: 5000})
+  }
+  # Run `cigo config self_seal on` with the stubbed cig on PATH.
+  # L5 round 7: the tightening must succeed anyway (files deleted,
+  # marker set). The write_setting call writes "on" to the user config.
+  stick stub_env = self_env(dir, root, {CI: "1", PATH: stub_dir + ":" + env.get("PATH", "")})
+  stick r_on = hop_env(dir, tool_prog("cig"), tool_args(["config", "self_seal", "on"]), stub_env)
+  exits(r_on, 0)
+  assert(fs.is_file(path.join(ch, "self", "seal-gen-pending")), "seal-gen-pending marker was not written after a failed bump")
+  assert(not fs.is_file(path.join(ch, "self", "seal-off.mac")), "seal-off.mac was not deleted on the failed-bump path")
+  assert(not fs.is_file(path.join(ch, "self", "seal-off.nonce")), "seal-off.nonce was not deleted on the failed-bump path")
+  # Attacker restores the backup proof files and writes the user config
+  # back to off. Without the marker, the files would verify (gen is
+  # still 0 in the tin because the bump failed). With the marker, they
+  # do not.
+  burn {
+    fs.write_text(path.join(ch, "self", "seal-off.mac"), backup_mac)
+    fs.write_text(path.join(ch, "self", "seal-off.nonce"), backup_nonce)
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+  }
+  stick blocked = hop_env(dir, tool_prog("cig"), tool_args(["config", "self_seal"]), stub_env)
+  exits(blocked, 0)
+  assert(blocked.out.trim() == "on", "replay held while the marker was on disk: ${blocked.out}")
+  assert(fs.is_file(path.join(ch, "self", "seal-gen-pending")), "marker disappeared while the stubbed cig was still in use")
+  # Now run cigo with the real cig (no stub). config_full's retry path
+  # bumps the counter and clears the marker. The proof files are still
+  # restored (attacker's doing), but the counter has advanced so they
+  # do not verify.
+  stick retry = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(retry, 0)
+  assert(retry.out.trim() == "on", "proof held after the marker was cleared and the counter advanced: ${retry.out}")
+  assert(not fs.is_file(path.join(ch, "self", "seal-gen-pending")), "marker was not cleared by the working-tin retry")
+  # And the proof still does not hold on another call.
+  stick again = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(again, 0)
+  assert(again.out.trim() == "on", "proof came back to life: ${again.out}")
 })
 
 # ----- the end --------------------------------------------------------------

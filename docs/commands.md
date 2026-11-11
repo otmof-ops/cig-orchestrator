@@ -1180,25 +1180,63 @@ either way.
 `"self_seal": "off"` in the manifest's `settings`, does not loosen the
 effective value**. `cigo config self_seal off` writes a signed proof
 under its own label (`cigo-self-proof`, distinct from the shared
-`cigo-self`) over the absolute `CIGO_HOME` and a random nonce stored
-beside it (`~/.cig-orchestrator/self/seal-off.{mac,nonce}`). The nonce
-is rotated on every `on` / `--unset`, so a stale proof from an earlier
-turn-off cannot be replayed. The proof is honored only while the user
-layer actually reads `off`; the moment it does not, `config_full`
-deletes the proof. Without a valid proof, the layer value is kept as
-the floor the layer tried to pass: `cigo config` prints the effective
-`on`, and the floored entry is in `cigo config --json`'s `floored`
-list. Turning it back on, or unsetting it, is `cigo config self_seal
-on` / `cigo config self_seal --unset`: the proof is removed with the
-write, and the next hand-written `off` does not quietly take effect.
+`cigo-self`) over the absolute `CIGO_HOME`, a random nonce stored
+beside it (`~/.cig-orchestrator/self/seal-off.{mac,nonce}`), and a
+per-turn-off generation counter kept in cig's tin under `cigo-self`
+(name `self-seal-gen`). The counter is bumped on every `off`, every
+`on` and every `--unset`. The proof is honored only while the **user
+layer** actually reads `off`; when the user layer stops saying `off`,
+`config_full` deletes the proof and bumps the counter. A **project
+manifest** that tightens `self_seal` to `on` leaves a valid user
+proof intact, so the user's turn-off decision stands for when the
+manifest is dropped. Without a valid proof, the layer value is kept
+as the floor the layer tried to pass: `cigo config` prints the
+effective `on`, and the floored entry is in `cigo config --json`'s
+`floored` list. Turning it back on, or unsetting it, is `cigo config
+self_seal on` / `cigo config self_seal --unset`: the proof is
+removed with the write, the counter is bumped, and the next
+hand-written `off` does not quietly take effect.
 
-**Threat model note.** The proof scheme stops a hand edit of the user
-config against a same-user attacker. It does not stop a same-user
-attacker who can run `cigo config self_seal off` through the
-authenticated path (the system's own password prompt would be the
-attacker's to answer) or who can issue `cig tin mac` under the
-`cigo-self-proof` label from the same cig home. A separate OS user,
-or a separate machine, cannot mint a valid proof.
+**What the counter defeats.** The counter closes the replay path
+that the proof files on their own could not: a same-user script
+that kept a copy of `seal-off.mac` and `seal-off.nonce` while
+sealing was off, a backup/restore of `CIGO_HOME` alone, and a boxed
+hop that puts the kept files back in place. cig's tin lives under
+`CIGSCRIPT_HOME`, which is not restored by rolling `CIGO_HOME`
+back, and cig's tin is read-only to a boxed hop (the hop sees a
+sealed view with an empty key folder).
+
+**The seal-gen-pending marker.** The counter bump and the proof-file
+delete are not one atomic step. cigo writes a marker file,
+`~/.cig-orchestrator/self/seal-gen-pending`, before deleting the
+proof files, and removes it only after the bump succeeds. While the
+marker is on disk, `cigo config self_seal` prints `on` and any
+restored proof copies do not verify, even if the counter and files
+would otherwise match; cigo retries the bump on every later call
+until it succeeds. `cigo config self_seal on` and `cigo config
+self_seal --unset` (tightening) never fail on a tin problem: the
+write succeeds, the proof files are deleted, and the marker stays
+so verify keeps failing closed until a later run bumps. Only `cigo
+config self_seal off` (loosening) can fail when the tin cannot
+bump. A same-user process that can reach the marker file can
+delete it; that is the same attacker the threat-model note
+concedes.
+
+**Threat model note.** The proof scheme stops a hand edit of the
+user config against a same-user attacker, and the per-turn-off
+generation counter stops a replay of the proof files after an `on`
+/ `--unset`. It does **not** stop a same-user process that can
+itself run `cig tin keep` or `cig tin mac` under this cig home:
+`cig tin keep` does not check label ownership (SEC-004 proved this
+live in round 6 by writing 7, 8 then 3 under `cigo-self` /
+`self-seal-gen` and reading 3 back), so such a process can wind
+the counter back to any value, mint a fresh proof, or edit the
+record. It also does not stop a same-user attacker who can run
+`cigo config self_seal off` through the authenticated path (the
+system's own password prompt would be the attacker's to answer),
+or who can copy the whole cig home (which includes the tin's seal
+key and the kept entries). A separate OS user, or a separate
+machine, cannot mint a valid proof.
 
 ## Crash reports
 

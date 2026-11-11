@@ -13408,6 +13408,39 @@ stick CONFIG_FILE = path.join(CIGO_HOME, "config")
 stick SELF_SEAL_PROOF_LABEL = "cigo-self-proof"
 stick SELF_SEAL_PROOF = path.join(CIGO_HOME, "self", "seal-off.mac")
 stick SELF_SEAL_PROOF_NONCE = path.join(CIGO_HOME, "self", "seal-off.nonce")
+# H2 round 5: a per-turn-off counter kept in cig's tin under label
+# `cigo-self` and the fixed name `self-seal-gen`. The counter is in the
+# MACed proof phrase, so a proof minted at generation N stops verifying
+# once the counter is bumped (on every `off`, every `on` and every
+# `--unset`). `cig tin keep` with the same name overwrites the previous
+# sealed entry, so the tin does not accumulate per-generation entries.
+#
+# What the counter defeats (round 6 note after SEC-004 M1):
+# - replay of copied proof files (`seal-off.mac` + `seal-off.nonce`)
+#   while the surrounding state advances;
+# - a backup/restore of CIGO_HOME alone (the tin lives under
+#   CIGSCRIPT_HOME, so it is not rewound by rolling CIGO_HOME back);
+# - a boxed hop that reads `seal-off.*` back into the user's home
+#   (cig's tin is read-only to a hop and the tin's key folder is
+#   empty in a boxed run).
+# What it does NOT defeat: a same-user process that can itself run
+# `cig tin keep` or `cig tin mac` under this cig home. `cig tin keep`
+# does not check label ownership, so such a process can wind the
+# counter back to any value (SEC-004 proved it live). That is the
+# same attacker the threat-model note in docs/commands.md already
+# concedes.
+stick SELF_SEAL_GEN_NAME = "self-seal-gen"
+# Round 7 M4: a crash-safe marker between "delete the proof files" and
+# "bump the counter". While the marker exists, `self_seal_proof_holds`
+# returns false, so a same-user script that managed to time a backup +
+# restore inside the deletion/bump window (or a crash, or a cig tin
+# failure) cannot replay old proof files. config_full retries the bump
+# whenever the marker exists, not just when the proof files exist. The
+# off-side bump removes it too (do_config's off branch bumps first, so
+# a stale marker there is cleared on the next successful write). A
+# same-user process can delete the marker, which is the attacker the
+# threat-model note already concedes.
+stick SELF_SEAL_GEN_PENDING = path.join(CIGO_HOME, "self", "seal-gen-pending")
 # Every key `cigo config` accepts: its default and its meaning. The same
 # names as cig's, where cig has them.
 
@@ -13487,7 +13520,7 @@ pull attended() {
 # `cigo-self` cannot mint a self-seal proof under this one.
 pull self_seal_proof_phrase() {
   stick nonce = pick(fs.is_file(SELF_SEAL_PROOF_NONCE), fs.read_text(SELF_SEAL_PROOF_NONCE).trim(), "")
-  snuff "cigo-self-seal-off\nhome=" + path.abs(CIGO_HOME) + "\nnonce=" + nonce + "\n"
+  snuff "cigo-self-seal-off\nhome=" + path.abs(CIGO_HOME) + "\nnonce=" + nonce + "\ngeneration=" + str(self_seal_gen_read()) + "\n"
 }
 
 # A fresh nonce, or the empty string when /dev/urandom is unreadable; the
@@ -13496,12 +13529,101 @@ pull self_seal_new_nonce() {
   snuff self_random_name()
 }
 
+# Read the per-turn-off generation counter from cig's tin (label
+# `cigo-self`, name `self-seal-gen`). Only the "nothing kept" case (cig
+# tin give exit code 1) is the fresh install and reads as 0; any other
+# failure (exit 4 "gone", a spawn error, a timeout, non-numeric output,
+# a number longer than 18 digits) is an error and returns -1, so a
+# transient failure does not silently regress bump's next value from 8
+# back to 1 (SEC-004 M2 round 6). `self_seal_gen_bump` and
+# `self_seal_proof_holds` treat -1 as "fail closed".
+pull self_seal_gen_read() {
+  roll r = null
+  burn {
+    try {
+      # Label is SELF_LABEL (`cigo-self`), spelled as a literal here
+      # because SELF_LABEL is declared later in the file.
+      r = proc.run("cig", ["tin", "give", "--label", "cigo-self", "--name", SELF_SEAL_GEN_NAME], {timeout_ms: 30000, reads: true})
+    } ashtray e {
+      r = null
+    }
+  }
+  if r == null {
+    snuff -1
+  }
+  if r.code == 1 {
+    # "nothing kept" — the fresh install.
+    snuff 0
+  }
+  if r.code != 0 {
+    # Every other exit (4 "gone", a spawn error, a timeout) is an
+    # error: caller fails closed.
+    snuff -1
+  }
+  stick s = str(r.get("out", "")).trim()
+  # L3 round 6: cap digits at 18 so `int()` cannot overflow. A longer
+  # digit string reads as an error, not a parsed value.
+  if not text.matches(s, '^[0-9]{1,18}$') {
+    snuff -1
+  }
+  snuff int(s)
+}
+
+# Bump the per-turn-off counter in the tin and return the new value, or
+# -1 on failure. The caller fails closed on -1. Called on every write
+# that transitions the self_seal state: a new proof is minted, a stale
+# proof is deleted, or the user layer stops saying off. `cig tin keep`
+# with the same name overwrites the previous sealed entry.
+pull self_seal_gen_bump() {
+  stick cur = self_seal_gen_read()
+  if cur < 0 {
+    # Round 6 M2: a transient read failure must not regress the
+    # counter. Fail the bump instead of writing 1 on top of 8.
+    snuff -1
+  }
+  stick nxt = cur + 1
+  stick nm = self_random_name()
+  if nm == "" {
+    snuff -1
+  }
+  stick scratch = path.join(path.dir(SELF_SEAL_PROOF), "gen-" + nm.slice(0, 16) + ".tmp")
+  if not write_outside(scratch, str(nxt) + "\n") {
+    snuff -1
+  }
+  roll r = null
+  burn {
+    try {
+      # Label is SELF_LABEL (`cigo-self`), spelled as a literal here
+      # because SELF_LABEL is declared later in the file.
+      r = proc.run("cig", ["tin", "keep", scratch, "--label", "cigo-self", "--name", SELF_SEAL_GEN_NAME], {timeout_ms: 30000, reads: true})
+    } ashtray e {
+      r = {code: -1}
+    }
+  }
+  remove_outside(scratch)
+  if r.code != 0 {
+    snuff -1
+  }
+  snuff nxt
+}
+
 pull self_seal_proof_holds() {
+  # Round 7 M4: while the pending-bump marker is on disk, a replay
+  # with copies taken before the clear-and-bump window cannot hold.
+  if fs.is_file(SELF_SEAL_GEN_PENDING) {
+    snuff false
+  }
   if not fs.is_file(SELF_SEAL_PROOF) or not fs.is_file(SELF_SEAL_PROOF_NONCE) {
     snuff false
   }
   stick mac = fs.read_text(SELF_SEAL_PROOF).trim()
   if not text.matches(mac, '^[0-9a-f]{32,128}$') {
+    snuff false
+  }
+  # Round 6 M2: a transient failure reading the tin counter means the
+  # phrase cannot be computed; fail closed rather than compute a phrase
+  # with the fallback `0`.
+  if self_seal_gen_read() < 0 {
     snuff false
   }
   stick nm = self_random_name()
@@ -13517,15 +13639,56 @@ pull self_seal_proof_holds() {
   snuff r.code == 0
 }
 
-# Clear the proof and rotate the nonce. Called when self_seal is set back
-# to `on`, when the user layer stops saying `off`, and on `--unset`.
+# Clear the proof and bump the generation counter so a copy of the proof
+# files cannot be replayed after a transition (H2, round 5). Called when
+# self_seal is set back to `on`, when the user layer stops saying `off`,
+# and on `--unset`. Called inside do_config's own failure cleanups too;
+# the extra bump is harmless (it only invalidates proofs that are
+# already being thrown away). Returns the new counter value, or -1 if
+# the bump failed (round 6 M3); callers decide whether to fail hard.
+#
+# Round 7 M4: a durable marker file is written before the proof files
+# are deleted, and only removed after a successful bump. While the
+# marker is on disk, `self_seal_proof_holds` returns false, so a
+# crash or a cig tin failure between the delete and the bump cannot
+# open a replay window with proof files copied beforehand. If the
+# bump fails here, the marker stays and config_full retries the bump
+# on the next run.
 pull self_seal_clear_proof() {
+  # The marker goes down before the bump every time, proof files or not:
+  # when the files are already gone but copies were kept elsewhere, a
+  # failed bump must still leave it, or the copies verify again at the old
+  # generation. Its body is just a timestamp (its existence is what
+  # matters); `write_outside` creates the parent directory, so this works
+  # on a fresh CIGO_HOME too. The files are removed even if the marker
+  # could not be written: a proof left on disk would be worse.
+  write_outside(SELF_SEAL_GEN_PENDING, time.now_iso() + "\n")
   if fs.is_file(SELF_SEAL_PROOF) {
     remove_outside(SELF_SEAL_PROOF)
   }
   if fs.is_file(SELF_SEAL_PROOF_NONCE) {
     remove_outside(SELF_SEAL_PROOF_NONCE)
   }
+  stick nxt = self_seal_gen_bump()
+  if nxt >= 0 and fs.is_file(SELF_SEAL_GEN_PENDING) {
+    remove_outside(SELF_SEAL_GEN_PENDING)
+  }
+  snuff nxt
+}
+
+# Round 7 M4: retry only the bump when the marker is on disk but the
+# proof files are not. The user may be in the middle of a stale
+# `self_seal = off` with a marker that means "verify closed until
+# bump succeeds"; a successful bump clears the marker and the user's
+# own proof can become valid again at the new generation on their
+# next explicit off (not automatically). Called from config_full for
+# every cigo entry that sees the marker.
+pull self_seal_retry_bump() {
+  stick n = self_seal_gen_bump()
+  if n >= 0 and fs.is_file(SELF_SEAL_GEN_PENDING) {
+    remove_outside(SELF_SEAL_GEN_PENDING)
+  }
+  snuff n
 }
 
 # Every setting through the layers: default < preset < system < user <
@@ -13640,17 +13803,44 @@ pull config_full() {
     # script that writes `self_seal = off` to the user config or the
     # manifest cannot loosen sealing. A locked system value is already
     # treated as final above, so administrator policy is unaffected.
+    #
+    # M3 round 5: the stale-proof deletion judges the USER layer
+    # directly, not the effective one. A project manifest that tightens
+    # self_seal to `on` must not invalidate a valid user proof: the
+    # user's turn-off decision stands for when the manifest is dropped.
+    # The proof is cleared only when the user layer itself is absent or
+    # not off.
     if eff.get("self_seal", "on") == "off" and ["user", "project"].contains(src.get("self_seal", "default")) {
       if not self_seal_proof_holds() {
         FLOORED.push({key: "self_seal", wanted: "off", kept: "on", layer: src["self_seal"], from: "no proof", proof: true})
         eff["self_seal"] = "on"
         src["self_seal"] = "proof"
       }
-    } else {
-      # The user or project layer is not saying `off`: a stale proof from
-      # an earlier turn-off is deleted, so a later hand-appended `off` to
-      # the user config does not quietly take effect using that old proof.
-      self_seal_clear_proof()
+    }
+    stick usr_self = str(usr.get("self_seal", {value: ""}).get("value", ""))
+    # Round 7 M4 keeps round 6 M3's soft-fail choice: config_full is
+    # called from almost every cigo entry point, including read-only
+    # queries like `cigo config`, so a tin-bump failure must not
+    # break every cigo command. The proof files are deleted on the
+    # first pass (that part cannot fail here), the marker stays
+    # while the bump keeps failing, `self_seal_proof_holds` returns
+    # false while the marker is there, and a guard note records
+    # the state. config_full retries the bump on every later run
+    # whenever the marker is on disk.
+    if usr_self != "off" and (fs.is_file(SELF_SEAL_PROOF) or fs.is_file(SELF_SEAL_PROOF_NONCE)) {
+      # Transition out of `off`: delete the files and bump.
+      stick bump = self_seal_clear_proof()
+      if bump < 0 {
+        guard_note({kind: "config", thing: "self_seal", outcome: "proof files deleted but the generation counter did not bump (tin may be in a `gone` state; try `cig tin verify`); seal-gen-pending marker keeps verify failing closed until bump succeeds"})
+      }
+    } else if fs.is_file(SELF_SEAL_GEN_PENDING) {
+      # Round 7 M4: a previous run left the marker behind. Try the
+      # bump again. A successful bump removes the marker; while it
+      # is there, verify keeps failing closed.
+      stick bump = self_seal_retry_bump()
+      if bump < 0 {
+        guard_note({kind: "config", thing: "self_seal", outcome: "seal-gen-pending marker still on disk: proof generation counter did not bump this run either (cig tin may be in a `gone` state)"})
+      }
     }
     snuff {effective: eff, source: src, locked: locked, preset: preset_name}
   })
@@ -14168,15 +14358,28 @@ pull do_config() {
       fail("not approved: the system's prompt was refused; ${key} is unchanged")
     }
     # The proof of os_auth: a MAC under `cigo-self-proof` (its own label,
-    # not the shared `cigo-self`) over the absolute CIGO_HOME and a fresh
-    # nonce stored beside it. The nonce is rotated here so a stale proof
-    # from an earlier turn-off never applies, and config_full deletes the
-    # proof when the user layer stops saying `off`.
+    # not the shared `cigo-self`) over the absolute CIGO_HOME, a fresh
+    # nonce stored beside it, and the per-turn-off generation counter
+    # stored in cig's tin under `cigo-self` (H2 round 5). The counter is
+    # bumped on every write so an attacker who kept the nonce and MAC
+    # from an earlier turn-off cannot replay them after an on/--unset
+    # and another turn-off.
     burn {
       try {
         proc.run("sh", ["-c", 'umask 077 && mkdir -p "$1" && chmod 700 "$1" 2>/dev/null', "sh", path.dir(SELF_SEAL_PROOF)], {timeout_ms: 10000})
       } ashtray e {
       }
+    }
+    # Bump the generation first: the phrase then reads the new value.
+    stick bumped = self_seal_gen_bump()
+    if bumped < 0 {
+      guard_note({kind: "config", thing: key, outcome: "not approved: cig tin keep could not bump the generation counter"})
+      fail("cigo: could not bump the proof generation counter in the tin; ${key} is unchanged")
+    }
+    # Round 7 M4: a successful bump also clears any stale pending
+    # marker left by an earlier failed bump.
+    if fs.is_file(SELF_SEAL_GEN_PENDING) {
+      remove_outside(SELF_SEAL_GEN_PENDING)
     }
     stick nonce = self_seal_new_nonce()
     if nonce == "" {
@@ -14185,6 +14388,16 @@ pull do_config() {
     }
     if not write_outside(SELF_SEAL_PROOF_NONCE, nonce + "\n") {
       fail("cigo: could not write the proof nonce file; ${key} is unchanged")
+    }
+    # L4 round 7: re-check the generation counter before building the
+    # phrase. A transient tin failure between the bump and this call
+    # would have `self_seal_proof_phrase` print `generation=-1` and
+    # sign nonsense; refuse instead of minting a proof that can never
+    # verify.
+    if self_seal_gen_read() < 0 {
+      self_seal_clear_proof()
+      guard_note({kind: "config", thing: key, outcome: "not approved: generation counter unreadable after bump"})
+      fail("cigo: the proof generation counter became unreadable after a successful bump (cig tin may be in a `gone` state); ${key} is unchanged")
     }
     stick nm = self_random_name()
     if nm == "" {
@@ -14209,12 +14422,31 @@ pull do_config() {
     }
   }
   if key == "self_seal" and (value == null or value == "on") {
-    # Going back on, or taking the user-layer value out: the proof and
-    # the nonce are removed so a later hand-appended `off` to the user
-    # config does not quietly take effect on an old proof.
-    self_seal_clear_proof()
+    # Going back on, or taking the user-layer value out: the proof
+    # files are removed and the generation counter in the tin is
+    # bumped so a copied proof from the earlier turn-off cannot be
+    # replayed (H2 round 5). Round 7 L5: tightening never fails on a
+    # tin problem. `self_seal_clear_proof` writes the M4 marker
+    # before deleting the files, so when the bump fails here the
+    # marker stays on disk and `self_seal_proof_holds` keeps
+    # returning false (the replay window stays closed). config_full
+    # retries the bump on every later run until it succeeds. Only
+    # loosening needs the tin; a user tightening their own setting
+    # is never blocked by a cig tin issue.
+    stick bump = self_seal_clear_proof()
+    if bump < 0 {
+      guard_note({kind: "config", thing: key, outcome: "set anyway: proof generation counter did not bump (tin may be in a `gone` state); seal-gen-pending marker keeps verify failing until a later run bumps"})
+    }
   }
   write_setting(key, value)
+  # L9 round 5: after the user-config write for self_seal = off, the
+  # effective proof state must still hold. self_seal_proof_holds() reads
+  # the files and the tin directly (not config_full's cache), so a
+  # mismatch here means a partial failure of the lines above
+  # (write_setting itself does not touch the proof files or the tin).
+  if key == "self_seal" and value != null and value == "off" and not self_seal_proof_holds() {
+    fail("cigo: the proof did not hold after writing ${key} = off; ${key} may be inconsistent and needs a fresh `cigo config self_seal off`")
+  }
 }
 
 # The settings cigo guard stats watches for a "notice was followed by a
@@ -18860,30 +19092,6 @@ pull self_file_ok(root, rel) {
   snuff fs.is_file(acc)
 }
 
-# Each parent directory under `root` that leads to `rel`, used to refuse a
-# restore that would step through a symlink added since the record was
-# signed.
-pull self_parents_ok(root, rel) {
-  stick parts = rel.replace("\\", "/").split("/")
-  if parts.len() <= 1 {
-    snuff true
-  }
-  roll acc = root
-  for i in [0, 1, 2, 3, 4, 5, 6, 7] {
-    if i >= parts.len() - 1 {
-      snuff true
-    }
-    acc = path.join(acc, parts[i])
-    if is_link(acc) {
-      snuff false
-    }
-    if not fs.is_dir(acc) {
-      snuff false
-    }
-  }
-  snuff true
-}
-
 # 128 bits of hex: /dev/urandom on Linux, macOS and the BSDs, PowerShell's
 # RNGCryptoServiceProvider on Windows. No fallback to the clock: when neither
 # is there, the build is refused rather than written with a guessable name.
@@ -19346,15 +19554,21 @@ pull do_self_build_body(root, new_gen) {
   exhale "wrote the self record for ${tilde(root)}: ${install_entries.len()} install file" + pick(install_entries.len() == 1, "", "s") + " signed, ${sealed_names.len()} sealed object" + pick(sealed_names.len() == 1, "", "s") + " in the tin, generation ${new_gen}" + pick(seal_on, "", " (self_seal is off; the sensitive parts are hashed, not sealed)")
 }
 
-# A same-filesystem `mv -f -T` for the record and the head (both already
-# under SELF_DIR). The restore-time rename lived in a separate helper that
-# went with W25; this one is the only mv the self region needs now.
+# A same-filesystem rename for the record and the head (both already under
+# SELF_DIR). `mv -T` is a GNU extension and BSD/macOS `mv` rejects it, so
+# the portable form is `mv -f` with an explicit guard that `dst` is not a
+# directory (what -T would catch). The restore-time rename lived in a
+# separate helper that went with W25; this one is the only mv the self
+# region needs now.
 pull self_rename_inside(src, dst) {
+  if fs.is_dir(dst) {
+    snuff false
+  }
   roll r = null
   burn {
     try {
       if which("mv") != null {
-        r = proc.run("mv", ["-fT", "--", src, dst], {timeout_ms: 30000})
+        r = proc.run("mv", ["-f", "--", src, dst], {timeout_ms: 30000})
       } else if powershell() != null {
         r = proc.run(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "Move-Item -LiteralPath $env:CIGO_SELF_SRC -Destination $env:CIGO_SELF_DST -Force"], {env: {CIGO_SELF_SRC: src, CIGO_SELF_DST: dst}, timeout_ms: 30000})
       } else {
@@ -19364,7 +19578,17 @@ pull self_rename_inside(src, dst) {
       r = {code: -1}
     }
   }
-  snuff r.code == 0 and not r.get("simulated", false)
+  if r.code != 0 or r.get("simulated", false) {
+    snuff false
+  }
+  # L2 round 6: a directory that appeared between the check at the top
+  # and the mv would make BSD/GNU mv nest `src` inside it with exit 0.
+  # Confirm after the mv that `dst` is now a regular file and no
+  # longer a symlink, so the caller does not trust a race-win.
+  if fs.is_dir(dst) or not fs.is_file(dst) or is_link(dst) {
+    snuff false
+  }
+  snuff true
 }
 
 # ----- cigo self verify -------------------------------------------------------
