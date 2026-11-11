@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+name: Set up cigo
+description: >-
+  Puts cig (from its release, checked against its checksum) and cigo on the
+  runner's PATH, so a job can run `cigo run ci` or `cigo rehearse --changed`.
+  Linux and macOS runners.
+branding:
+  icon: shield
+  color: gray-dark
+inputs:
+  cig-version:
+    description: The cig release to install, as its tag.
+    required: false
+    default: v1.20.0
+  userns:
+    description: >-
+      On Linux, let cig make its box by turning off Ubuntu's restriction on
+      unprivileged user namespaces (the runner is thrown away afterwards).
+      Needed by `cigo rehearse`; set false to leave the runner as it is.
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Install cig and cigo
+      shell: bash
+      env:
+        CIG_VERSION: ${{ inputs.cig-version }}
+        USERNS: ${{ inputs.userns }}
+      run: sh "${{ github.action_path }}/install.sh"

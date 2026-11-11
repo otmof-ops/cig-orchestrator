@@ -172,7 +172,8 @@ settings today: `versions` (`off` < `never` < `ask` < `always`; floored),
 `standard` < `strict`; floored), `trust` (`on` < `off`; floored), `osv`
 (`off` < `online` < `offline`; floored), `rehearse` (`never` < `auto` <
 `always`; floored), `rehearse_use` (`off` < `on`; floored), `verdict_cache` (`on` <
-`off`; floored), `rehearse_jobs`, `crash_reports` (`always` < `ask` < `never`),
+`off`; floored), `rehearse_jobs`, `isolation` (`auto` < `box` < `container` <
+`gvisor` < `vm`), `crash_reports` (`always` < `ask` < `never`),
 `update_channel` (`prerelease` < `stable`), `issues_repo`, `preset`, and
 three of this machine's own, which a project cannot set at all:
 `guard_scope` (`project` < `dev` < `downloads` < `agents` < `system`),
@@ -909,7 +910,9 @@ cigo rehearse                          in a project, with nothing named: the man
 cigo rehearse --changed [--base=<rev>] every package the lockfiles add or change since the base
               [--list] [--max=N]       name them and rehearse nothing; at most N (50)
               [--jobs=N]               rehearse up to N at once, each in its own box (rehearse_jobs)
-              [--sarif | --markdown]   for code scanning or a pull request comment
+              [--isolation=<level>]    auto, box, container, gvisor or vm (isolation); the report's first line names the one used
+              [--sarif [<file>]]       for code scanning: on stdout, or written to the file named
+              [--markdown]             for a pull request comment
               [--fresh]                rehearse even what was rehearsed before
               [--no-use]               install only: no require, import or run (rehearse_use = off)
               [--use]                  use it once, whatever rehearse_use says
@@ -1001,12 +1004,62 @@ script, and when there are several the finding names each and says the box
 cannot tell which. The report's first line says how many dependencies were
 read (`rehearsed colors-plus@2.4.1 in 6.2 s, with its 12 dependencies`).
 
+**Where it runs: the isolation levels.** A rehearsal never runs without
+isolation: running unknown code unprotected to find out whether it is safe
+defeats the point. `isolation` (or `--isolation=<level>` for one run) is
+`auto` by default, which takes the strongest level this machine has that
+works; the report's first line names the one used (`rehearsed colors-plus@2.4.1
+in 6.2 s, with its 12 dependencies (isolation: box)`), and `cigo doctor`
+lists each level and the one `auto` would use.
+
+| level | what | needs |
+|---|---|---|
+| `box` | cig's contained box: user, mount, network and PID namespaces, the registry as the only network, what the install wrote outside its footprint and which addresses it tried to reach seen | Linux, cig 1.12.0 or later, unprivileged user namespaces |
+| `gvisor` | the same rehearsal, inside the box, run under gVisor (`runsc --rootless do`), so the package gets a kernel of its own | `runsc` that runs a command rootless here; **not tested against a real gVisor yet** |
+| `container` | a throwaway Docker or Podman container: nothing of your machine mounted (a script's own folder read-only), no capabilities, no new privileges, a read-only root, bounded memory and processes. The fetch has a network and runs no package code (npm `--ignore-scripts`, `pip download`, `cargo fetch`); the run that executes the install scripts, the build and the use has none | Docker or Podman that answers; the way to rehearse on macOS and Windows, where they run a Linux VM |
+| `vm` | a Firecracker or QEMU microVM | not built: refuses, and says so |
+
+`auto` prefers `gvisor`, then `box`, then `container`: on Linux the box is the
+level that sees what a package tried to reach and wrote, and a container is
+picked over it only where there is no box (macOS, Windows, a runner without user
+namespaces). With none of them it refuses: `rehearsing without isolation would
+run the package on your machine; install Docker or Podman, or rehearse on
+Linux`, and what each level said. A level you name that cannot be had is refused
+with its reason, never swapped for another. The container takes a package from
+its registry, or a script; a local file, a folder or a `git+` URL needs
+`--isolation=box`. Its honest limits: in the run phase there is no network, so
+an attempt to reach out fails where it stands and is not named; a PyPI source
+distribution whose build needs a backend from the network fails offline, and
+the rehearsal says it could not judge. A verdict is kept under the bytes it
+judged, whatever level judged them.
+
+**Decoys.** Before the install, the rehearsal plants a decoy home: an SSH key,
+cloud and registry tokens and a git credentials file, each holding a marker made
+fresh from `/dev/urandom` for this rehearsal, and runs the install with `HOME`
+there, so what looks in `~` finds the decoys (the tool's own places, cargo's,
+rustup's and the XDG folders, stay the real ones, so version managers still
+work). Afterwards it says what became of them. A decoy **read** (its access time
+moved: each is set to the year 2000 first, and a probe proves the filesystem
+records reads, else the report says it cannot watch) is `E871`, high; with an
+attempt to reach a raw address (`E872`) it is critical. A **copy** of a marker
+in another file of the scratch folders, or in what the install printed, is
+named too. All of it is blamed on the package that did it, as above. The
+marker never leaves the machine and is never printed. Limits: it sees a lookup
+through `HOME`, not a read by an absolute path or by the account database; a
+`./script.sh` keeps its own `HOME` (so what it writes there is judged against
+its footprint); and until cig's own box plants decoys and watches reads
+(CigScript#106), a read of anything else is not seen, which the E898 note says.
+
+**`--sarif <file>`** writes the SARIF log to the file (relative to where cigo
+was run) and says so on stderr, so a CI step needs no redirect:
+`cigo rehearse --changed --base origin/main --sarif rehearse.sarif`.
+
 **Settings for it.** `verdict_cache` is `on` by default; `off` neither reads
 nor keeps a verdict, so the same bytes are rehearsed every time (a project
 may only turn it off, never back on; `--fresh` does it for one run).
 `rehearse_use` is `on` by default; `off` is `--no-use` for every run (a
 project may only turn it on, never off; `--use` turns it back on for one
-run). `rehearse_jobs` is the number above. `metadata_young_days` (7, see
+run). `rehearse_jobs` is the number above. `isolation` is the level above (`auto` by default; any value may be set by a project). `metadata_young_days` (7, see
 registry metadata above) is how recent "recently published" is for `E882`.
 
 It exits by risk, once the verdict reaches `--fail-on`: `0` below it (and

@@ -139,6 +139,23 @@ jobs:
           path: test-timings.json
           if-no-files-found: warn
 
+  # The setup action as a workflow uses it (#56): cig and cigo on PATH in one step.
+  setup-action:
+    name: the setup action (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./setup
+      - name: cig and cigo answer
+        shell: bash
+        run: |
+          cig --version
+          cigo --version
+
   # musl and BusyBox, with bash installed: what Alpine users have.
   ci-alpine:
     name: ci (alpine)

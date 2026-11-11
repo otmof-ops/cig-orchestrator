@@ -7,6 +7,31 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **`cigo rehearse`: decoys, isolation levels, the setup action (#56).**
+  - A rehearsal plants decoy credentials (an SSH key, cloud and registry
+    tokens, a git credentials file, each with a marker made fresh for the
+    rehearsal) and runs the install with `HOME` there. A decoy that is read,
+    changed, copied to another file or printed is `E871`, blamed on the
+    package that did it; with an attempt to reach a raw address it is
+    critical. Until cig's box watches reads itself, a read is seen by the
+    decoy's access time, and the report says when the filesystem cannot show
+    one.
+  - `isolation` (`auto`, `box`, `container`, `gvisor`, `vm`) and
+    `--isolation=<level>`. `container` rehearses a package or script in a
+    throwaway Docker or Podman container with nothing of the machine mounted,
+    a fetch that runs no package code, and a run with no network. `gvisor`
+    runs the box's rehearsal under `runsc --rootless do` and is used only
+    where `runsc` answers (not yet tested against a real gVisor). `vm` is not
+    built. `auto` takes the strongest that works (gvisor, box, container); with
+    none, a rehearsal refuses, and says why, instead of running the package on
+    your machine. The report's first line names the level; `cigo doctor` lists
+    them all.
+  - `cigo rehearse --sarif <file>` writes the SARIF log to the file, so the CI
+    snippet in the issue works as written.
+  - `setup/`: a composite action. `uses: otmof-ops/cig-orchestrator/setup@v1`
+    installs cig from its release (checked against its checksum) and links
+    cigo from the action's own checkout; `docs/ci.md` has the one line and the
+    four lines that rehearse a pull request's new packages.
 - **`cigo rehearse`: transitive blame, `--jobs`, nothing in a project, three
   settings (#56).**
   - A finding in a dependency's dependency is blamed on the path from the

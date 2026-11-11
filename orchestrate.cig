@@ -86,6 +86,8 @@ stick SETTINGS = {
     doc: "kept verdicts: on keeps a rehearsal's verdict under the bytes it judged and answers the same bytes from it, off rehearses every time and keeps nothing (cigo rehearse --fresh does that for one run)"},
   rehearse_use: {values: ["off", "on"], default: "on", floor: true, presets: {},
     doc: "use it once: on runs the package after installing it (npm requires it, PyPI imports it, a crate is linked into a program that runs), off installs only (cigo rehearse --no-use for one run, --use to turn it back on for one)"},
+  isolation: {values: ["auto", "box", "container", "gvisor", "vm"], default: "auto", floor: false, presets: {},
+    doc: "where cigo rehearse runs a package: auto takes the strongest this machine has that works (gvisor, then cig's contained box, then a Docker or Podman container), box, container or gvisor fix one, vm is not built; it never runs without one of them, and the report's first line names the one it used; --isolation=<level> for one run"},
   rehearse_jobs: {values: null, default: "auto", floor: false, presets: {},
     doc: "how many packages cigo rehearse --changed (and cigo rehearse with nothing) rehearses at once, each in its own box: a number from 1 to 16, or auto for half the cores (at most 8); --jobs=N for one run"},
   blacklist_unboxed: {values: ["refuse", "ask"], default: "refuse", floor: true, presets: {ci: "refuse", paranoid: "refuse"},
@@ -1297,7 +1299,8 @@ stick command = args.get(0, "help")
 roll words = []
 roll extra = []
 roll passing = false
-# `--jobs N` and `--max N` are read as `--jobs=N` and `--max=N` (cigo rehearse).
+# `--jobs N` and `--max N` are read as `--jobs=N` and `--max=N` (cigo rehearse);
+# `--sarif <file>` and `--sarif=<file>` name the file the SARIF log is written to.
 roll joins = ""
 for a in args.slice(1) {
   if passing {
@@ -1307,13 +1310,20 @@ for a in args.slice(1) {
   } else if joins != "" and text.matches(a, '^[0-9]+$|^auto$') {
     words.push(joins + "=" + a)
     joins = ""
+  } else if joins == "--sarif" and text.matches(a, '^[A-Za-z0-9._/~+-]+\.(sarif|sarif\.json|json)$') {
+    words.push("--sarif")
+    words.push("--sarif-file=" + a)
+    joins = ""
   } else {
     if joins != "" {
       words.push(joins)
     }
     joins = ""
-    if command == "rehearse" and (a == "--jobs" or a == "--max") {
+    if command == "rehearse" and (a == "--jobs" or a == "--max" or a == "--sarif") {
       joins = a
+    } else if command == "rehearse" and a.starts_with("--sarif=") {
+      words.push("--sarif")
+      words.push("--sarif-file=" + a.slice(8))
     } else {
       words.push(a)
     }
@@ -3957,7 +3967,7 @@ pull do_help() {
   exhale "                              build the offline OSV database (npm, PyPI, crates.io, Go, RubyGems, Packagist, Maven, NuGet)"
   exhale "  cigo rehearse <npm:name[@version]|pypi:name[==version]|crates:name[@version]|./script.sh> [--json] [--keep]"
   exhale "                              install it in cig's contained box (Linux) and say what it did beyond its footprint"
-  exhale "  cigo rehearse --changed [--base=<rev>] [--list] [--max=N] [--jobs=N] [--fresh] [--json|--sarif|--markdown]"
+  exhale "  cigo rehearse --changed [--base=<rev>] [--list] [--max=N] [--jobs=N] [--isolation=<level>] [--fresh] [--json|--sarif|--markdown]"
   exhale "                              every package the lockfiles add or change since the default branch, rehearsed"
   exhale "  cigo rehearse               in a project, with nothing named: the manifest's direct dependencies"
   exhale "  cigo blacklist [list | add <thing> [--reason=...] [--expires=90d] | remove <entry> | why <thing> | reload]"
@@ -11463,7 +11473,7 @@ pull rehearse_or_kept(job, integrity, keep) {
   if kept != null {
     snuff kept.merge({kept: true, layer: null, last_line: "", seconds: 0, exit: 0, error: null, changed: {}})
   }
-  rehearse_ready()
+  rehearse_ready_isolated()
   stick r = rehearse_one(job, keep)
   keep_verdict(key, r)
   snuff r.merge({kept: false})
@@ -11569,8 +11579,9 @@ pull rehearse_against(spec, r, against, human) {
 }
 
 pull do_rehearse() {
-  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh", "--fail-on", "--no-use", "--use", "--against", "--jobs", "--integrity"])
+  expect_flags(["--json", "--plain", "--keep", "--sarif", "--markdown", "--changed", "--base", "--list", "--max", "--fresh", "--fail-on", "--no-use", "--use", "--against", "--jobs", "--integrity", "--isolation", "--sarif-file"])
   fail_on()
+  isolation_wanted()
   if flags.contains("--changed") {
     do_rehearse_changed()
     snuff
@@ -11592,7 +11603,7 @@ pull do_rehearse() {
   if not listed.is_empty() {
     stick items = listed.map(pack(f) => {finding: f, subject: spec, place: null, risk: "critical"})
     if flags.contains("--sarif") {
-      exhale json.stringify(sarif_log(items), 2)
+      emit_sarif(items)
     } else if flags.contains("--markdown") {
       exhale markdown_report("cigo rehearse " + spec, "critical", items, "")
     } else if flags.contains("--json") {
@@ -11609,13 +11620,15 @@ pull do_rehearse() {
   }
   stick job = rehearse_spec(spec)
   stick kept_already = kept_verdict(verdict_key(job, null)) != null
-  if not kept_already and proc.which(job.tool) == null {
-    rehearse_ready()
-    fail("${job.tool} not found: the rehearsal installs with the ecosystem's own tool")
+  if not kept_already {
+    rehearse_ready_isolated()
+    if isolation_level() != "container" and proc.which(job.tool) == null {
+      fail("${job.tool} not found: the rehearsal installs with the ecosystem's own tool")
+    }
   }
   stick human = not flags.contains("--json") and not flags.contains("--sarif") and not flags.contains("--markdown")
   if human and not kept_already {
-    exhale "rehearsing ${job.label} (${job.eco}) in the box: nothing it does is applied"
+    exhale "rehearsing ${job.label} (${job.eco}) in " + pick(isolation_level() == "box", "the box", "isolation: " + isolation_level()) + ": nothing it does is applied"
   }
   stick r = rehearse_or_kept(job, integrity, flags.contains("--keep"))
   drop_rehearse_clone()
@@ -11626,7 +11639,7 @@ pull do_rehearse() {
   }
   stick items = r.findings.map(pack(f) => {finding: f, subject: spec, place: null, risk: r.risk})
   if flags.contains("--sarif") {
-    exhale json.stringify(sarif_log(items), 2)
+    emit_sarif(items)
   } else if flags.contains("--markdown") {
     exhale markdown_report("cigo rehearse " + spec, r.risk, items, "Nothing outside the ${job.eco} footprint.")
   } else if flags.contains("--json") {
@@ -11655,6 +11668,401 @@ pull rehearse_ready() {
   if path.normalize(ROOT) == path.normalize(fs.home()) {
     fail("the rehearsal runs in a project or an empty folder, not in your home: the box lays over the folder you are in, and your home has a layer of its own (cd into a folder first)")
   }
+}
+
+# The SARIF log of a rehearsal: on stdout, or in the file `--sarif <file>`
+# names (relative to where cigo was run), so a CI step can hand it to the
+# code-scanning upload without a redirect.
+pull emit_sarif(items) {
+  stick body = json.stringify(sarif_log(items), 2)
+  stick given = flag_value("--sarif-file", "")
+  if given == "" {
+    exhale body
+    snuff
+  }
+  stick file = pick(path.is_abs(given), given, path.join(CALLER_DIR, given))
+  if not write_outside(file, body + "\n") {
+    fail("cigo rehearse: could not write the SARIF log to ${given}")
+  }
+  log.info("cigo: wrote the SARIF log (${items.len()} finding" + pick(items.len() == 1, "", "s") + ") to ${given}")
+}
+
+# ----- isolation levels (#56) ---------------------------------------------------------
+#
+# Where a rehearsal runs. `box` is cig's contained box (Linux): the network
+# limited to the registry, and what the install wrote or tried to reach
+# seen. `container` is a throwaway Docker or Podman container: nothing of
+# yours is mounted, the fetch has a network, the run that executes the
+# package's code has none. `gvisor` runs the box's rehearsal inside gVisor
+# (`runsc --rootless do`), so the package gets a kernel of its own. `vm`
+# (a Firecracker or QEMU microVM) is not built: nothing here can run one.
+# `isolation = auto` takes the strongest this machine has that works: gvisor,
+# then the box, then a container (a container is picked over the box only
+# where there is no box: macOS, Windows, a runner without user namespaces).
+# A rehearsal never runs without one of them.
+
+stick ISOLATION_VALUES = ["auto", "box", "container", "gvisor", "vm"]
+stick NO_ISOLATION = "rehearsing without isolation would run the package on your machine; install Docker or Podman, or rehearse on Linux"
+roll ISOLATION_CHOSEN = null
+roll ENGINE_KNOWN = null
+roll GVISOR_KNOWN = null
+
+# The level asked for: --isolation=<level>, else the isolation setting.
+pull isolation_wanted() {
+  stick v = flag_value("--isolation", config().isolation)
+  if not ISOLATION_VALUES.contains(v) {
+    fail("--isolation and the isolation setting take auto, box, container, gvisor or vm; got `${v}`")
+  }
+  snuff v
+}
+
+# Docker or Podman that answers (`<engine> info`), Podman first (it needs no
+# daemon). {name, why}: name is null when none works, and why says what was found.
+pull container_engine() {
+  if ENGINE_KNOWN == null {
+    ENGINE_KNOWN = {name: null, why: "no Docker or Podman on this machine"}
+    for t in ["podman", "docker"] {
+      if which(t) == null {
+        continue
+      }
+      roll answered = false
+      burn {
+        try {
+          answered = proc.run(t, ["info"], {timeout_ms: 60000}).code == 0
+        } ashtray e {
+          answered = false
+        }
+      }
+      if answered {
+        ENGINE_KNOWN = {name: t, why: ""}
+        snuff ENGINE_KNOWN
+      }
+      ENGINE_KNOWN = {name: null, why: t + " is installed but does not answer `" + t + " info` (is its daemon or machine running?)"}
+    }
+  }
+  snuff ENGINE_KNOWN
+}
+
+# gVisor: `runsc` that can run one command rootless. {ok, why}.
+pull gvisor_here() {
+  if GVISOR_KNOWN == null {
+    GVISOR_KNOWN = {ok: false, why: "runsc (gVisor) is not installed"}
+    if cig.os() == "linux" and which("runsc") != null {
+      roll answered = false
+      burn {
+        try {
+          answered = proc.run("runsc", ["--rootless", "--network=host", "do", "true"], {timeout_ms: 60000}).code == 0
+        } ashtray e {
+          answered = false
+        }
+      }
+      GVISOR_KNOWN = pick(answered, {ok: true, why: ""}, {ok: false, why: "runsc is installed but cannot run a command rootless here (`runsc --rootless do true` failed)"})
+    }
+  }
+  snuff GVISOR_KNOWN
+}
+
+# Can the box be had here? Not a refusal, a question.
+pull box_here() {
+  snuff rehearsal_possible() and contain_possible()
+}
+
+# What each level needs and says when it cannot be had: [level, ok, why].
+pull isolation_report() {
+  stick eng = container_engine()
+  stick gv = gvisor_here()
+  stick box_why = pick(rehearsal_possible(), "cig cannot make a contained box (" + clip(CONTAIN_WHY, 160) + ")", "the contained box needs cig 1.12.0 or later on Linux (this is cig ${cig.version()} on ${cig.os()})")
+  snuff [
+    ["vm", false, "not built: a Firecracker or QEMU microVM backend needs a machine to build and test it on"],
+    ["gvisor", gv.ok and box_here(), pick(gv.ok, pick(box_here(), "", "gVisor runs inside cig's box here, and " + box_why), gv.why)],
+    ["container", eng.name != null, pick(eng.name != null, eng.name, eng.why)],
+    ["box", box_here(), pick(box_here(), "", box_why)],
+  ]
+}
+
+# The level this rehearsal runs at, or a refusal that says why. Asked once.
+pull isolation_level() {
+  if ISOLATION_CHOSEN != null {
+    snuff ISOLATION_CHOSEN
+  }
+  stick wanted = isolation_wanted()
+  stick rep = isolation_report()
+  if wanted != "auto" {
+    for row in rep {
+      if row[0] == wanted and not row[1] {
+        fail("isolation is ${wanted} and it is not available here: " + row[2])
+      }
+    }
+    ISOLATION_CHOSEN = wanted
+    snuff wanted
+  }
+  for level in ["gvisor", "box", "container"] {
+    for row in rep {
+      if row[0] == level and row[1] {
+        ISOLATION_CHOSEN = level
+        snuff level
+      }
+    }
+  }
+  fail(NO_ISOLATION + " (" + rep.filter(pack(row) => row[0] != "vm").map(pack(row) => row[0] + ": " + row[2]).join("; ") + ")")
+}
+
+# The isolation's own checks before a rehearsal: a level exists, and for
+# the box and gVisor, the folder is not your home.
+pull rehearse_ready_isolated() {
+  stick level = isolation_level()
+  if level != "container" and path.normalize(ROOT) == path.normalize(fs.home()) {
+    fail("the rehearsal runs in a project or an empty folder, not in your home: the box lays over the folder you are in, and your home has a layer of its own (cd into a folder first)")
+  }
+}
+
+# ----- decoys: fake secrets the rehearsal plants (#56) --------------------------------
+#
+# Before the install, the job's shell plants a decoy home: an SSH key, cloud
+# and registry tokens, a git credentials file, each holding a marker made
+# fresh from /dev/urandom for this rehearsal. The install runs with HOME
+# there, so what looks in `~` finds the decoys. After the install (and the
+# use) the same shell says what happened to them, on stdout under a tag:
+#   read      the decoy's access time moved (each is set to the year 2000
+#             first, so a read under relatime shows; a probe file proves
+#             the filesystem records reads, else the report says it is blind)
+#   gone      the decoy was changed or removed
+#   copied    the marker turned up in another file of the scratch folders
+# and the marker itself, so what the install printed can be searched for it.
+# The marker never leaves the machine. This is cigo's own plain-shell
+# watch, until cig's box plants decoys and watches reads itself (CigScript#106):
+# it sees reads of the decoys by a lookup through HOME, not every read.
+
+stick DECOY_TAG = "@cigo-decoy "
+# [where, what it holds with %s for the marker]. The names are written in
+# pieces so a scan of this file for credential paths finds only real ones.
+stick DECOY_DEFS = [
+  [".s" + "sh/id_ed25519", "-----BEGIN OPENSSH PRIVATE KEY-----\ncigo-decoy-%s\n-----END OPENSSH PRIVATE KEY-----\n"],
+  [".a" + "ws/cred" + "entials", "[default]\naws_access_key_id = AKIACIGODECOY\naws_secret_access_key = cigo-decoy-%s\n"],
+  [".n" + "pmrc", "//registry.cigo-decoy.invalid/:_authToken=cigo-decoy-%s\n"],
+  [".py" + "pirc", "[pypi]\nusername = __token__\npassword = cigo-decoy-%s\n"],
+  [".config/g" + "cloud/application_default_cred" + "entials.json", "{\"client_id\":\"cigo-decoy\",\"refresh_token\":\"cigo-decoy-%s\"}\n"],
+  [".git-" + "cred" + "entials", "https://cigo-decoy:cigo-decoy-%s@git.invalid\n"],
+  [".do" + "cker/config.json", "{\"auths\":{\"registry.cigo-decoy.invalid\":{\"auth\":\"cigo-decoy-%s\"}}}\n"],
+]
+stick DECOY_FILES = DECOY_DEFS.map(pack(x) => x[0])
+
+# The shell that plants them. `home` is a shell word for the decoy home;
+# `keep_home` is true outside a container, where HOME is switched to the
+# stand-in and the tools' own places (cargo, rustup, the XDG folders)
+# keep pointing at the real ones.
+pull decoy_prelude(home, keep_home) {
+  roll l = ["DH=" + home, 'rm -rf "$DH"; mkdir -p "$DH"']
+  l.push("M=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \\n')")
+  for x in DECOY_DEFS {
+    l.push("mkdir -p \"$(dirname \"$DH/" + x[0] + "\")\"; printf -- " + sh_quote(x[1].replace("\n", "\\n")) + " \"$M\" > \"$DH/" + x[0] + "\"")
+  }
+  l.push("DECOYS='" + DECOY_FILES.join(" ") + "'")
+  l.push('chmod -R go-rwx "$DH"; for f in $DECOYS; do touch -a -t 200001010000 "$DH/$f"; done')
+  l.push('echo probe > "$DH/.probe"; touch -a -t 200001010000 "$DH/.probe"; cat "$DH/.probe" > /dev/null; PROBE=0; a=$(stat -c %X "$DH/.probe" 2>/dev/null); if [ -n "$a" ] && [ "$a" -gt 1000000000 ]; then PROBE=1; fi')
+  # npm reads the user config itself: it is pointed at an empty file of its
+  # own, so a read of the decoy is somebody else's.
+  l.push('NPMRC_OWN="$DH/.cigo-npmrc"; : > "$NPMRC_OWN"; npm_config_userconfig="$NPMRC_OWN"; export npm_config_userconfig')
+  if keep_home {
+    l.push('RH="$HOME"; [ -n "$CARGO_HOME" ] || CARGO_HOME="$RH/.cargo"; [ -n "$RUSTUP_HOME" ] || RUSTUP_HOME="$RH/.rustup"; export CARGO_HOME RUSTUP_HOME')
+    l.push('[ -n "$XDG_CONFIG_HOME" ] || XDG_CONFIG_HOME="$RH/.config"; [ -n "$XDG_DATA_HOME" ] || XDG_DATA_HOME="$RH/.local/share"; [ -n "$XDG_CACHE_HOME" ] || XDG_CACHE_HOME="$RH/.cache"; [ -n "$XDG_STATE_HOME" ] || XDG_STATE_HOME="$RH/.local/state"; export XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME')
+    l.push('HOME="$DH"; export HOME')
+  }
+  snuff l.join("\n")
+}
+
+# The shell that says what happened to them. `scan` is a shell word list of
+# the folders where a copied marker would be looked for.
+pull decoy_postlude(scan) {
+  roll l = ['for f in $DECOYS; do a=$(stat -c %X "$DH/$f" 2>/dev/null); if [ ! -f "$DH/$f" ] || ! grep -q "$M" "$DH/$f" 2>/dev/null; then echo "' + DECOY_TAG + 'gone $f"; elif [ -n "$a" ] && [ "$a" -gt 1000000000 ]; then echo "' + DECOY_TAG + 'read $f"; fi; done']
+  l.push('[ "$PROBE" = 1 ] || echo "' + DECOY_TAG + 'blind atime"')
+  l.push('echo "' + DECOY_TAG + 'marker $M"')
+  l.push('grep -rIl "$M" ' + scan + ' 2>/dev/null | while read -r p; do own=0; for f in $DECOYS; do [ "$p" = "$DH/$f" ] && own=1; done; [ "$own" = 1 ] || echo "' + DECOY_TAG + 'copied $p"; done')
+  snuff l.join("\n")
+}
+
+# What the decoy lines of a rehearsal's stdout said: {read, gone, copied, blind, marker}.
+pull decoy_parse(out) {
+  roll d = {read: [], gone: [], copied: [], blind: false, marker: "", seen: false}
+  for line in str(out).lines() {
+    if not line.starts_with(DECOY_TAG) {
+      continue
+    }
+    d.seen = true
+    stick w = line.slice(DECOY_TAG.len()).trim().split(" ")
+    if w.len() < 2 {
+      continue
+    }
+    stick arg = w.slice(1).join(" ")
+    if w[0] == "read" or w[0] == "gone" or w[0] == "copied" {
+      d[w[0]] = d[w[0]] + [arg]
+    } else if w[0] == "blind" {
+      d.blind = true
+    } else if w[0] == "marker" and text.matches(arg, '^[0-9a-f]{8,64}$') {
+      d.marker = arg
+    }
+  }
+  snuff d
+}
+
+# The findings the decoys give: a credential looked at is high, and
+# critical beside an attempt to reach a raw address (risk_of joins the two).
+pull decoy_findings(d, printed) {
+  roll out = []
+  for f in d.read {
+    out.push({code: "E871", cat: "credentials", w: 0.8, rule: "rehearsal", where: "~/" + f + " (a decoy)", text: "read ~/" + f + " (a decoy)", says: "read a credential file: in the box it got a decoy, outside it would have been the real thing"})
+  }
+  for f in d.gone {
+    out.push({code: "E871", cat: "credentials", w: 0.8, rule: "rehearsal", where: "~/" + f + " (a decoy)", text: "changed or removed ~/" + f + " (a decoy)", says: "changed or removed a credential file it had no business with"})
+  }
+  for p in d.copied {
+    out.push({code: "E871", cat: "credentials", w: 0.9, rule: "rehearsal", where: clip(redact(p), 120), text: "wrote a decoy credential's contents to " + clip(redact(p), 120), says: "copied what it read from a credential file somewhere else: the staging of a theft"})
+  }
+  if d.marker != "" and str(printed).contains(d.marker) {
+    out.push({code: "E871", cat: "credentials", w: 0.9, rule: "rehearsal", where: "what the install printed", text: "printed a decoy credential's contents", says: "printed what it read from a credential file"})
+  }
+  snuff out
+}
+
+# ----- the container backend (#56) ------------------------------------------------------
+
+stick CONTAINER_IMAGES = {
+  npm: "docker.io/library/node:lts-slim",
+  pypi: "docker.io/library/python:3-slim",
+  crates: "docker.io/library/rust:1-slim",
+  script: "docker.io/library/alpine:3",
+}
+
+# The container's two phases for a job: the fetch (a network; no package
+# code runs: install scripts are not run, wheels are only downloaded) and
+# the run (no network at all: the install scripts, the build, and the use).
+# {image, fetch, run, mount}. A local file, folder or git URL is not built for it.
+pull container_plan(job) {
+  stick d = REHEARSE_DIR
+  if job.eco == "script" {
+    stick abs = pick(path.is_abs(job.spec), job.spec, path.join(ROOT, job.spec))
+    snuff {image: CONTAINER_IMAGES.script, fetch: null, run: "sh /src/" + sh_quote(path.base(abs)), mount: path.dir(abs)}
+  }
+  if not ["npm", "pypi", "crates"].contains(job.eco) {
+    fail("cigo rehearse ${job.spec}: the container backend rehearses a package from its registry or a script; a local file, a folder or a git URL needs --isolation=box")
+  }
+  stick use = not no_use()
+  stick rest = job.label
+  if job.eco == "npm" {
+    roll name = rest
+    stick at = rest.slice(1).find("@")
+    if at >= 0 {
+      name = rest.slice(0, at + 1)
+    }
+    snuff {image: CONTAINER_IMAGES.npm, mount: null,
+      fetch: "mkdir -p ${d} && cd ${d} && printf '%s' '{\"name\":\"cigo-rehearse\",\"version\":\"0.0.0\",\"private\":true}' > package.json && npm install --ignore-scripts --no-audit --no-fund --loglevel=error '${rest}'",
+      run: "cd ${d} && npm rebuild --no-audit --no-fund --loglevel=error" + pick(use, " && node -e 'require(process.argv[1])' '${name}'", "")}
+  }
+  if job.eco == "pypi" {
+    stick dist = text.split(rest, '[\[=<>!~;]').first()
+    snuff {image: CONTAINER_IMAGES.pypi, mount: null,
+      fetch: "mkdir -p ${d} && cd ${d} && python3 -m pip download --disable-pip-version-check --no-input --dest wheelhouse '${rest}'",
+      run: "cd ${d} && python3 -m venv .venv && .venv/bin/python -m pip install --disable-pip-version-check --no-input --no-index --find-links wheelhouse '${rest}'" + pick(use, " && .venv/bin/python -c " + sh_quote(PYPI_USE) + " '${dist}'", "")}
+  }
+  roll crate = rest
+  roll version = "*"
+  stick at = rest.find("@")
+  if at >= 0 {
+    crate = rest.slice(0, at)
+    version = rest.slice(at + 1)
+  }
+  stick ident = crate.replace("-", "_")
+  stick init = pick(use, "cargo init --bin --vcs none --name cigo_rehearse -q && printf '%s\n' '#[allow(unused_extern_crates)]' 'extern crate ${ident};' 'fn main() {}' > src/main.rs", "cargo init --lib --vcs none --name cigo_rehearse -q")
+  snuff {image: CONTAINER_IMAGES.crates, mount: null,
+    fetch: "mkdir -p ${d} && cd ${d} && ${init} && printf '\n[dependencies]\n%s = \"%s\"\n' '${crate}' '${version}' >> Cargo.toml && cargo fetch -q",
+    run: "cd ${d} && " + pick(use, "cargo run -q --offline", "cargo build -q --offline")}
+}
+
+# The arguments of one `run` of the engine: nothing of the machine mounted
+# but a scratch volume (and a script's own folder, read-only), no
+# capabilities, no new privileges, a read-only root, bounded, no network
+# for the run phase, nothing of the environment passed.
+pull container_args(name, volume, plan, net, script) {
+  roll a = ["run", "--rm", "--name", name, "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=2g", "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,size=512m", "-v", volume + ":/work", "-w", "/work", "-e", "HOME=/tmp/home", "-e", "CARGO_HOME=/work/.cargo", "-e", "npm_config_cache=/work/.npm"]
+  if plan.mount != null {
+    a = a + ["-v", plan.mount + ":/src:ro"]
+  }
+  if net == "none" {
+    a.push("--network=none")
+  }
+  snuff a + [plan.image, "sh", "-c", script]
+}
+
+# One container phase: its output, or the reason it did not run.
+pull container_phase(eng, args) {
+  roll r = null
+  burn {
+    try {
+      r = proc.run(eng, args, {timeout_ms: 900000, encoding: "lossy"})
+    } ashtray e {
+      r = {code: -1, out: "", err: str(e.message), message: str(e.message)}
+    }
+  }
+  snuff r
+}
+
+# The container's rehearsal of a job, as the box's result would read: code,
+# out, err. Nothing outside the container exists to be written to, so there
+# is no `outside`; a refused connection cannot be seen either: the run has no
+# network, so an attempt fails where it stands.
+pull rehearse_in_container(job) {
+  stick eng = container_engine().name
+  stick plan = container_plan(job)
+  stick id = hash.sha256(str(time.now_ms()) + ROOT + job.spec).slice(0, 12)
+  stick volume = "cigo-rehearse-" + id
+  stick scan = "/work /tmp"
+  stick tree = tree_script(job.eco)
+  roll made = false
+  roll out = ""
+  roll err = ""
+  roll code = 0
+  burn {
+    made = proc.run(eng, ["volume", "create", volume], {timeout_ms: 60000}).code == 0
+  }
+  if not made {
+    snuff {code: -1, out: "", err: "could not make a scratch volume with " + eng, message: "could not make a scratch volume with " + eng, outside: [], refused: []}
+  }
+  roll ran = false
+  if plan.fetch != null {
+    stick f = "( " + decoy_prelude('"$HOME"', false) + "\n( " + plan.fetch + "\n); rc=$?\n" + decoy_postlude(scan) + "\nexit $rc )"
+    stick r1 = container_phase(eng, container_args("cigo-rehearse-" + id + "-fetch", volume, plan, "", f))
+    out = out + str(r1.get("out", ""))
+    err = err + str(r1.get("err", ""))
+    code = r1.get("code", -1)
+    ran = code == 0
+  } else {
+    ran = true
+  }
+  if ran {
+    roll inner = "( " + plan.run + "\n); rc=$?"
+    if tree != null {
+      inner = inner + "; ( " + tree + " ) 2>/dev/null"
+    }
+    stick s = "( " + decoy_prelude('"$HOME"', false) + "\n" + inner + "\n" + decoy_postlude(scan) + "\nexit $rc )"
+    stick r2 = container_phase(eng, container_args("cigo-rehearse-" + id + "-run", volume, plan, "none", s))
+    out = out + "\n" + str(r2.get("out", ""))
+    err = err + str(r2.get("err", ""))
+    code = r2.get("code", -1)
+  }
+  burn {
+    try {
+      proc.run(eng, ["volume", "rm", "-f", volume], {timeout_ms: 60000})
+    } ashtray e {
+    }
+  }
+  snuff {code: code, out: out, err: err, message: pick(code == 0, "", "the container exited " + str(code)), outside: [], refused: []}
+}
+
+# The rehearsal inside gVisor, inside the box: the box's registry-only
+# network and kept layer, and `runsc --rootless do` giving the package a
+# kernel of its own. Not exercised against a real runsc anywhere we have.
+pull gvisor_script(s) {
+  snuff "runsc --rootless --network=host do sh -c " + sh_quote(s)
 }
 
 # ----- transitive blame: who in the tree did it (#56) ---------------------------------
@@ -11737,7 +12145,10 @@ pull with_tree(job) {
   if t == null {
     snuff job.script
   }
-  snuff "( " + job.script + "\n); rc=$?; ( " + t + " ) 2>/dev/null; exit $rc"
+  # The decoys go in first and the HOME of the install is theirs; a script
+  # keeps its own HOME (its replica notes land there, outside any footprint).
+  stick home = '"$PWD/' + REHEARSE_DIR + '-home"'
+  snuff decoy_prelude(home, true) + "\n( " + job.script + "\n); rc=$?; ( " + t + " ) 2>/dev/null\n" + decoy_postlude('"$PWD/' + REHEARSE_DIR + '" "$DH"') + "\nexit $rc"
 }
 
 # What a rehearsal's stdout holds: the tree's lines (edges and install
@@ -11747,6 +12158,9 @@ pull tree_parse(out) {
   roll hooks = {}
   roll rest = []
   for line in str(out).lines() {
+    if line.starts_with(DECOY_TAG) {
+      continue
+    }
     if not line.starts_with(TREE_TAG) {
       rest.push(line)
       continue
@@ -11881,7 +12295,8 @@ pull blame_behaviour(findings, tree, paths) {
 # One rehearsal of a job (rehearse_spec), nothing printed: what it did and
 # the verdict. The layer is discarded unless kept.
 pull rehearse_one(job, keep) {
-  roll expect = [REHEARSE_DIR + "/**", RUN_DIR + "/**"]
+  stick level = isolation_level()
+  roll expect = [REHEARSE_DIR + "/**", REHEARSE_DIR + "-home/**", RUN_DIR + "/**"]
   for w in job.fp.writes {
     if w.starts_with("~/") {
       expect.push(w)
@@ -11896,14 +12311,20 @@ pull rehearse_one(job, keep) {
   stick box = {network: pick(allow.is_empty(), "off", "registry"), allow_hosts: allow, contain: true, apply: "never", quiet: true, expect: expect}
   stick started = time.now_ms()
   roll r = null
-  burn {
-    try {
-      r = proc.shell(with_tree(job), {box: box, timeout_ms: 900000, encoding: "lossy"})
-    } ashtray e {
-      r = e
+  if level == "container" {
+    r = rehearse_in_container(job)
+  } else {
+    stick script = pick(job.eco == "script", with_tree(job), pick(level == "gvisor", gvisor_script(with_tree(job)), with_tree(job)))
+    burn {
+      try {
+        r = proc.shell(script, {box: box, timeout_ms: 900000, encoding: "lossy"})
+      } ashtray e {
+        r = e
+      }
     }
   }
   roll findings = behaviour_findings(r.get("outside", []), r.get("refused", []))
+  stick dec = decoy_parse(r.get("out", ""))
   # The tree the install made, taken out of what it said, and the
   # findings blamed on the package that did them (#56).
   stick tree = tree_parse(r.get("out", ""))
@@ -11913,6 +12334,7 @@ pull rehearse_one(job, keep) {
   # cigo rehearse, and reads this (E886, E887).
   stick printed = tree.rest.join("\n") + "\n" + str(r.get("err", ""))
   findings = findings + scan_docs(job.label + ": what the install printed", printed).map(pack(f) => f.merge({text: clip(redact(str(f.text)), 120)}))
+  findings = findings + decoy_findings(dec, printed)
   findings = blame_behaviour(findings, tree, paths) + dependency_findings(job, paths)
   stick dependencies = paths.values().filter(pack(p) => p.len() > 1).len()
   if job.eco == "script" {
@@ -11937,7 +12359,7 @@ pull rehearse_one(job, keep) {
   stick tail = clip(redact(said.last() ?? ""), 200)
   # A failed install with nothing found is not a verdict: it could not judge.
   stick risk = pick(not ok and findings.is_empty(), "unknown", risk_of(findings))
-  snuff {target: job.spec, label: job.label, ecosystem: job.eco, risk: risk, judged: ok, installed: ok, dependencies: dependencies, exit: r.get("code", null), error: r.get("message", null), last_line: tail, findings: findings, outside: r.get("outside", []), refused: r.get("refused", []), changed: r.get("changed", {}), layer: pick(keep, layer, null), seconds: (time.now_ms() - started) / 1000}
+  snuff {target: job.spec, label: job.label, ecosystem: job.eco, risk: risk, judged: ok, installed: ok, dependencies: dependencies, exit: r.get("code", null), error: r.get("message", null), last_line: tail, findings: findings, outside: r.get("outside", []), refused: r.get("refused", []), changed: r.get("changed", {}), layer: pick(keep, layer, null), seconds: (time.now_ms() - started) / 1000, isolation: level, decoys: pick(not dec.seen, "none", pick(dec.blind, "blind", "watched"))}
 }
 
 pull say_rehearsal(r) {
@@ -11947,7 +12369,7 @@ pull say_rehearsal(r) {
     exhale "rehearsed ${r.label} before, on ${str(r.get("at", "")).slice(0, 10)}, as these same bytes: the verdict is kept (--fresh rehearses again)"
   } else {
     stick deps = int(r.get("dependencies", 0))
-    exhale "rehearsed ${r.label} in ${duration(int(r.seconds * 1000))}" + pick(deps > 0, ", with its ${deps} dependenc" + pick(deps == 1, "y", "ies"), "") + pick(r.installed, "", "; the install itself failed (exit ${r.exit ?? "?"})")
+    exhale "rehearsed ${r.label} in ${duration(int(r.seconds * 1000))}" + pick(deps > 0, ", with its ${deps} dependenc" + pick(deps == 1, "y", "ies"), "") + pick(r.get("isolation", null) != null, " (isolation: " + str(r.get("isolation", "")) + ")", "") + pick(r.installed, "", "; the install itself failed (exit ${r.exit ?? "?"})")
   }
   stick blind = r.findings.len() == 1 and r.findings.first().code == "E898"
   if r.get("risk", "") == "unknown" {
@@ -11959,6 +12381,9 @@ pull say_rehearsal(r) {
     exhale "  ${r.label} wrote nothing outside its footprint; reads and connections aren't watched by cig ${cig.version()}: verdict low, and nothing is kept"
   } else {
     report_verdict(r.label, {risk: r.risk, findings: r.findings})
+  }
+  if r.get("decoys", "") == "blind" {
+    exhale "  the decoys could not watch reads here (this filesystem does not record access times): a read of one would not show"
   }
   if r.last_line != "" {
     exhale "  last line: " + r.last_line
@@ -12188,6 +12613,10 @@ pull child_words(x, slot, launcher) {
       w.push(f)
     }
   }
+  stick iso = flag_value("--isolation", "")
+  if iso != "" and text.matches(iso, '^[a-z]{1,12}$') {
+    w.push("--isolation=" + iso)
+  }
   snuff w.join(" ")
 }
 
@@ -12291,7 +12720,7 @@ pull run_rehearsals(todo_in, skipped_in, over, most, head) {
     snuff
   }
   stick jobs = rehearse_jobs_n(todo.len())
-  rehearse_ready()
+  rehearse_ready_isolated()
   roll worst = "none"
   roll results = []
   roll items = []
@@ -12362,7 +12791,7 @@ pull run_rehearsals(todo_in, skipped_in, over, most, head) {
     }
   }
   if flags.contains("--sarif") {
-    exhale json.stringify(sarif_log(items), 2)
+    emit_sarif(items)
   } else if flags.contains("--markdown") {
     exhale markdown_report(head.title, worst, items, "${results.len()} package" + pick(results.len() == 1, "", "s") + " rehearsed; nothing outside their footprints.")
   } else if flags.contains("--json") {
@@ -13477,7 +13906,7 @@ pull do_config() {
 # The settings cigo guard stats watches for a "notice was followed by a
 # change of setting" link: the keys that tighten or loosen what the guard
 # does, or how it answers a prompt.
-stick GUARD_SETTINGS = ["preset", "guard_scope", "guard_commands", "guard_shells", "guard_agents", "guard_pause_max", "security", "rehearse", "rehearse_fail_on", "rehearse_use", "rehearse_jobs", "verdict_cache", "osv", "registry_meta", "metadata_young_days", "blacklist_unboxed", "blacklist_exception_ttl", "agent_approval"]
+stick GUARD_SETTINGS = ["preset", "guard_scope", "guard_commands", "guard_shells", "guard_agents", "guard_pause_max", "security", "rehearse", "rehearse_fail_on", "rehearse_use", "rehearse_jobs", "isolation", "verdict_cache", "osv", "registry_meta", "metadata_young_days", "blacklist_unboxed", "blacklist_exception_ttl", "agent_approval"]
 
 # Set (or unset, with null) one key in the user's config file. A change to
 # a guard-related setting is logged, so cigo guard stats can say how often
@@ -17764,15 +18193,23 @@ stick REHEARSE_TOOLS = [
 
 pull doctor_rehearse_findings() {
   roll out = []
-  if not rehearsal_possible() {
-    out.push(doctor_finding("rehearse-box", "note", "no contained box: the rehearsal needs cig 1.12.0 or later on Linux (this is cig ${cig.version()} on ${cig.os()})", "`cigo rehearse` installs a package in cig's box first", null))
-  } else if contain_possible() {
-    out.push(doctor_finding("rehearse-box", "ok", "cig's contained box is available", "the rehearsal's isolation here", null))
-  } else {
-    out.push(doctor_finding("rehearse-box", "note", "no contained box: " + clip(CONTAIN_WHY, 160), "`cigo rehearse` installs a package in cig's box first", null))
+  stick rep = isolation_report()
+  for row in rep {
+    if row[0] == "box" {
+      out.push(doctor_finding("rehearse-box", pick(row[1], "ok", "note"), pick(row[1], "cig's contained box is available", "no contained box: " + row[2]), "the rehearsal's isolation here", null))
+    } else {
+      out.push(doctor_finding("rehearse-" + row[0], pick(row[1], "ok", "note"), pick(row[1], row[0] + " is available" + pick(row[2] != "" and row[0] == "container", " (" + row[2] + ")", ""), row[0] + ": " + row[2]), "the rehearsal's isolation here", null))
+    }
   }
-  stick engines = ["docker", "podman"].filter(pack(t) => which(t) != null)
-  out.push(doctor_finding("rehearse-other", "note", pick(engines.is_empty(), "no Docker or Podman", engines.join(" and ") + " found"), "container, gVisor and VM backends are not built yet (#56)", null))
+  roll picked = "none (a rehearsal would refuse: " + NO_ISOLATION + ")"
+  for level in ["gvisor", "box", "container"] {
+    for row in rep {
+      if row[0] == level and row[1] and picked.starts_with("none") {
+        picked = level
+      }
+    }
+  }
+  out.push(doctor_finding("rehearse-isolation", "ok", "isolation = auto would use: " + picked, "the strongest level that works here, gvisor then box then container", null))
   for r in REHEARSE_TOOLS {
     stick found = r.tools.map(pack(t) => {name: t, at: which(t)}).filter(pack(x) => x.at != null)
     if found.is_empty() {
