@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: FSL-1.1-ALv2
 # cigo is installed by ciginstaller now. This script is kept for one release so
 # an old instruction fails with a way forward instead of a missing file; it
 # installs nothing. To work on cigo from a checkout, run bin\cigo.cmd there

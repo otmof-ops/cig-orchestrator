@@ -1,6 +1,6 @@
 @echo off
 @rem SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
-@rem SPDX-License-Identifier: Apache-2.0
+@rem SPDX-License-Identifier: FSL-1.1-ALv2
 @rem cigo cmd shim: runs <name>.launch.ps1 beside it, preferring pwsh
 @rem (PowerShell 7) when it is on PATH and falling back to Windows PowerShell.
 @rem The launcher is not called cigo.ps1 on purpose: PowerShell would run

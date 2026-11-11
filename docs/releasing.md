@@ -24,7 +24,7 @@ and `YANKED`.
    every new flag and key, `TOOLCHAINS.md` is regenerated when the knowledge
    base changed (`bin/cigo run toolchains-doc`).
 5. **The licence gate** passes on the tree (`LICENSE`, `NOTICE`, `LICENSES/`,
-   `REUSE.toml`; the code Apache-2.0, the docs CC BY 4.0, the examples
+   `REUSE.toml`; the code FSL-1.1-ALv2, the docs CC BY 4.0, the examples
    CC0 1.0).
 6. **One pull request** carries the bump; merge it with a merge commit.
 7. **The tag**, annotated, on the merge commit:
