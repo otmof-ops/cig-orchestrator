@@ -12,7 +12,7 @@
   <img alt="needs cig 1.20.0 or newer" src="https://img.shields.io/badge/needs-cig%201.20.0%2B-6b7280">
   <a href="TOOLCHAINS.md"><img alt="60 toolchains" src="https://img.shields.io/badge/toolchains-60-6b7280"></a>
   <a href="docs/roadmap.md"><img alt="actively maintained" src="https://img.shields.io/badge/status-actively%20maintained-f97316"></a>
-  <a href="LICENSE"><img alt="license Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-6b7280"></a>
+  <a href="LICENSE"><img alt="license FSL-1.1-ALv2" src="https://img.shields.io/badge/license-FSL--1.1--ALv2-6b7280"></a>
   <img alt="glue scripts: 0" src="https://img.shields.io/badge/glue%20scripts-0-2ea44f">
 </p>
 
@@ -242,12 +242,21 @@ are at [otmof-ops/cig-script](https://github.com/otmof-ops/cig-script).
 
 ## Licensing
 
-- **Code** (`orchestrate.cig`, `bin/`, `install.sh`, `tests/`):
-  [Apache-2.0](LICENSE), the same license as CigScript. In plain words: use,
-  copy, change, sell and embed cigo freely, including in closed products;
-  keep the copyright notice and the [NOTICE](NOTICE) file with any copy; you
-  get a patent license from every contributor; and you can't use the name to
-  endorse your derivative.
+- **Code** (`orchestrate.cig`, `bin/`, `install.sh`, `tests/`): **source-available, not open source.** Under the
+  [Functional Source License, version 1.1, with an Apache-2.0 future license
+  (FSL-1.1-ALv2)](LICENSE). The Open Source Initiative does not count it as an
+  open source license, and this project does not call it one.
+  - *What you may do.* Use it, including inside a company for its own work;
+    read it, study it, change it and share it with the license attached; and
+    help others use it. The source is here for all of that.
+  - *What you may not do.* Make it available to others in a commercial product
+    or service that substitutes for it or does the same job. Selling it, or
+    selling access to it, is the clear case.
+  - *It becomes Apache-2.0.* Each version converts to
+    [Apache-2.0](LICENSES/Apache-2.0.txt) two years after it is made
+    available.
+  - *Earlier releases.* Every release through v1.18.0 was made under Apache-2.0 and stays under it. [LICENSING.md](LICENSING.md)
+    lists which versions carry which license.
 - **Documentation** (`docs/`, this README and the other guides at the root):
   [CC BY 4.0](LICENSES/CC-BY-4.0.txt). Reuse and adapt with credit.
 - **Examples** (`examples/`): [CC0 1.0](LICENSES/CC0-1.0.txt). Paste them
