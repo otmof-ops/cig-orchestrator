@@ -13,7 +13,7 @@ toolchain it recognizes. Three kinds of thing count:
 
 - **Languages and build tools**: a `go.mod`, a `Cargo.toml`, a
   `package.json` with its lockfile, a `pyproject.toml`, and the rest of the
-  [60 toolchains](../TOOLCHAINS.md). Each brings its ecosystem's own
+  [61 toolchains](../TOOLCHAINS.md). Each brings its ecosystem's own
   commands for each stage, chosen by what the directory holds: the lockfile
   picks the package manager, a `ruff.toml` or `[tool.ruff]` picks Ruff, a
   `tsconfig.json` adds a type check.

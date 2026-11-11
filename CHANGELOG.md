@@ -7,6 +7,31 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **A `cigarscript` toolchain, and a CigarScript component in the polyglot
+  example (cig-compile#13).** The knowledge base now has 61 toolchains.
+  - A directory with `cigar.toml`, `.cigar-version` or a `.cigar` file is
+    CigarScript. `setup` asks the installer for the carton
+    (`ciginstaller install carton`); `lint` is `cigcompile build --check`;
+    `check` is `cigar check`, or the same `cigcompile build --check` when
+    cigar is not installed; `build` is `cigcompile build`; `test` is
+    `cigar run --dry-run` on each `.cigar` file (`cigcompile test` compares a
+    program with its script run by `cig`, which cannot run one) and
+    `cigcompile test` for a folder without them; `package` is `cigcompile build --sbom`; `clean` is
+    `cigcompile clean`. There are no format stages: cigar has no formatter
+    yet. Signing a package (`--sign KEY`) is a stage override in
+    `cig-tasks.json`, since the key is the project's.
+  - Pins are `.cigar-version` and `cigar = "1.0"` in `cigar.toml`, read the
+    way `mise.toml`'s keys are, and compared with the installed `cigar` by
+    `cigo doctor` and before a run; the installer picks the carton, and so
+    the cigcompile, that a pin names.
+  - `build`, `package` and `clean` declare `bin/**` in their `touches`, so a
+    chain that fails after a build takes the programs back. The footprint is
+    in the knowledge base too (`cigo toolchains cigarscript`).
+  - `examples/polyglot` gains a `cigar/` component. `cigo run ci` lints and
+    tests it with the other two languages, and `release` builds it before the
+    deploy: a deploy that fails takes the program back with it.
+  - `TOOLCHAINS.md` and the counts in the README and the docs say 61.
+
 - **`cigo rehearse`: decoys, isolation levels, the setup action (#56).**
   - A rehearsal plants decoy credentials (an SSH key, cloud and registry
     tokens, a git credentials file, each with a marker made fresh for the

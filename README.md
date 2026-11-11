@@ -10,7 +10,7 @@
 <p align="center">
   <a href="https://github.com/otmof-ops/cig-script"><img alt="a CigScript tool" src="https://img.shields.io/badge/a-CigScript%20tool-f97316"></a>
   <img alt="needs cig 1.20.0 or newer" src="https://img.shields.io/badge/needs-cig%201.20.0%2B-6b7280">
-  <a href="TOOLCHAINS.md"><img alt="60 toolchains" src="https://img.shields.io/badge/toolchains-60-6b7280"></a>
+  <a href="TOOLCHAINS.md"><img alt="61 toolchains" src="https://img.shields.io/badge/toolchains-61-6b7280"></a>
   <a href="docs/roadmap.md"><img alt="actively maintained" src="https://img.shields.io/badge/status-actively%20maintained-f97316"></a>
   <a href="LICENSE"><img alt="license FSL-1.1-ALv2" src="https://img.shields.io/badge/license-FSL--1.1--ALv2-6b7280"></a>
   <img alt="glue scripts: 0" src="https://img.shields.io/badge/glue%20scripts-0-2ea44f">
@@ -51,11 +51,12 @@ project in five minutes, install included.
 
 ## See it run
 
-[`examples/polyglot`](examples/polyglot) is three languages in one chain,
-with nothing to install beyond Python 3 and Node 18. Python totals a CSV,
+[`examples/polyglot`](examples/polyglot) is four languages in one chain,
+with Python 3, Node 18 and `cigcompile` to install. Python totals a CSV,
 Node builds a page from those numbers, bash deploys it with an undo, and
-Python reports where it went. Before any of that, each language's own lint
-and tests run:
+Python reports where it went; a CigarScript component is checked, tested and
+built into a program on the way, and a failed deploy takes the program back.
+Before any of that, each language's own lint and tests run:
 
 <p align="center"><img src="docs/assets/terminal.svg" alt="cigo run release: Python and Node lint and tests, then version, stats, site, deploy and announce, each handing its output to the next" width="820"></p>
 
@@ -92,9 +93,9 @@ installs (`--locked`, `--frozen-lockfile`, `npm ci`), the package manager the
 lockfile or `packageManager` field names, the project's own `package.json`
 scripts where it has them, and the formatter and linter it configures (Ruff
 or Black, Biome or Prettier and ESLint, golangci-lint when it has a config).
-[TOOLCHAINS.md](TOOLCHAINS.md) lists all 60: JavaScript and TypeScript,
+[TOOLCHAINS.md](TOOLCHAINS.md) lists all 61: JavaScript and TypeScript,
 Python, Rust, Go, the JVM, .NET, C and C++, Ruby, PHP, Elixir, Swift, Dart,
-Zig, Haskell and more, plus Terraform, Docker, Helm and the task runners you
+Zig, Haskell, CigarScript and more, plus Terraform, Docker, Helm and the task runners you
 already have. Anything a project does differently is one line in its
 manifest; [your own toolchains](docs/custom-toolchains.md) shows how.
 

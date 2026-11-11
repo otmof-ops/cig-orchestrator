@@ -1,6 +1,6 @@
 # Toolchains
 
-The 60 toolchains cig-orchestrator 1.18.0 knows, written by `cigo toolchains --markdown`
+The 61 toolchains cig-orchestrator 1.18.0 knows, written by `cigo toolchains --markdown`
 from the knowledge base in `orchestrate.cig`; regenerate it with `cigo run toolchains-doc`
 rather than editing it.
 
@@ -62,6 +62,7 @@ looks for, and the version pins it compares.
 | `foundry` | Solidity (Foundry) | `foundry.toml` | setup, format, format-check, lint, build, test, clean |
 | `powershell` | PowerShell | added by hand | lint, test |
 | `cigscript` | CigScript | `*.cig` | lint, check |
+| `cigarscript` | CigarScript | `cigar.toml` or `.cigar-version` or `*.cigar` | setup, lint, check, build, test, package, clean |
 | `shell` | Shell | added by hand | format, format-check, lint |
 | `terraform` | Terraform / OpenTofu | `*.tf` or `*.tofu` or `*.tf.json` | setup, format, format-check, lint, check, test |
 | `docker` | Container image | `Dockerfile` or `Containerfile` | lint, package |
@@ -100,6 +101,7 @@ looks for, and the version pins it compares.
 - `fortran-fpm`: plain fpm clean asks before deleting, so clean passes --skip.
 - `powershell`: never detected on its own: add a component with toolchain powershell; pwsh (PowerShell 7) when it is installed, else Windows PowerShell.
 - `cigscript`: cig check reads one file at a time, so these stages run it once per .cig file under the component, test data (fixtures, corpus, testdata) left out.
+- `cigarscript`: stages run on the top-level .cigar scripts of the component; the installer picks the cigcompile and cigar a pin (.cigar-version, or `cigar = "1.0"` in cigar.toml) names, and setup fetches a carton; there is no formatter yet (cigar has no fmt), so no format stages; test dry-runs each .cigar file with `cigar run --dry-run` (cigcompile test needs cig to run the script, and cig cannot run a .cigar file), and cigcompile test runs for .cig scripts; package writes each program with its SBOM, and signing (`--sign KEY`) is a stage override because the key is the project's; builds go to bin/, which a failed chain rolls back.
 - `shell`: never detected on its own: add a component with toolchain shell.
 - `terraform`: setup initializes without the backend so no credentials are needed; plan is a task of its own and apply is never run.
 - `docker`: lint uses docker build --check (Buildx 0.15 and later).

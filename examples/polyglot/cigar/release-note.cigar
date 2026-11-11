@@ -1,0 +1,10 @@
+# CigarScript builds this into a program that prints the release line. It
+# only reads and prints, so `cigcompile test` can run it and its script with
+# --dry-run and compare the two.
+strength mild
+
+pull line(project, version) {
+  snuff "${project} ${version}: built by CigarScript"
+}
+
+exhale line("sales-site", env.get("RELEASE", "dev"))

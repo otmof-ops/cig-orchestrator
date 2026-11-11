@@ -35,7 +35,7 @@ can do the same thing days later.
 | section | what's in it |
 |---|---|
 | stages | the stage names, which ones form groups and `ci`, the in-component order, the names projects give stage scripts, what the walk skips, script interpreters |
-| the toolchains | the knowledge base: 60 toolchains as data, with the helpers that build the Python and JavaScript families |
+| the toolchains | the knowledge base: 61 toolchains as data, with the helpers that build the Python and JavaScript families |
 | the command line | the command, its flags, its task names, and what follows `--` |
 | small helpers | usage errors, quoting, suggestions by edit distance |
 | looking at a directory | the condition language (`file:`, `grep:`...), choosing an alternative, vars |

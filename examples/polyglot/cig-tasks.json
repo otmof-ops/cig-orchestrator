@@ -24,7 +24,8 @@
   },
   "components": {
     "data": {"path": "data", "toolchain": "py-plain", "env": {"PYTHONDONTWRITEBYTECODE": "1"}},
-    "web": {"path": "web", "toolchain": "node-plain", "after": ["data"]}
+    "web": {"path": "web", "toolchain": "node-plain", "after": ["data"]},
+    "cigar": {"path": "cigar", "toolchain": "cigarscript"}
   },
   "tasks": {
     "version": {
@@ -58,8 +59,8 @@
       "desc": "Python again, with what bash and Node handed on"
     },
     "release": {
-      "needs": ["ci", "announce"],
-      "desc": "every language's lint and tests, then the chain"
+      "needs": ["ci", "cigar:package", "announce"],
+      "desc": "every language's lint, check, build and tests, the CigarScript package, then the chain"
     }
   }
 }
