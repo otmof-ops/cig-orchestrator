@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+#
+# The cases that make a box (namespaces) on every run (cig-orchestrator#112, #90's
+# `agent run -- true`). They are not in bench.toml because a few hundred boxes in a
+# row load the kernel, not cigo: run them in a VM or on a CI runner, never on a
+# machine you work on:
+#
+#   cig bench bench/box.toml
+#
+# It shares bench.toml's project (bench/cig-tasks.json) and scratch-home rules.
+
+format = 1
+
+[bench]
+product = "cigo"
+version = ["cigo", "--version"]
+home    = "isolated"
+binary  = "bin/cigo"
+watch   = ["orchestrate.cig", "bin/**"]
+
+[defaults]
+samples = 5
+per     = 1
+warmup  = 1
+env     = { NO_COLOR = "1", CIG_DOCTOR = "0", CIG_SEAL_KEY = "file", CI = "", CIGO_REHEARSE = "never", CIGO_OSV = "off", CIGO_OSV_API = "file:///nonexistent/osv-api", CIGO_OSV_DUMPS = "file:///nonexistent/osv-dumps", CIGO_BLACKLIST_DIR = "/nonexistent/cigo-bench/blacklist.d", CIG_INTERNAL_TRACKER_DIR = "/nonexistent/cigo-bench/tracker" }
+
+[[case]]
+name   = "agent run -- true"
+group  = "box"
+run    = ["cigo", "agent", "run", "--", "true"]
+expect = { exit = 0 }
+
+[[case]]
+name   = "run, a one-line task in a box"
+group  = "box"
+run    = ["cigo", "run", "--box", "task-01"]
+expect = { exit = 0 }

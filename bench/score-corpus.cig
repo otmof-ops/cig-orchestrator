@@ -1,0 +1,165 @@
+#!/usr/bin/env cig
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# cig >=1.20.0
+# How well the guard reads the detection corpus (#88, cig-orchestrator#112):
+# `cigo audit --json` over tests/fixtures/detection, scored against the labels
+# in each sample's header. It prints five numbers:
+#
+#   recall_medium    attacks rated medium or above, over all attacks
+#   recall_high      attacks rated high or above
+#   recall_critical  attacks rated critical
+#   false_positives  benign samples rated medium or above (must be 0)
+#   grey_flagged     grey samples (an official installer piped to sh, sudo
+#                    apt-get install) rated medium or above (reported)
+#
+# `cig bench` runs it as the `quality` case; it exits 1 when a benign sample is
+# flagged, so a false positive is a wrong answer, not a slow one. It runs from
+# bench/ (the folder of the manifest) and finds the launcher and the corpus
+# one folder up, so a build `cig bench --against` made reads its own.
+#
+#   cig run bench/score-corpus.cig             the five lines
+#   cig run bench/score-corpus.cig -- --json   one JSON object, with the counts
+#
+# The corpus is copied into a scratch folder first: an audit leaves state
+# beside the project it reads, and the fixtures stay as they are.
+
+pack { "./.score-work" }
+
+stick here = fs.cwd()
+stick root = path.normalize(path.join(here, ".."))
+stick launcher = path.join(root, "bin", "cigo")
+stick corpus = path.join(root, "tests", "fixtures", "detection")
+stick work = path.join(here, ".score-work")
+stick project = path.join(work, "detection")
+stick RANK = {none: 0, low: 1, medium: 2, high: 3, critical: 4}
+
+if not fs.is_file(launcher) or not fs.is_dir(corpus) {
+  log.error("run this from the bench folder of the checkout: cig run score-corpus.cig")
+  exit(2)
+}
+
+burn {
+  if fs.exists(work) {
+    fs.rm(work)
+  }
+  fs.mkdir(work)
+  fs.cp(corpus, project)
+}
+
+# The same settings the test suite gives the tool: no rehearsal, no OSV, no
+# report filed, and nothing read from the user's own state.
+stick env_for = {
+  HOME: env.get("HOME", work),
+  CIGSCRIPT_HOME: env.get("CIGSCRIPT_HOME", path.join(work, "cig-home")),
+  CIGO_HOME: env.get("CIGO_HOME", path.join(work, "cigo-home")),
+  NO_COLOR: "1",
+  CIG_DOCTOR: "0",
+  CIG_SEAL_KEY: "file",
+  CI: "",
+  CIGO_REHEARSE: "never",
+  CIGO_OSV: "off",
+  CIGO_OSV_API: "file:///nonexistent/osv-api",
+  CIGO_OSV_DUMPS: "file:///nonexistent/osv-dumps",
+  CIGO_BLACKLIST_DIR: path.join(work, "blacklist.d"),
+  CIG_INTERNAL_TRACKER_DIR: path.join(work, "tracker"),
+}
+
+pull cigo(words) {
+  roll r = null
+  burn {
+    r = proc.run(launcher, words, {cwd: project, env: env_for, reads: true, timeout_ms: 300000})
+  }
+  snuff r
+}
+
+pull labels_of(dir) {
+  roll out = {}
+  for p in fs.list(dir) {
+    stick f = path.base(p)
+    if f == "cig-tasks.json" {
+      continue
+    }
+    stick head = text.find(fs.read_text(p), "label: [^\n]*")
+    if head == null {
+      log.error("${f} has no label line")
+      exit(2)
+    }
+    roll fields = {file: f}
+    for part in head.split(" | ") {
+      stick kv = part.split(": ")
+      if kv.len() == 2 {
+        fields[kv[0]] = kv[1]
+      }
+    }
+    out[f.split(".")[0]] = fields
+  }
+  snuff out
+}
+
+cigo(["config", "rehearse", "never"])
+cigo(["config", "osv", "off"])
+stick audit = cigo(["audit", "--json"])
+if audit.code != 0 {
+  log.error("cigo audit --json exited ${audit.code}: " + audit.get("err", ""))
+  exit(1)
+}
+stick rated = json.parse(audit.out).tasks
+stick labels = labels_of(corpus)
+
+roll attacks = 0
+roll at_medium = 0
+roll at_high = 0
+roll at_critical = 0
+roll benign = 0
+roll false_positives = 0
+roll grey = 0
+roll grey_flagged = 0
+for t in labels {
+  stick rank = RANK[rated[t].risk]
+  stick label = labels[t].get("label", "")
+  if label == "attack" {
+    attacks += 1
+    if rank >= RANK.medium {
+      at_medium += 1
+    }
+    if rank >= RANK.high {
+      at_high += 1
+    }
+    if rank >= RANK.critical {
+      at_critical += 1
+    }
+  } else if label == "benign" {
+    benign += 1
+    if rank >= RANK.medium {
+      false_positives += 1
+    }
+  } else if label == "grey" {
+    grey += 1
+    if rank >= RANK.medium {
+      grey_flagged += 1
+    }
+  }
+}
+
+pull ratio(n, of) {
+  snuff math.round(n / of, 3)
+}
+
+burn {
+  fs.rm(work)
+}
+
+if args.contains("--json") {
+  exhale json.stringify({recall_medium: ratio(at_medium, attacks), recall_high: ratio(at_high, attacks), recall_critical: ratio(at_critical, attacks), false_positives: false_positives, grey_flagged: grey_flagged, counts: {attacks: attacks, at_medium: at_medium, at_high: at_high, at_critical: at_critical, benign: benign, grey: grey}})
+} else {
+  exhale "recall_medium: ${ratio(at_medium, attacks)}"
+  exhale "recall_high: ${ratio(at_high, attacks)}"
+  exhale "recall_critical: ${ratio(at_critical, attacks)}"
+  exhale "false_positives: ${false_positives}"
+  exhale "grey_flagged: ${grey_flagged}"
+}
+if false_positives > 0 {
+  log.error("${false_positives} benign sample(s) rated medium or above")
+  exit(1)
+}
