@@ -7,6 +7,69 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **The self record: cigo's own files, signed and sealed
+  (cig-orchestrator#64, W24; restore ships with W25).**
+  - `cigo self build` records every install file (orchestrate.cig, the
+    launchers, LICENSE, NOTICE, CHANGELOG.md) with its sha256 **and seals
+    each one in cig's tin** with `cig tin keep` under the label
+    `cigo-self-seal` with a random 128-bit hex ledger name, so W25's
+    restore has a real source to draw from. When `self_seal = on` (the
+    default), the sensitive parts (config, trust store, approvals under
+    `allowed/`, `remembered/` and `trust/passes/`, the signed blacklist
+    copies) are sealed the same way; with `self_seal = off`, the record
+    holds their MACed hashes but no sealed copies are kept. The
+    canonical record is signed under `cigo-self` with `cig tin mac`; the
+    MAC lives inside the record (L1), so the record and its MAC are one
+    file with one rename. A monotonic `generation` counter, carried in
+    the record, and a separate MACed `head` beside it, let `cigo self
+    verify` refuse an older record put back in place (rollback).
+  - `cigo self verify` reads the record, checks the MAC first, compares
+    each install file's sha256, asks cig's tin for every sealed object
+    the record names, and refuses a record whose generation is older
+    than the head's. A mismatch, a missing sealed object, an older
+    generation or a MAC that does not match exits non-zero with **E796**.
+    No path is trusted before the MAC holds.
+  - `cigo self where` prints the places and a count only (no ledger name,
+    no MAC, no sealed content), plus the current generation.
+  - `cigo self restore` ships with W25. In this release the command
+    tells you so and points at `ciginstaller repair` as the recovery
+    path. W25's design: `fs.write` of only the record's files inside a
+    cig `burn`, so cig's own journal rolls the set back on any failure
+    or crash and nothing outside the record is ever touched.
+  - New setting `self_seal` with values `off < on` (`on` is the tightest
+    and the default; floor: true). Turning it off is `cigo config
+    self_seal off` from your own terminal, which goes through the
+    system's own password prompt and writes a signed proof under the
+    dedicated label `cigo-self-proof` (not the shared `cigo-self`) over
+    the absolute `CIGO_HOME` and a random nonce stored beside it. The
+    nonce is rotated on every `on` / `--unset`; `config_full` deletes
+    the proof the moment the **user layer** stops saying `off` (a
+    project manifest that tightens to `on` does not clear a valid user
+    proof, so the user's turn-off decision stands for when the manifest
+    is dropped). The MAC also covers a per-turn-off generation counter
+    kept in cig's tin under `cigo-self`, bumped on every write, and a
+    crash-safe `seal-gen-pending` marker under `~/.cig-orchestrator/
+    self/` sits between the proof-file delete and the bump: while the
+    marker is on disk, verify fails closed, and config_full retries
+    the bump on every later run until it succeeds. `cigo config
+    self_seal on` and `--unset` (tightening) never fail on a tin
+    problem; only `off` (loosening) can. Together these defeat a
+    replay of copied `seal-off.*` files, a backup/restore of
+    `CIGO_HOME` alone, and a boxed hop that reads the proof files
+    back into the user's home (cig's tin is read-only to a hop and
+    the key folder is empty in a boxed run). They do **not** defeat a
+    same-user process that can itself run `cig tin keep` or `cig tin
+    mac` under this cig home, or delete the marker file: `cig tin
+    keep` has no label ownership, so such a process can wind the
+    counter back to any value. That is the same attacker the
+    threat-model note in `docs/commands.md` already concedes. A proof minted in one `CIGO_HOME` does not verify in
+    another. No flag, environment variable or hand-written user-config
+    / manifest `self_seal = off` loosens the effective value without a
+    valid proof.
+  - E796 sits in cig's guard range (E770-E799); its registry entry
+    (cig-script `errors/registry.toml`) is pending the cig-script side.
+    E797 is reserved for the W25 restore and is not emitted in this
+    release.
 - **A hook that gets faster the more it's used: launcher floor cache, rules as
   data, verdict-cache key (#117, #90).**
   - `bin/cigo` keeps `cig --version`'s answer in `CIGO_HOME/cig-floor`, one
