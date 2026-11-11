@@ -16453,9 +16453,9 @@ pull event_line(ev) {
   stick when = str(ev.get("at", "")).slice(0, 16).replace("T", " ")
   stick kind = str(ev.get("kind", ""))
   if kind == "guarded" or kind == "run-url" {
-    snuff "${when}  " + pick(kind == "run-url", "run-url ", "") + "${ev.get("command", "")}  in ${ev.get("cwd", "")}: ${ev.get("outcome", "")}" + pick(ev.get("risk", "none") != "none", " (rated ${ev.get("risk", "")})", "") + pick(ev.get("run", null) != null, "  run ${ev.get("run", "")}", "")
+    snuff sanitise("${when}  " + pick(kind == "run-url", "run-url ", "") + "${ev.get("command", "")}  in ${ev.get("cwd", "")}: ${ev.get("outcome", "")}" + pick(ev.get("risk", "none") != "none", " (rated ${ev.get("risk", "")})", "") + pick(ev.get("run", null) != null, "  run ${ev.get("run", "")}", ""), 0)
   }
-  snuff "${when}  ${kind}" + pick(ev.has("level"), " ${ev.get("level", "")}", "") + pick(ev.has("thing"), " ${ev.get("thing", "")}", "") + pick(ev.has("until"), " until ${ev.get("until", "")}", "")
+  snuff sanitise("${when}  ${kind}" + pick(ev.has("level"), " ${ev.get("level", "")}", "") + pick(ev.has("thing"), " ${ev.get("thing", "")}", "") + pick(ev.has("until"), " until ${ev.get("until", "")}", ""), 0)
 }
 
 pull do_guard_scope(word) {
@@ -18035,10 +18035,10 @@ pull do_scrub() {
     fail("no scrub is kept under `" + id + "`" + pick(scrub_unkept(id), ": the tin could not keep that one's record when it was made", " (cigo agent log lists what your agents have run)"))
   }
   exhale "scrub " + id + "  " + str(doc.get("at", ""))
-  exhale "  agent    " + str(doc.get("agent", ""))
-  exhale "  session  " + str(doc.get("session", ""))
-  exhale "  command  " + str(doc.get("command", ""))
-  exhale "  cwd      " + str(doc.get("cwd", ""))
+  exhale "  agent    " + sanitise(str(doc.get("agent", "")), 0)
+  exhale "  session  " + sanitise(str(doc.get("session", "")), 0)
+  exhale "  command  " + sanitise(str(doc.get("command", "")), 0)
+  exhale "  cwd      " + sanitise(str(doc.get("cwd", "")), 0)
   stick codes = as_list(doc.get("codes", [])).map(pack(x) => str(x))
   exhale "  codes    " + codes.join(", ")
   exhale "  counts   " + str(doc.get("redacted", 0)) + " redacted, " + str(doc.get("fenced", 0)) + " fenced, " + str(doc.get("stripped", 0)) + " stripped, " + str(doc.get("blocked", 0)) + " withheld"
@@ -18447,7 +18447,7 @@ pull agent_finish(r, shown, base, risk, findings, outcome, session, home_written
     log.warn("cigo: it ran in the box, rated medium; read the finding above before you go on (cigo agent undo --session ${session} takes the session back)")
   }
   if not home_written.is_empty() {
-    log.warn("cigo: it also wrote in your home, applied as it was (not undone by cigo agent undo): " + home_written.slice(0, 8).join(", ") + pick(home_written.len() > 8, " and ${home_written.len() - 8} more", ""))
+    log.warn("cigo: it also wrote in your home, applied as it was (not undone by cigo agent undo): " + sanitise(home_written.slice(0, 8).join(", "), 0) + pick(home_written.len() > 8, " and ${home_written.len() - 8} more", ""))
   }
   stick code = int(r.get("code", 1))
   guard_note(base.merge({outcome: said, run: cig.run_id(), exit: code}))
@@ -18604,7 +18604,7 @@ pull agent_run_contained(line, shown, cwd, id, base, risk0, findings0, outcome0,
     guard_say_verdict(shown, {risk: "critical", findings: findings})
     guard_note(base.merge({risk: "critical", outcome: "refused: the guard's own files"}))
     log.error("E897 your agent tried to stub out the guard. that's not happening.")
-    log.error("  ${base.agent} wanted to change: " + guard_hits.map(pack(f) => f.where).join(", ") + "   critical: nothing of it was applied, and nothing will be on approval")
+    log.error("  ${base.agent} wanted to change: " + sanitise(guard_hits.map(pack(f) => f.where).join(", "), 0) + "   critical: nothing of it was applied, and nothing will be on approval")
     exit(3)
   }
   stick hosts_refused = net.map(pack(f) => f.host)
@@ -18924,7 +18924,7 @@ pull do_agent_hook(which_agent) {
   # In an agent's session a gate has no one to answer it, so it is refused,
   # as refuse is; ask waits for a person.
   if tier == "gate" or tier == "refuse" {
-    guard_note({kind: "agent", agent: "claude-code", session: session, command: clip(redact(line), 200), cwd: tilde(cwd), risk: risk, outcome: "refused", cache: VERDICT_CACHE})
+    guard_note({kind: "agent", agent: "claude-code", session: session, command: sanitise(clip(redact(line), 200), 0), cwd: sanitise(tilde(cwd), 1024), risk: risk, outcome: "refused", cache: VERDICT_CACHE})
     hook_deny("cigo refused this command, and nothing ran: it is rated critical (" + top_finding(findings).code + " " + top_finding(findings).says + "). Tell your user what you were trying to do; do not try another way around it.")
     snuff
   }
@@ -18936,7 +18936,7 @@ pull do_agent_hook(which_agent) {
   if tier == "ask" and not approved(id) and not remembered(line) {
     stick f = approval_files(id)
     write_outside(f.pending, json.stringify({id: id, agent: "claude-code", session: session, command: sanitise(line, 2000), cwd: sanitise(cwd, 1024), risk: risk, findings: findings, at: time.now_iso()}, 2) + "\n")
-    guard_note({kind: "agent", agent: "claude-code", session: session, command: clip(redact(line), 200), cwd: tilde(cwd), risk: risk, outcome: "waiting for a person", thing: id, cache: VERDICT_CACHE})
+    guard_note({kind: "agent", agent: "claude-code", session: session, command: sanitise(clip(redact(line), 200), 0), cwd: sanitise(tilde(cwd), 1024), risk: risk, outcome: "waiting for a person", thing: id, cache: VERDICT_CACHE})
     hook_deny("E894 a human has to say yes: this command is rated high (" + top_finding(findings).code + " " + top_finding(findings).says + "). Nothing ran. Ask your user to approve it on their own terminal with `cigo approve " + id + "` (it asks the system for their password), then run the same command again.")
     snuff
   }
@@ -19611,7 +19611,7 @@ pull do_undo() {
     fail("nothing guarded is left to undo (cig runs lists every run; cig unburn <run> undoes one)")
   }
   stick ev = evs.last()
-  exhale "undoing: ${ev.get("command", "")} in ${ev.get("cwd", "")} (run ${ev.run})"
+  exhale sanitise("undoing: ${ev.get("command", "")} in ${ev.get("cwd", "")} (run ${ev.run})", 0)
   roll r = null
   burn {
     r = proc.run("cig", ["unburn", str(ev.run)], {timeout_ms: 600000, stream: true})

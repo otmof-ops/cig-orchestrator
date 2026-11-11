@@ -3460,13 +3460,11 @@ test("looser_setting_under_ci_is_refused", pack() {
 })
 
 test("a_loosening_with_no_os_authentication_available_writes_nothing", pack() {
-  # SEC-004: when the system's OS-auth prompt would run but the caller
-  # is on a pipe with no terminal, the gate takes the safe default
-  # (refuse). Here EOF stands in for a user who closes the prompt
-  # window: `< /dev/null` closes cigo's stdin immediately. The suite
-  # has no pty of its own, so this is EOF on a pipe; a true
-  # pty-driven test that types Enter at the real OS prompt needs the
-  # actual system prompt and is left to a hand-run on a desktop.
+  # SEC-004: a loosening asked where no OS authentication can succeed
+  # (a headless machine: no pkexec agent, no GUI session) is refused and
+  # writes nothing. stdin is closed so nothing can answer either. Where a
+  # real prompt can appear (macOS, a desktop session) the test steps
+  # aside below; typing at that prompt is a hand-run on a desktop.
   # The real OS prompt is asked here, so the test runs only where none can
   # appear and the call fails at once: a headless Linux (CI, the VM). macOS
   # puts up a real password dialog (osascript), and a Linux desktop session
@@ -3501,11 +3499,8 @@ test("a_loosening_with_no_os_authentication_available_writes_nothing", pack() {
 })
 
 test("a_tightening_write_records_from_and_to_in_its_config_event", pack() {
-  # L4 part two (SEC-004): the config event in the guard log names the
-  # `from` and `to` of the change for every floored key, not only
-  # guard_scope. This covers two paths: a tightening write (no
-  # os_auth), and a write that ran through os_auth (the attended
-  # path's own guard_note).
+  # L4 part two (SEC-004): a tightening write of a floored key other
+  # than guard_scope records `from` and `to` in its config event.
   stick dir = fresh("tests/fixtures/chain")
   # A tightening write of a floor key: write_setting fires a config
   # event with `from` and `to`. Start from default (auto) and tighten
@@ -3519,12 +3514,12 @@ test("a_tightening_write_records_from_and_to_in_its_config_event", pack() {
   stick ev = config_events.last()
   assert(ev.get("from", null) == "", "the config event's `from` is missing or wrong: " + json.stringify(ev))
   assert(ev.get("to", null) == "high", "the config event's `to` is missing or wrong: " + json.stringify(ev))
-  # A refused loosening (CI): the H1 path also records from/to.
+  # A loosening refused under CI writes nothing: the value is still high.
   stick refused = tool_layers(dir, ["config", "rehearse_fail_on", "never"], {CI: "1"})
   exits(refused, 2)
-  # (The H1 refusal fails with exit 2 before guard_note is called in
-  # the `not auth_ok` branch; CI's path does not emit a guard_note for
-  # the refused change. The attended refusal path at os_auth does.)
+  stick still = tool_layers(dir, ["config", "rehearse_fail_on"], {})
+  exits(still, 0)
+  assert(still.out.trim() == "high", "a refused loosening changed rehearse_fail_on to `" + still.out.trim() + "`")
 })
 
 test("malformed_installer_files_are_refused_E1830", pack() {
