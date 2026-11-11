@@ -122,7 +122,7 @@ cig run --no-rollback tests/run.cig     # keep .test-work/ to look around after 
 cigo run ci                             # cig check, shellcheck, then the suite
 ```
 
-## Where a start goes (#90)
+## Where a start goes (#90, #117)
 
 Every cigo command is `cig run orchestrate.cig`, so each one pays the same
 floor before it does anything. Measured on Linux (cig 1.16.1, median of 9),
@@ -145,11 +145,81 @@ The agent hook runs twice for each command an agent runs: once as
 Both are written with `--no-check`. orchestrate.cig is checked in CI, so
 the check at every start buys nothing, and skipping it saves its 5 ms each
 time (an error in the script is still an error: it is still parsed). Lazy
-tables would save about 3 ms. A verdict cache would save the read's 15 ms
-on a repeated command, but each new command would cost a write, and in
-CigScript a write is a burn: a journal entry for every command an agent
-types. What moves the floor itself is parsing less: a small separate hook
+tables would save about 3 ms. The verdict cache below saves the read on a
+repeated command: one pass lookup rather than scanning the line again.
+What moves the floor itself is parsing less: a small separate hook
 program, or a compiled cigo (cig-compile's stage B).
+
+### The launcher's floor cache (#117 W3)
+
+`bin/cigo` runs `cig --version` as a subprocess on every call to check the
+floor (`needs_major=1`, `needs_minor=20`, `needs_patch=0`), which costs
+about 2.5 ms plus a fork. The result is kept in `CIGO_HOME/cig-floor`,
+one line, `<abs cig path>|<size>|<mtime>|<version>`. On the next call,
+one `stat` (GNU `stat -c '%s %Y'`, BSD/macOS `stat -f '%z %m'`) checks
+the path, size and mtime of the cig the launcher would reach: a match
+reuses the kept version and the subprocess does not run. The too-old
+check is recomputed from the cached version on every call, so a bump
+to the floor still refuses an old cig after an upgrade. A write to the
+cache is atomic (temp file plus `mv`), a failure is never cached, and
+an unwritable `CIGO_HOME` is the no-cache case. The version is
+accepted only when it is digits and dots; anything else is a
+`--version` failure. The PowerShell launcher does the same with
+`(Get-Item $cig).Length` and `.LastWriteTimeUtc.Ticks`.
+`CIGO_FLOOR_CACHE=off` turns the cache off for a single run; the
+suite sets it so one test's writes do not land on another's home.
+
+### Rules as data (#117 W8)
+
+The three tables the hook reads are written out beside the tool in
+`rules/`:
+
+| file | from | what |
+|---|---|---|
+| `rules/tier-matrix.json` | `TIER_MATRIX` | the risk × confidence → silent/notice/ask/gate/refuse cells, the confidence names and the risks |
+| `rules/static-reads.json` | `RULES` | every regex rule the static read runs (id, code, category, weight, pattern, sentence); weights are strings (`notes.weight_format = "decimal-string"`) so they round-trip exactly |
+| `rules/packages.json` | `TOP_NPM`, `TOP_PYPI`, `TOP_CRATES` | the top-names lists the typosquat check compares against, sorted alphabetically (not by rank) |
+
+`scripts/gen-rules.cig` regenerates them from orchestrate.cig's tables
+through the hidden `cigo __dump-rules <name>` command (canonical JSON,
+sorted keys, one trailing newline). The test
+`hook_program_rules_equal_orchestrate_rules` compares their bytes with
+the dump every run and names the generator in its failure message, so a
+table change is caught the next test. The hot path reads orchestrate.cig,
+not these files; the files exist to give an external hot-path program
+(not yet built) the same data byte for byte.
+
+### The verdict cache's key (#117 W11)
+
+The cache's value is the scan's findings. The scan is a pure function
+of the text it reads and the rules it reads with: it opens no files,
+reads no env and does not know the cwd. The tier and the blacklist
+half are decided live from the findings every call. So the key is
+only:
+
+- the line, canonicalized: a run of whitespace outside single and
+  double quotes and not after a backslash escape collapses to one
+  space (so `ls  -la` and `ls -la` share an entry; `echo "a  b"` and
+  `echo "a b"` do not);
+- a once-per-process sha256 of every rule table and constant the scan
+  consults: `RULES`, `TIER_MATRIX`, `TOP_NPM / TOP_PYPI / TOP_CRATES`,
+  the decoder's budget and depth, and the named regexes `NET_RE`,
+  `DOTPACK_RE`, `CODE_RAWIP_RE`, `URL_HOST_RE`, `ASSIGN_RE` and
+  `UPLOAD_RE`;
+- the cigo version;
+- the schema tag `v: cigo-verdict-3`.
+
+Nothing read from outside the tool enters the key. A rule change with
+VERSION unchanged (a dev edit, a hotfix) hashes to a new key on the
+next call and every entry misses at once. An older-schema entry (`v:
+cigo-verdict-1` or `-2`) has a different shape and MAC subkey, so it
+cannot answer a `v: cigo-verdict-3` lookup. `cigo config verdict_cache
+off` (the paranoid preset's default) bypasses the pass store: the
+lookup is skipped and nothing is stored.
+
+The tier is never cached. `cigo guard stats`' hit-rate column counts
+only entries that reached the pass store (hits over hits + misses that
+day; a `-` for a day with no lookups), reusing `--since`.
 
 ## When the language is the problem
 

@@ -1,0 +1,59 @@
+#!/usr/bin/env cig
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+# cig >=1.20.0
+# Rules as data (#117 W8): regenerate rules/*.json from the tables in
+# orchestrate.cig, so the hot path can read them without loading the whole
+# tool. Three files, one hidden command, canonical JSON, byte for byte
+# equal to what `cigo __dump-rules <name>` prints. Run from the repository
+# root; the test `hook_program_rules_equal_orchestrate_rules` fails if
+# this was not run after a rule change, and its message says so.
+#
+#   cig run scripts/gen-rules.cig
+
+pack { "./rules" }
+
+stick root = fs.cwd()
+stick tool = path.join(root, "orchestrate.cig")
+stick out_dir = path.join(root, "rules")
+
+if not fs.is_file(tool) {
+  log.error("run this from the repository root: cig run scripts/gen-rules.cig")
+  exit(2)
+}
+
+stick names = ["tier-matrix", "static-reads", "packages"]
+
+burn {
+  if not fs.is_dir(out_dir) {
+    fs.mkdir(out_dir)
+  }
+}
+
+for name in names {
+  roll r = null
+  burn {
+    r = proc.run("cig", ["run", tool, "--", "__dump-rules", name], {timeout_ms: 60000, reads: true})
+  }
+  if r == null {
+    log.error("cigo __dump-rules " + name + " could not start (is `cig` on PATH?)")
+    exit(1)
+  }
+  if r.code != 0 {
+    log.error("cigo __dump-rules " + name + " failed:")
+    log.error(str(r.get("err", "")).trim())
+    exit(1)
+  }
+  stick file = path.join(out_dir, name + ".json")
+  # The canonical JSON ends with one newline; exhale supplied it, so the
+  # run's stdout is already the file's bytes (apart from one trailing
+  # newline the runner may strip, which we put back).
+  roll body = str(r.out)
+  if not body.ends_with("\n") {
+    body = body + "\n"
+  }
+  burn {
+    fs.write_text(file, body)
+  }
+  exhale "wrote " + file + " (" + str(body.len()) + " bytes)"
+}
