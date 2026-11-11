@@ -8636,6 +8636,12 @@ test("self: a failed bump leaves the seal-gen-pending marker and defeats a repla
     exhale "      (skipped: this cig cannot sign with cig tin mac)"
     snuff
   }
+  if on_windows {
+    # The failed bump is injected by a sh stub of cig first on PATH, which
+    # Windows cannot start; the marker code is the same on every platform.
+    exhale "      (skipped on Windows: the failed bump is injected by a sh stub of cig, which Windows cannot start)"
+    snuff
+  }
   stick dir = fresh("tests/fixtures/empty")
   stick root = path.join(dir, "install")
   self_prep(dir, root)
