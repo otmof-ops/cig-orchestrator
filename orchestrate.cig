@@ -8742,6 +8742,94 @@ pull top_list(eco) {
   snuff []
 }
 
+# ----- the rule tables as data (#117 W8): the generator and the dump ---------
+#
+# scripts/gen-rules.cig regenerates rules/*.json from the tables above and
+# the test `hook_program_rules_equal_orchestrate_rules` compares them byte
+# for byte. `cigo __dump-rules <name>` prints one file's canonical JSON on
+# stdout. One command, three files, all read-only; a manifest is not
+# needed, so the launcher lists `__dump-rules` beside `__doctor`.
+
+# The one JSON schema the three files share. A version lives beside the
+# data so an older regenerator at a newer checkout can say the two have
+# diverged instead of writing something that does not round-trip.
+stick RULES_SCHEMA = "cigo-rules-1"
+
+# Keys in a stable order, nested maps and lists the same way: the bytes
+# json.stringify prints are the same on every machine for the same data.
+pull canonical_json_value(v) {
+  if type_of(v) == "map" {
+    roll out = {}
+    for k in v.keys().sort() {
+      out[k] = canonical_json_value(v[k])
+    }
+    snuff out
+  }
+  if type_of(v) == "list" {
+    roll lst = []
+    for x in v {
+      lst.push(canonical_json_value(x))
+    }
+    snuff lst
+  }
+  snuff v
+}
+
+pull canonical_json(v) {
+  snuff json.stringify(canonical_json_value(v), 2) + "\n"
+}
+
+pull rules_dump_tier_matrix() {
+  snuff {schema: RULES_SCHEMA, name: "tier-matrix", matrix: TIER_MATRIX, confidences: TIER_CONFIDENCES, risks: TIER_RISKS}
+}
+
+pull rules_dump_static_reads() {
+  roll items = []
+  for r in RULES {
+    roll out = {}
+    for k in r.keys().sort() {
+      stick v = r[k]
+      if type_of(v) == "float" {
+        # A rule's weight is a float at a controlled scale; keep the text
+        # the table was written in so round-trip through the parser does
+        # not land as 0.5999999....
+        out[k] = str(v)
+      } else {
+        out[k] = v
+      }
+    }
+    items.push(out)
+  }
+  # `weight_format = "decimal-string"` says the `w` field is a string the
+  # scanner parses as a float, not a JSON number. The top-names lists
+  # are sorted alphabetically, not by rank: the scan uses them as a set.
+  snuff {schema: RULES_SCHEMA, name: "static-reads", notes: {weight_format: "decimal-string"}, rules: items}
+}
+
+pull rules_dump_packages() {
+  snuff {schema: RULES_SCHEMA, name: "packages", notes: {order: "alphabetical-not-by-rank"}, top: {npm: TOP_NPM.sort(), PyPI: TOP_PYPI.sort(), "crates.io": TOP_CRATES.sort()}}
+}
+
+# `cigo __dump-rules <name>`: one JSON document on stdout, canonical. For
+# the generator (`scripts/gen-rules.cig`) and the suite's equality test.
+pull do_dump_rules() {
+  expect_flags([])
+  stick which = targets.get(0, "")
+  if which == "tier-matrix" {
+    exhale canonical_json(rules_dump_tier_matrix()).trim_end()
+    snuff
+  }
+  if which == "static-reads" {
+    exhale canonical_json(rules_dump_static_reads()).trim_end()
+    snuff
+  }
+  if which == "packages" {
+    exhale canonical_json(rules_dump_packages()).trim_end()
+    snuff
+  }
+  fail("cigo __dump-rules <tier-matrix | static-reads | packages>")
+}
+
 # The name as the typosquat check compares it: lower-cased, PyPI's dashes,
 # underscores and dots all one, and an `@scope/` on an npm name read next
 # to the bare name so a dropped or added scope is a separator game.
@@ -15508,13 +15596,25 @@ pull do_guard_stats() {
     stick kind = str(e.get("kind", ""))
     stick tier = tier_of_event(e)
     stick dec = decision_of_event(e)
+    stick cache = str(e.get("cache", ""))
     kinds[kind] = kinds.get(kind, 0) + 1
     if totals.has(tier) {
       totals[tier] = totals.get(tier, 0) + 1
     }
-    if ["ask", "gate", "notice", "refuse"].contains(tier) {
-      roll row = days.get(day, {ask: 0, gate: 0, notice: 0, refuse: 0})
-      row[tier] = row.get(tier, 0) + 1
+    if ["ask", "gate", "notice", "refuse"].contains(tier) or (cache == "hit" or cache == "miss") {
+      roll row = days.get(day, {ask: 0, gate: 0, notice: 0, refuse: 0, hits: 0, misses: 0})
+      if row.get("hits", null) == null {
+        row["hits"] = 0
+        row["misses"] = 0
+      }
+      if ["ask", "gate", "notice", "refuse"].contains(tier) {
+        row[tier] = row.get(tier, 0) + 1
+      }
+      if cache == "hit" {
+        row["hits"] = row.get("hits", 0) + 1
+      } else if cache == "miss" {
+        row["misses"] = row.get("misses", 0) + 1
+      }
       days[day] = row
     }
     # An ask or a gate whose answer the log does not hold is counted as
@@ -15565,7 +15665,14 @@ pull do_guard_stats() {
     exhale "per day (UTC)"
     for d in day_keys {
       stick row = days[d]
-      exhale "  ${d}  " + str(row.get("ask", 0)).pad_left(3) + " ask  " + str(row.get("gate", 0)).pad_left(3) + " gate  " + str(row.get("notice", 0)).pad_left(3) + " notice  " + str(row.get("refuse", 0)).pad_left(3) + " refused"
+      stick hits = row.get("hits", 0)
+      stick misses = row.get("misses", 0)
+      stick lookups = hits + misses
+      roll hit_word = "   -"
+      if lookups > 0 {
+        hit_word = str(int(hits * 100 / lookups)).pad_left(3) + "%"
+      }
+      exhale "  ${d}  " + str(row.get("ask", 0)).pad_left(3) + " ask  " + str(row.get("gate", 0)).pad_left(3) + " gate  " + str(row.get("notice", 0)).pad_left(3) + " notice  " + str(row.get("refuse", 0)).pad_left(3) + " refused  " + hit_word + " hit"
     }
   }
   stick kind_keys = kinds.keys().sort()
@@ -16827,14 +16934,126 @@ pull scan_line(line) {
   snuff scan_text("the command", line, true, false, 0, {left: DECODE_BUDGET})
 }
 
-# The scan of a command line, from the cache when a verdict for it holds.
-pull line_findings(line) {
+# ----- the verdict cache's key (cig-orchestrator#117 W11) -----------------------------
+#
+# The cached value is only the scan's findings, a pure function of the
+# text the scanner reads and the rules it reads with. The tier and the
+# blacklist half are decided live every call, and the cwd, env, scripts
+# and package files are not input to scan_text. So the key is just
+# that text (canonical, whitespace-collapsed outside quotes and
+# escapes), a once-per-process hash of every table and constant the scan
+# uses, VERSION, and `v: cigo-verdict-3`. A rule change with VERSION
+# unchanged misses, an `ls  -la` and `ls -la` pair share an entry, and
+# `echo "a  b"` and `echo "a b"` do not. Nothing read from outside the
+# tool (an env value, a file on disk) enters the key.
+
+# A canonical line for the key only: a run of whitespace collapses to one
+# space only outside single and double quotes and only when the previous
+# character is not a backslash escape. Scanning uses the same text, so
+# findings never depend on cache state.
+pull hook_line_canonical(line) {
+  stick src = str(line).trim()
+  roll out = ""
+  roll i = 0
+  roll in_sq = false
+  roll in_dq = false
+  roll last_space = false
+  stick n = src.len()
+  while i < n {
+    stick ch = src.slice(i, i + 1)
+    if ch == "\\" and not in_sq and i + 1 < n {
+      # Backslash-anything is two characters, taken as is; next byte is
+      # not a whitespace candidate.
+      out = out + ch + src.slice(i + 1, i + 2)
+      i = i + 2
+      last_space = false
+      continue
+    }
+    if ch == "'" and not in_dq {
+      in_sq = not in_sq
+      out = out + ch
+      i = i + 1
+      last_space = false
+      continue
+    }
+    if ch == "\"" and not in_sq {
+      in_dq = not in_dq
+      out = out + ch
+      i = i + 1
+      last_space = false
+      continue
+    }
+    if not in_sq and not in_dq and (ch == " " or ch == "\t") {
+      if not last_space {
+        out = out + " "
+        last_space = true
+      }
+      i = i + 1
+      continue
+    }
+    out = out + ch
+    last_space = false
+    i = i + 1
+  }
+  snuff out
+}
+
+# One hash over every table and constant that scan_text consults: the
+# rule list, the tier matrix, the typosquat top-names, the decoder
+# constants, and the handful of named regexes the scan hands to text.
+# A change to any of them without a VERSION bump invalidates every
+# entry at once. Computed once per process. CIGO_RULES_SALT is a
+# suite-only knob (gated by CIGO_SUITE=1) that lets the suite plant a
+# different in-memory rule state and prove a miss.
+roll HOOK_RULES_HASH = ""
+pull hook_rules_hash() {
+  if HOOK_RULES_HASH == "" {
+    stick salt = pick(env.get("CIGO_SUITE", "") == "1", env.get("CIGO_RULES_SALT", ""), "")
+    HOOK_RULES_HASH = hash.sha256([
+      canonical_json(rules_dump_static_reads()),
+      canonical_json(rules_dump_tier_matrix()),
+      canonical_json(rules_dump_packages()),
+      NET_RE, DOTPACK_RE, CODE_RAWIP_RE, URL_HOST_RE, ASSIGN_RE, UPLOAD_RE,
+      str(DECODE_BUDGET), str(DECODE_DEPTH),
+      salt,
+    ].join("\n"))
+  }
+  snuff HOOK_RULES_HASH
+}
+
+# The key the verdict pass is stored under. Canonical: sorted keys
+# through canonical_json_value when the pass hashes it. `cwd` is unused
+# but accepted for callers that pass it (reserved for a future
+# content-scanning cache that would read files the line names).
+pull hook_key(line, cwd) {
+  snuff canonical_json_value({
+    v: "cigo-verdict-3",
+    line: hook_line_canonical(line),
+    rules: hook_rules_hash(),
+    cigo: VERSION,
+  })
+}
+
+# The scan of a command line, from the cache when a verdict for it
+# holds. Only the scan's findings are cached; the tier is decided live
+# from them (tier_for), so the ask case is never stored in the cache,
+# never needs rescanning, and `VERDICT_CACHE` reads as `none` for any
+# verdict_cache_on() == false call. A miss, a throw and the rescan path
+# all scan the canonical line, so the findings never depend on cache
+# state.
+pull line_findings(line, cwd) {
+  stick canon = hook_line_canonical(line)
+  if not verdict_cache_on() {
+    VERDICT_CACHE = "none"
+    snuff findings_in(findings_out(scan_line(canon)))
+  }
   roll m = null
   try {
-    m = pass.memo("verdict", {v: "cigo-verdict-2", line: line, cigo: VERSION}, pack(s) => findings_out(scan_line(s.line)), {until: "7d"})
+    stick key = hook_key(line, cwd)
+    m = pass.memo("verdict", key, pack(s) => findings_out(scan_line(str(s.line))), {until: "7d"})
   } ashtray e {
     VERDICT_CACHE = "none"
-    snuff findings_in(findings_out(scan_line(line)))
+    snuff findings_in(findings_out(scan_line(canon)))
   }
   VERDICT_CACHE = pick(m.get("hit", false), "hit", pick(m.get("id", null) == null, "none", "miss"))
   snuff findings_in(m.result)
@@ -16844,7 +17063,7 @@ pull line_findings(line) {
 # reads a command an agent runs.
 pull do_guard_check_line() {
   stick line = stdin()
-  stick findings = line_findings(line) + line_blacklist(line)
+  stick findings = line_findings(line, CALLER_DIR) + line_blacklist(line)
   stick risk = risk_of(findings)
   stick tier = tier_for(risk, findings)
   if flags.contains("--json") {
@@ -16926,7 +17145,7 @@ pull do_agent_run() {
   stick shown = clip(redact(line), 200)
   roll findings = []
   if guard_on() {
-    findings = line_findings(line) + line_blacklist(line)
+    findings = line_findings(line, cwd) + line_blacklist(line)
   }
   stick risk = risk_of(findings)
   stick tier = tier_for(risk, findings)
@@ -17511,7 +17730,7 @@ pull do_agent_hook(which_agent) {
   }
   stick cwd = str(call.get("cwd", fs.cwd()))
   stick session = str(call.get("session_id", ""))
-  stick findings = line_findings(line) + line_blacklist(line)
+  stick findings = line_findings(line, cwd) + line_blacklist(line)
   phase("read")
   stick risk = risk_of(findings)
   stick tier = tier_for(risk, findings)
@@ -18347,6 +18566,8 @@ pull dispatch() {
     do_doctor_stub()
   } else if command == "__doctor" {
     do_self_doctor()
+  } else if command == "__dump-rules" {
+    do_dump_rules()
   } else if command == "crash" {
     do_crash()
   } else if command == "report" {
