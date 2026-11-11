@@ -175,6 +175,27 @@ A file the run touched has changed since, so restoring it would overwrite
 newer work. `cig unburn <id> --dry-run` shows which; `--force` restores
 anyway, if the old content is what you want.
 
+**`cigo self verify` refuses with `E796`**
+
+`cigo self verify` saw the MAC or a file's sha256 disagree with the signed
+record of cigo's own install. The file it names has changed since the
+record was signed (a file picked up an edit outside an install) or the
+record itself has been altered. Fix one of two ways: `cigo self build`
+re-signs the record if the live tree is the one you want, and
+`cigo self restore` writes the recorded bytes back if they are. The MAC is
+checked before any path in the record is trusted, so a forged record is
+caught first. The registry entry for E796 (cig's errors/registry.toml) is
+pending the cig-script side.
+
+**`cigo self restore` says it is not in this release**
+
+Restore ships with W25. In the meantime, `ciginstaller repair`
+reinstalls cigo from the carton and runs `cigo self verify` against
+the result; if verify says the sensitive parts in the tin are still
+there, the operator can restore them by hand from the sealed objects.
+`cig explain E797` is not wired up in cig-script yet; the code is
+reserved for the W25 restore path.
+
 **A value handed on from PowerShell never arrives**
 
 Windows PowerShell 5.1 writes `>>` and `Out-File` as UTF-16, which

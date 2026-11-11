@@ -1112,6 +1112,93 @@ the run's record in `.cig-orchestrator/reports/` carries the same, and
 manager hears which one to install (`mise`, or the one language's own) and
 carries on as today.
 
+## cigo's own install: `cigo self`
+
+cigo keeps a signed record of the files it is installed as, plus the
+sensitive parts of your use of it (the config, the trust store, the kept
+approvals, the signed blacklist copies) sealed in cig's tin. The sealed
+copies are the source a later `cigo self restore` will write back from
+when an install file is damaged; the restore command ships with W25. For
+now, recovery from a broken install is `ciginstaller repair`, which
+reinstalls cigo from the carton and runs `cigo self verify` against it.
+
+- `cigo self build` writes the record. Every install file
+  (`orchestrate.cig`, the launchers, `LICENSE`, `NOTICE`, `CHANGELOG.md`)
+  gets its sha256 taken **and is sealed in cig's tin** with `cig tin
+  keep` under the label `cigo-self-seal` with a random ledger name of
+  128 bits of hex, so a later `cigo self restore` (W25) has a real
+  source to draw from. The sensitive parts (config, trust store,
+  approvals, rules) are sealed the same way when `self_seal = on`;
+  with `self_seal = off`, the record carries their MACed hashes but
+  no sealed copies are kept. The canonical record is signed under
+  `cigo-self` with `cig tin mac`; the MAC lives inside the record
+  (one file, one rename). A monotonic generation counter and a
+  separate MACed head file sit beside the record: an older record put
+  back in place is refused by verify.
+- `cigo self verify` reads the record, checks the MAC first, then
+  compares each install file's sha256 to the record's, asks cig's tin
+  for every sealed object the record names, and refuses a record whose
+  generation is older than the head's. A mismatch, a missing sealed
+  object, an older generation or a MAC that does not match exits
+  non-zero with `E796`. The MAC is checked before any path is trusted.
+- `cigo self where` prints the places and a count only (no ledger name,
+  no MAC, no sealed content): the self-record file, the head, the
+  install root, the number of signed files, sealed objects and the
+  current generation.
+- `cigo self restore` ships with W25. In this release the command
+  tells you so and points at `ciginstaller repair` as the recovery
+  path. The W25 design is: `fs.write` of only the record's files
+  inside a cig `burn`, so cig's own journal rolls the set back on any
+  failure or crash and nothing outside the record is ever touched.
+
+The build is **in cigo's range of error codes** (`E770`-`E799`); until
+their cig-script registry entries land, `cig explain E796` and `cig explain
+E797` do not have an entry.
+
+### `self_seal`, the setting
+
+`self_seal` controls sealing of the sensitive parts. Its values are
+`off < on`, with `on` the tightest and the default. It is marked
+`floor: true` (no project setting loosens it, and the environment
+variable `CIGO_SELF_SEAL` is dropped on the way in), and goes off only
+through `cigo config self_seal off` from your own terminal: the system's
+password prompt (polkit on Linux, osascript on macOS) answers. No flag,
+environment variable or `cigo set` call stands in. A script in CI sees
+`E895` instead, and the setting stays as it was.
+
+With `self_seal = on` (the default), `cigo self build` seals the
+sensitive parts (`config`, the trust store, `allowed/`, `remembered/`,
+`trust/passes/`, the signed blacklist copies) in cig's tin. With
+`self_seal = off`, the record carries their MACed hashes but **no
+sealed copies are kept**: a later `cigo self restore` cannot draw them
+back and the operator restores them by hand. Install files
+(`orchestrate.cig`, the launchers, licence and notices) are sealed
+either way.
+
+**A hand-written `self_seal = off` in the user config, or
+`"self_seal": "off"` in the manifest's `settings`, does not loosen the
+effective value**. `cigo config self_seal off` writes a signed proof
+under its own label (`cigo-self-proof`, distinct from the shared
+`cigo-self`) over the absolute `CIGO_HOME` and a random nonce stored
+beside it (`~/.cig-orchestrator/self/seal-off.{mac,nonce}`). The nonce
+is rotated on every `on` / `--unset`, so a stale proof from an earlier
+turn-off cannot be replayed. The proof is honored only while the user
+layer actually reads `off`; the moment it does not, `config_full`
+deletes the proof. Without a valid proof, the layer value is kept as
+the floor the layer tried to pass: `cigo config` prints the effective
+`on`, and the floored entry is in `cigo config --json`'s `floored`
+list. Turning it back on, or unsetting it, is `cigo config self_seal
+on` / `cigo config self_seal --unset`: the proof is removed with the
+write, and the next hand-written `off` does not quietly take effect.
+
+**Threat model note.** The proof scheme stops a hand edit of the user
+config against a same-user attacker. It does not stop a same-user
+attacker who can run `cigo config self_seal off` through the
+authenticated path (the system's own password prompt would be the
+attacker's to answer) or who can issue `cig tin mac` under the
+`cigo-self-proof` label from the same cig home. A separate OS user,
+or a separate machine, cannot mint a valid proof.
+
 ## Crash reports
 
 A task failing is cigo doing its job. cigo itself failing, a runtime or type

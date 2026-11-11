@@ -7721,6 +7721,436 @@ test("holes: the hook sees the file tools: the guard's files are E897, a startup
   says(noticed.err, "E897 the hook was taken out")
 })
 
+# ----- cigo self (cig-orchestrator#64, W24; r3 after SEC-004 review) ------------
+#
+# Restore ships with W25. Round 3 tests build, verify, where and the
+# self_seal proof. A scratch install root per test: a copy of
+# orchestrate.cig and bin/cigo into a new folder, with CIGO_TOOL pointing
+# at it.
+
+pull self_abs_or(name, base) {
+  if path.is_abs(name) {
+    snuff name
+  }
+  snuff path.join(base, name)
+}
+
+pull self_prep(dir, root) {
+  burn {
+    fs.mkdir(root)
+    fs.mkdir(path.join(root, "bin"))
+    # Short, known content for the stub install; the names match
+    # SELF_INSTALL_FILES in orchestrate.cig.
+    fs.write_text(path.join(root, "orchestrate.cig"), "# fake orchestrate.cig for the self test\nstick X = 1\n")
+    fs.write_text(path.join(root, "bin", "cigo"), "#!/bin/sh\necho stub cigo >&2\n")
+    fs.write_text(path.join(root, "bin", "cigo.cmd"), "@echo off\r\necho stub\r\n")
+    fs.write_text(path.join(root, "bin", "cigo.launch.ps1"), "Write-Error 'stub'\n")
+    fs.write_text(path.join(root, "LICENSE"), "test LICENSE\n")
+    fs.write_text(path.join(root, "NOTICE"), "test NOTICE\n")
+    fs.write_text(path.join(root, "CHANGELOG.md"), "# test CHANGELOG\n")
+  }
+}
+
+# A scratch install root laid out from the real-size export: the running
+# orchestrate.cig and bin/cigo, not the stub. N8 of the review wants
+# verify checked at the real size (880 KB orchestrate.cig flowing through
+# proc.run).
+pull self_prep_real(dir, root) {
+  burn {
+    fs.mkdir(root)
+    fs.mkdir(path.join(root, "bin"))
+    fs.cp(path.join(fs.cwd(), "orchestrate.cig"), path.join(root, "orchestrate.cig"))
+    fs.cp(path.join(fs.cwd(), "bin", "cigo"), path.join(root, "bin", "cigo"))
+    fs.cp(path.join(fs.cwd(), "LICENSE"), path.join(root, "LICENSE"))
+    fs.cp(path.join(fs.cwd(), "NOTICE"), path.join(root, "NOTICE"))
+    fs.cp(path.join(fs.cwd(), "CHANGELOG.md"), path.join(root, "CHANGELOG.md"))
+    # The real CRLF/ps1 launcher files on this platform, where present.
+    for name in ["cigo.cmd", "cigo.launch.ps1"] {
+      stick src = path.join(fs.cwd(), "bin", name)
+      if fs.is_file(src) {
+        fs.cp(src, path.join(root, "bin", name))
+      }
+    }
+  }
+}
+
+pull self_env(dir, root, more) {
+  stick ch = cigo_home(dir)
+  # A per-test seal key so cig tin keep and cig tin mac work outside the
+  # suite's shared home.
+  snuff {CIGO_TOOL: path.join(root, "orchestrate.cig"), CIGO_HOME: ch, CIG_SEAL_KEY: "file", CIGSCRIPT_HOME: path.join(ch, "cig-home")}.merge(more)
+}
+
+pull self_tool(dir, root, words, more) {
+  snuff hop_env(dir, tool_prog("cig"), tool_args(words), self_env(dir, root, more))
+}
+
+# A known marker inside the config, so the sealed-plaintext test can look
+# for it among the sealed bytes in cig's tin: if the marker shows up there,
+# the "sealed" parts are not sealed.
+stick SELF_MARKER = "SELF-MARKER-DO-NOT-LEAK-7f3a9e2b"
+
+pull self_write_config(dir, root) {
+  stick ch = cigo_home(dir)
+  burn {
+    fs.mkdir(ch)
+    fs.mkdir(path.join(ch, "trust"))
+    fs.mkdir(path.join(ch, "blacklist"))
+    fs.write_text(path.join(ch, "config"), "security = strict\n# ${SELF_MARKER}\n")
+    fs.write_text(path.join(ch, "trust", "entry-1.json"), "{\"${SELF_MARKER}\": true}\n")
+    fs.write_text(path.join(ch, "blacklist", "mine.list"), "# ${SELF_MARKER} cigo blacklist\nsha256:abcdef\n")
+  }
+}
+
+test("self: the spares sensitive parts are sealed", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign with cig tin mac)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep(dir, root)
+  self_write_config(dir, root)
+  stick r = self_tool(dir, root, ["self", "build"], {})
+  exits(r, 0)
+  stick sealed_dir = path.join(cigo_home(dir), "cig-home", "tin", "sealed")
+  assert(fs.is_dir(sealed_dir), "cig did not create tin/sealed/: ${sealed_dir}")
+  roll leaked = []
+  for entry in fs.list(sealed_dir) {
+    stick p = self_abs_or(entry, sealed_dir)
+    if fs.is_file(p) {
+      roll body = ""
+      burn {
+        try {
+          body = fs.read_text(p)
+        } ashtray e {
+          body = ""
+        }
+      }
+      if body.contains(SELF_MARKER) {
+        leaked.push(path.base(p))
+      }
+    }
+  }
+  assert(leaked.is_empty(), "the marker leaked into sealed objects: ${leaked.join(", ")}")
+})
+
+test("self: spare objects have random names and no outside index", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign with cig tin mac)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep(dir, root)
+  self_write_config(dir, root)
+  exits(self_tool(dir, root, ["self", "build"], {}), 0)
+  stick rec1 = json.parse(fs.read_text(path.join(cigo_home(dir), "self", "record.json")))
+  stick names1 = rec1.sealed_names
+  burn {
+    fs.rm(path.join(cigo_home(dir), "self"))
+    fs.rm(path.join(cigo_home(dir), "cig-home", "tin"))
+  }
+  exits(self_tool(dir, root, ["self", "build"], {}), 0)
+  stick rec2 = json.parse(fs.read_text(path.join(cigo_home(dir), "self", "record.json")))
+  stick names2 = rec2.sealed_names
+  for n in names1 {
+    assert(not names2.contains(n), "two builds reused ledger name ${n}")
+  }
+  stick w = self_tool(dir, root, ["self", "where"], {})
+  exits(w, 0)
+  for n in names2 {
+    never_says(w.out, n)
+  }
+  never_says(w.out, rec2.sealed_map_name)
+  # Grep CIGO_HOME outside the signed record for any ledger name.
+  stick ch = cigo_home(dir)
+  roll outside = []
+  for sub in ["config", "trust", "allowed", "remembered", "blacklist"] {
+    stick base = path.join(ch, sub)
+    if fs.is_file(base) {
+      stick body = fs.read_text(base)
+      for n in names2 + [rec2.sealed_map_name] {
+        if body.contains(n) {
+          outside.push(sub + ": " + n)
+        }
+      }
+    } else if fs.is_dir(base) {
+      for f in fs.list(base) {
+        stick full = self_abs_or(f, base)
+        if fs.is_file(full) {
+          stick body = fs.read_text(full)
+          for n in names2 + [rec2.sealed_map_name] {
+            if body.contains(n) {
+              outside.push(sub + "/" + path.base(f) + ": " + n)
+            }
+          }
+        }
+      }
+    }
+  }
+  assert(outside.is_empty(), "a sealed name appeared outside the sealed record: ${outside.join(", ")}")
+})
+
+test("self: a forged spare does not verify", pack() {
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign with cig tin mac)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep(dir, root)
+  self_write_config(dir, root)
+  exits(self_tool(dir, root, ["self", "build"], {}), 0)
+  stick rec_path = path.join(cigo_home(dir), "self", "record.json")
+  stick rec = json.parse(fs.read_text(rec_path))
+  stick first = rec.files.first()
+  stick first_lead = first.sha256.slice(0, 1)
+  roll flipped_lead = "0"
+  if first_lead == "0" {
+    flipped_lead = "1"
+  }
+  stick flipped = flipped_lead + first.sha256.slice(1)
+  rec.files = [first.merge({sha256: flipped})] + rec.files.slice(1)
+  burn {
+    fs.write_text(rec_path, json.stringify(rec, 2) + "\n")
+  }
+  stick v = self_tool(dir, root, ["self", "verify"], {})
+  assert(v.code != 0, "self verify did not fail on a flipped sha256: ${v.out} ${v.err}")
+  says(v.err, "E796")
+  says(v.err, "record")
+  # Wipe the `mac` field to prove verify refuses an unsigned record too.
+  stick rec2 = json.parse(fs.read_text(rec_path))
+  rec2.mac = "deadbeef" + "0" * 56
+  burn {
+    fs.write_text(rec_path, json.stringify(rec2, 2) + "\n")
+  }
+  stick v2 = self_tool(dir, root, ["self", "verify"], {})
+  assert(v2.code != 0, "self verify did not fail on a bogus MAC: ${v2.out} ${v2.err}")
+  says(v2.err, "E796")
+})
+
+test("self: a script cannot turn sealing off", pack() {
+  # H1 (round 1): `values: ["off","on"]` makes `on` the tightest, so a
+  # manifest's `self_seal: off` is caught by config_full's floor check.
+  # H2 (round 1): a user-config `self_seal = off` without the signed
+  # proof does not loosen the effective value.
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep(dir, root)
+  stick ci_env = {CI: "1"}
+  stick now = self_tool(dir, root, ["config", "self_seal"], ci_env)
+  exits(now, 0)
+  assert(now.out.trim() == "on", "self_seal did not start at on: ${now.out}")
+  stick off = self_tool(dir, root, ["config", "self_seal", "off"], ci_env)
+  assert(off.code != 0, "a script turned sealing off: ${off.out} ${off.err}")
+  says(off.err, "E895")
+  stick still = self_tool(dir, root, ["config", "self_seal"], ci_env)
+  exits(still, 0)
+  assert(still.out.trim() == "on", "self_seal was lowered by a refused command: ${still.out}")
+  stick envd = self_tool(dir, root, ["config", "self_seal"], ci_env.merge({CIGO_SELF_SEAL: "off"}))
+  exits(envd, 0)
+  assert(envd.out.trim() == "on", "CIGO_SELF_SEAL=off lowered the setting: ${envd.out}")
+  stick flg = self_tool(dir, root, ["config", "self_seal", "off", "--yes"], ci_env)
+  assert(flg.code != 0, "`--yes` on self_seal was accepted: ${flg.out} ${flg.err}")
+  stick frc = self_tool(dir, root, ["config", "self_seal", "off", "--force"], ci_env)
+  assert(frc.code != 0, "`--force` on self_seal was accepted: ${frc.out} ${frc.err}")
+  # H2: a hand-written `self_seal = off` in the user config without the
+  # signed proof does not loosen.
+  stick ch = cigo_home(dir)
+  burn {
+    fs.mkdir(ch)
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+  }
+  stick user_off = self_tool(dir, root, ["config", "self_seal"], ci_env)
+  exits(user_off, 0)
+  assert(user_off.out.trim() == "on", "a user-config `self_seal = off` loosened without the proof: ${user_off.out}")
+  # H1: a project manifest with `self_seal: off` is caught too.
+  burn {
+    fs.write_text(path.join(dir, "cig-tasks.json"), json.stringify({settings: {self_seal: "off"}, tasks: {}}, 2))
+  }
+  stick manifest_off = hop_env(dir, tool_prog("cig"), tool_args(["config", "self_seal"]), self_env(dir, root, ci_env))
+  exits(manifest_off, 0)
+  assert(manifest_off.out.trim() == "on", "a manifest `self_seal: off` loosened without the proof: ${manifest_off.out}")
+  # The new self region has no env/flag bypass.
+  stick body = fs.read_text(tool)
+  stick s = body.find("# ----- cigo self: build, verify, where")
+  assert(s >= 0, "the self-record region was not found in orchestrate.cig")
+  stick tail = body.slice(s)
+  stick e_rel = tail.find("# ----- dispatch -------")
+  assert(e_rel > 0, "the end of the self region was not found")
+  stick region = tail.slice(0, e_rel)
+  for bad in ["CIGO_SELF_SEAL", "--no-seal"] {
+    assert(not region.contains(bad), "the self region contains `${bad}`")
+  }
+  for line in region.lines() {
+    stick l = line.replace(" ", "").lower()
+    if l.contains("self_seal") and (l.contains("--yes") or l.contains("--force")) {
+      cough "the self region pairs self_seal with --yes or --force on one line: ${line}"
+    }
+  }
+})
+
+test("self: a stale proof after a hand edit back to on is deleted and does not let a later appended off stick", pack() {
+  # N4: config_full deletes the proof when the user layer stops saying
+  # `off`, so a stale proof from an earlier turn-off cannot be replayed
+  # after a hand edit of the user config back to `on` and later back to
+  # `off` on the appended line.
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign with cig tin mac)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep(dir, root)
+  stick ch = cigo_home(dir)
+  # Build a valid proof the hard way: write both the proof file and the
+  # nonce by MACing the expected bytes with the per-test cig home.
+  burn {
+    fs.mkdir(path.join(ch, "self"))
+    fs.write_text(path.join(ch, "self", "seal-off.nonce"), "deadbeef" + "0" * 24 + "\n")
+  }
+  stick home_abs = path.abs(ch)
+  stick phrase = "cigo-self-seal-off\nhome=" + home_abs + "\nnonce=deadbeef" + "0" * 24 + "\n"
+  stick phrase_file = path.join(ch, "self", "phrase.tmp")
+  burn {
+    fs.write_text(phrase_file, phrase)
+  }
+  stick mac_env = {CIGSCRIPT_HOME: path.join(ch, "cig-home"), CIG_SEAL_KEY: "file", NO_COLOR: "1"}
+  stick signed = hop_env(dir, "cig", ["tin", "mac", phrase_file, "--label", "cigo-self-proof"], mac_env)
+  if signed.code != 0 {
+    exhale "      (skipped: cig tin mac could not sign; " + signed.err.trim() + ")"
+    snuff
+  }
+  burn {
+    fs.write_text(path.join(ch, "self", "seal-off.mac"), signed.out.trim() + "\n")
+    fs.rm(phrase_file)
+    # The user config says `off` so the proof is honored.
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+  }
+  stick off_now = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(off_now, 0)
+  assert(off_now.out.trim() == "off", "a valid proof did not take effect: ${off_now.out}")
+  # Hand edit the user config back to `on`: next call clears the proof.
+  burn {
+    fs.write_text(path.join(ch, "config"), "self_seal = on\n")
+  }
+  stick on_again = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(on_again, 0)
+  assert(on_again.out.trim() == "on", "setting did not read on after the edit: ${on_again.out}")
+  assert(not fs.is_file(path.join(ch, "self", "seal-off.mac")), "the stale proof was not deleted after the user layer stopped saying off")
+  assert(not fs.is_file(path.join(ch, "self", "seal-off.nonce")), "the stale proof's nonce was not deleted")
+  # Now a hand edit appends `off` again: no proof is in place, so the
+  # effective value stays on.
+  burn {
+    fs.write_text(path.join(ch, "config"), "self_seal = off\n")
+  }
+  stick back_off = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(back_off, 0)
+  assert(back_off.out.trim() == "on", "a later appended `off` took effect on a cleared proof: ${back_off.out}")
+})
+
+test("self: a proof copied from another CIGO_HOME does not verify", pack() {
+  # N4: the proof is bound to the absolute CIGO_HOME, so a proof minted
+  # in one home does not apply to another (the home is one of the fields
+  # the MAC covers).
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign with cig tin mac)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep(dir, root)
+  stick ch_a = cigo_home(dir)
+  stick ch_b = ch_a + "-other"
+  burn {
+    fs.mkdir(path.join(ch_a, "self"))
+    fs.mkdir(path.join(ch_b, "self"))
+    fs.write_text(path.join(ch_b, "self", "seal-off.nonce"), "feedface" + "0" * 24 + "\n")
+    fs.write_text(path.join(ch_a, "config"), "self_seal = off\n")
+    fs.write_text(path.join(ch_b, "config"), "self_seal = off\n")
+  }
+  # Sign a proof for home B.
+  stick b_abs = path.abs(ch_b)
+  stick b_phrase = "cigo-self-seal-off\nhome=" + b_abs + "\nnonce=feedface" + "0" * 24 + "\n"
+  stick b_phrase_file = path.join(ch_b, "self", "phrase.tmp")
+  burn {
+    fs.write_text(b_phrase_file, b_phrase)
+  }
+  stick signed = hop_env(dir, "cig", ["tin", "mac", b_phrase_file, "--label", "cigo-self-proof"], {CIGSCRIPT_HOME: path.join(ch_b, "cig-home"), CIG_SEAL_KEY: "file", NO_COLOR: "1"})
+  if signed.code != 0 {
+    exhale "      (skipped: cig tin mac could not sign; " + signed.err.trim() + ")"
+    snuff
+  }
+  burn {
+    fs.rm(b_phrase_file)
+  }
+  # Copy the proof file and the nonce from B into A. The proof will not
+  # verify in A because the home in the phrase is B's, not A's.
+  burn {
+    fs.write_text(path.join(ch_a, "self", "seal-off.mac"), signed.out.trim() + "\n")
+    fs.write_text(path.join(ch_a, "self", "seal-off.nonce"), fs.read_text(path.join(ch_b, "self", "seal-off.nonce")))
+  }
+  stick in_a = self_tool(dir, root, ["config", "self_seal"], {CI: "1"})
+  exits(in_a, 0)
+  assert(in_a.out.trim() == "on", "a proof copied from another home took effect: ${in_a.out}")
+})
+
+test("self: an older record is refused by verify (rollback)", pack() {
+  # N7: the MACed head carries the newest generation; a record from an
+  # earlier generation put back in place is refused.
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign with cig tin mac)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep(dir, root)
+  self_write_config(dir, root)
+  exits(self_tool(dir, root, ["self", "build"], {}), 0)
+  stick rec_path = path.join(cigo_home(dir), "self", "record.json")
+  stick rec1_body = fs.read_text(rec_path)
+  # Build again: the head is now generation 2.
+  exits(self_tool(dir, root, ["self", "build"], {}), 0)
+  stick rec2 = json.parse(fs.read_text(rec_path))
+  assert(rec2.generation == 2, "second build did not advance the generation: ${rec2.generation}")
+  # Put the old generation back in place. Its MAC still holds, but verify
+  # refuses it because the head says the current generation is 2.
+  burn {
+    fs.write_text(rec_path, rec1_body)
+  }
+  stick v = self_tool(dir, root, ["self", "verify"], {})
+  assert(v.code != 0, "verify accepted an older record: ${v.out} ${v.err}")
+  says(v.err, "E796")
+  says(v.err, "older")
+})
+
+test("self: verify holds on the real-size install (orchestrate.cig and bin/cigo of the export)", pack() {
+  # N8: round 2 had build/restore unproven at real size (the live
+  # orchestrate.cig and bin/cigo, not the stub). Restore ships with W25,
+  # so this test exercises build and verify at the real sizes only.
+  if not has_tin_mac() {
+    exhale "      (skipped: this cig cannot sign with cig tin mac)"
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  stick root = path.join(dir, "install")
+  self_prep_real(dir, root)
+  self_write_config(dir, root)
+  exits(self_tool(dir, root, ["self", "build"], {}), 0)
+  stick v = self_tool(dir, root, ["self", "verify"], {})
+  exits(v, 0)
+  says(v.out, "self verify:")
+  # A hand edit of the live orchestrate.cig: verify catches it.
+  burn {
+    stick body = fs.read_text(path.join(root, "orchestrate.cig"))
+    fs.write_text(path.join(root, "orchestrate.cig"), body + "# drift\n")
+  }
+  stick vd = self_tool(dir, root, ["self", "verify"], {})
+  assert(vd.code != 0, "verify did not catch a drifted orchestrate.cig: ${vd.out} ${vd.err}")
+  says(vd.err, "E796")
+})
+
 # ----- the end --------------------------------------------------------------
 
 # A contained hop's scratch folder lives outside the project (in /var/tmp),
