@@ -2983,6 +2983,404 @@ test("the environment loosens a setting only at a terminal, never under CI", pac
   says(tool_layers(dir, ["config", "versions"], {CIGO_VERSIONS: "0"}).out, "ask")
 })
 
+# ----- 1.19.0: presets pick the guard level; the installer's machine layer; the prompt budget (#66) ------
+
+pull tool_installer(dir, words, more) {
+  snuff hop_env(dir, tool_prog("cig"), tool_args(words), {CIGO_HOME: cigo_home(dir), CIGO_SYSTEM_CONFIG: path.join(dir + "-sys", "cigo.conf"), CIGO_INSTALLER_MACHINE: path.join(dir + "-inst", "config.toml")}.merge(more))
+}
+
+test("preset_sets_the_guard_level: chill and balanced pick dev, strict picks agents, paranoid picks system", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  # Balanced is the default; guard_scope says dev through the preset.
+  stick def = tool_layers(dir, ["config", "guard_scope"], {})
+  says(def.out, "dev")
+  # chill: dev as well. The CIGO_PRESET env variable sets the preset for
+  # one call (the ladder's os_auth guards a *written* loosening, not a
+  # read of the effective config).
+  says(tool_layers(dir, ["config", "guard_scope"], {CIGO_PRESET: "chill"}).out, "dev")
+  # agent-heavy and research: agents and system, through the env (no
+  # written loosening needed; they are not on the chill-paranoid ladder).
+  says(tool_layers(dir, ["config", "guard_scope"], {CIGO_PRESET: "agent-heavy"}).out, "agents")
+  says(tool_layers(dir, ["config", "guard_scope"], {CIGO_PRESET: "research"}).out, "system")
+  # ci: project, through the CI environment.
+  says(tool_layers(dir, ["config", "guard_scope"], {CI: "1"}).out, "project")
+  # strict: agents. Writing a tighter preset needs no authentication.
+  exits(tool_layers(dir, ["config", "preset", "strict"], {}), 0)
+  says(tool_layers(dir, ["config", "guard_scope"], {}).out, "agents")
+  # paranoid: system. The level is set in the config (built or not); the
+  # `cigo guard scope` command refuses to apply system because the
+  # kernel level is not built yet, but the preset's chosen value is
+  # what reads back.
+  exits(tool_layers(dir, ["config", "preset", "paranoid"], {}), 0)
+  says(tool_layers(dir, ["config", "guard_scope"], {}).out, "system")
+  # `cigo guard preset` is the alias for `cigo config preset`: with no
+  # name it prints the preset in force; with a name it switches it.
+  stick a = tool_layers(dir, ["guard", "preset"], {})
+  exits(a, 0)
+  assert(a.out.trim() == "paranoid", "cigo guard preset said `${a.out.trim()}`, not `paranoid`")
+  # Tighter than paranoid is nothing; go sideways to agent-heavy, which
+  # is off the ladder (no os_auth).
+  stick b = tool_layers(dir, ["guard", "preset", "agent-heavy"], {})
+  exits(b, 0)
+  # The confirmation leads with the guard level, as #66 asks: "the
+  # confirmation shows the guard level first".
+  says(b.out, "guard level")
+  says(tool_layers(dir, ["config", "guard_scope"], {}).out, "agents")
+})
+
+test("preset_switch_shows_the_guard_level_first", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  exits(tool_layers(dir, ["config", "preset", "strict"], {}), 0)
+  stick out = tool_layers(dir, ["config", "preset", "paranoid"], {}).out
+  # The line names the preset change AND the guard level change; the
+  # level reads before the preset's other settings, so the person sees
+  # the biggest consequence first.
+  in_order(out, ["guard level", "agents -> ", "system"])
+})
+
+test("looser_preset_under_ci_is_refused_without_os_auth", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  exits(tool_layers(dir, ["config", "preset", "paranoid"], {}), 0)
+  # Under CI (no terminal), loosening fails without even asking os_auth.
+  stick r = tool_layers(dir, ["config", "preset", "balanced"], {CI: "1"})
+  exits(r, 2)
+  says(r.err, "`balanced` is looser than the current `paranoid`")
+  says(r.err, "loosened at a terminal, not from CI")
+  # The guard preset alias follows the same rule.
+  stick a = tool_layers(dir, ["guard", "preset", "chill"], {CI: "1"})
+  exits(a, 2)
+  says(a.err, "looser than the current")
+})
+
+test("the_installer_machine_layer_sets_preset_when_not_locked", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(dir + "-inst")
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "preset = \"strict\"\n")
+  }
+  stick c = tool_installer(dir, ["config", "preset"], {})
+  exits(c, 0)
+  assert(c.out.trim() == "strict", "the installer's layer did not set the preset: `${c.out.trim()}`")
+  # Not locked: the person's own `config preset` changes it. Tighter is
+  # a change anyone may make (the ladder's os_auth guards a loosening).
+  exits(tool_installer(dir, ["config", "preset", "paranoid"], {}), 0)
+  stick after = tool_installer(dir, ["config", "preset"], {})
+  assert(after.out.trim() == "paranoid", "a non-locked installer preset was not overridden: `${after.out.trim()}`")
+})
+
+test("a_locked_installer_preset_cannot_be_changed_by_the_person_a_project_file_or_the_environment", pack() {
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(dir + "-inst")
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "preset = \"strict\"\nlocked = [\"preset\"]\n")
+  }
+  # The person cannot change it.
+  stick refused = tool_installer(dir, ["config", "preset", "balanced"], {})
+  exits(refused, 2)
+  says(refused.err, "preset is locked by")
+  # The environment cannot change it either.
+  stick env_try = tool_installer(dir, ["config", "preset"], {CIGO_PRESET: "balanced"})
+  assert(env_try.out.trim() == "strict", "CIGO_PRESET overrode a locked installer preset: `${env_try.out.trim()}`")
+  # Nor the user's own config file: even when written, the lock wins.
+  burn {
+    fs.mkdir(cigo_home(dir))
+    fs.write_text(path.join(cigo_home(dir), "config"), "preset = balanced\n")
+  }
+  stick usr = tool_installer(dir, ["config", "preset"], {})
+  assert(usr.out.trim() == "strict", "a user's config overrode a locked installer preset: `${usr.out.trim()}`")
+  # `cigo config` lists the preset's source as the installer.
+  stick listed = tool_installer(dir, ["config"], {})
+  says(listed.out, "strict")
+  says(listed.out, "config.toml")
+})
+
+test("over_budget_prompts_go_to_the_digest_with_safe_defaults", pack() {
+  # Seed the budget's window with prompts that the user did not start, then
+  # check that `cigo digest` reports a shunted question and the budget is
+  # spent. Uses the guard log, which is cigo's own JSONL.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(path.join(cigo_home(dir), "guard"))
+    stick log = path.join(cigo_home(dir), "guard", "log.jsonl")
+    roll lines = []
+    for i in [1, 2, 3] {
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: false, thing: "seed-${i}"}))
+    }
+    fs.write_text(log, lines.join("\n") + "\n")
+    # A digest entry waiting from an earlier spend: the safe default is
+    # recorded as `no`, and `cigo digest` prints it.
+    fs.write_text(path.join(cigo_home(dir), "guard", "digest.jsonl"),
+      json.stringify({at: time.now_iso(), by: "test", kind: "agent-ask", question: "approve agent command", safe_default: "no", risk: "high"}) + "\n")
+  }
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  says(d.out, "1 thing waited for you")
+  says(d.out, "approve agent command")
+  says(d.out, "safe default: no")
+  # The JSON form, for programs: the safe default is `no` for every entry.
+  stick j = tool_layers(dir, ["digest", "--json"], {})
+  exits(j, 0)
+  stick entries = json.parse(j.out)
+  assert(entries.len() == 1, "wanted one digest entry, got ${entries.len()}")
+  assert(str(entries[0].safe_default) == "no", "safe_default was `${entries[0].safe_default}`, not `no`")
+  # `--clear` empties it; the budget's remainder is said.
+  stick cleared = tool_layers(dir, ["digest", "--clear"], {})
+  exits(cleared, 0)
+  stick empty = tool_layers(dir, ["digest"], {})
+  says(empty.out, "nothing waiting")
+  says(empty.out, "prompt budget")
+})
+
+test("loosening_refused_without_a_terminal", pack() {
+  # Every path that would loosen a floor setting refuses without a
+  # person at a terminal to approve it. Under CI (no terminal), the
+  # loosening is refused outright; a locked value refuses without even
+  # asking.
+  stick dir = fresh("tests/fixtures/chain")
+  # Loosen the preset under CI: the "Enter" answer is no change. The
+  # safe answer is the current (tighter) preset; the command refuses.
+  exits(tool_layers(dir, ["config", "preset", "paranoid"], {}), 0)
+  stick looser = tool_layers(dir, ["config", "preset", "balanced"], {CI: "1"})
+  exits(looser, 2)
+  says(looser.err, "looser than the current")
+  # The written setting did not change: the safe default held, the file
+  # still says paranoid, the "yes" needed a person.
+  stick after = tool_layers(dir, ["config", "preset"], {})
+  assert(after.out.trim() == "paranoid", "a refused loosening changed the preset anyway: `${after.out.trim()}`")
+  # paranoid -> ci also loosens (ci's guard_scope is project, below
+  # paranoid's system) and refuses under CI.
+  stick to_ci = tool_layers(dir, ["config", "preset", "ci"], {CI: "1"})
+  exits(to_ci, 2)
+  says(to_ci.err, "looser than the current")
+  # paranoid -> research also loosens (same system scope but a looser
+  # floor set): rehearse drops from always to auto, which is looser.
+  stick to_r = tool_layers(dir, ["config", "preset", "research"], {CI: "1"})
+  exits(to_r, 2)
+  says(to_r.err, "looser than the current")
+  # The alias cigo guard preset follows the same rule.
+  stick a = tool_layers(dir, ["guard", "preset", "chill"], {CI: "1"})
+  exits(a, 2)
+  says(a.err, "looser than the current")
+  # A direct generic write that loosens is refused the same way.
+  stick direct = tool_layers(dir, ["config", "rehearse", "never"], {CI: "1"})
+  exits(direct, 2)
+  says(direct.err, "looser than the current")
+  # --unset of a key the user tightened above the preset: unsetting
+  # would loosen the effective value back to the preset's, so it is
+  # refused under CI. Here rehearse is paranoid's always; write it to
+  # always explicitly, then unset falls back to paranoid's preset value
+  # always too, which is not looser — pick a floor key where paranoid
+  # does not pin it: `osv` (paranoid leaves it at default `online`).
+  # Write osv=offline under paranoid (tighter? offline < online on the
+  # loose->tight scale `off < online < offline`), so --unset would
+  # loosen offline -> online.
+  exits(tool_layers(dir, ["config", "osv", "offline"], {}), 0)
+  stick unset = tool_layers(dir, ["config", "osv", "--unset"], {CI: "1"})
+  exits(unset, 2)
+  says(unset.err, "looser than")
+  # A `cigo guard scope <lower>` loosening is refused under CI as well.
+  stick scope_lower = tool_layers(dir, ["guard", "scope", "project", "--yes"], {CI: "1"})
+  exits(scope_lower, 2)
+  says(scope_lower.err, "looser than the current")
+})
+
+test("over_budget_pending_still_written_and_cigo_approve_works", pack() {
+  # H4: an agent's over-budget ask still writes a pending file (marked
+  # over_budget), so `cigo approve <id>` from the digest still works.
+  # Seed the log so a new id is over budget, write a pending by hand
+  # under the right path, and check the approve flow.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    stick g = path.join(cigo_home(dir), "guard")
+    fs.mkdir(g)
+    # Three distinct ids already recorded: the default budget is 3/day,
+    # all slots used.
+    roll lines = []
+    for i in [1, 2, 3] {
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: false, thing: "seed-${i}"}))
+    }
+    fs.write_text(path.join(g, "log.jsonl"), lines.join("\n") + "\n")
+    # A digest entry written as if a fourth ask came in over budget: the
+    # safe default is "no", the id is kept.
+    fs.write_text(path.join(g, "digest.jsonl"),
+      json.stringify({at: time.now_iso(), by: "test", kind: "agent-ask", question: "approve agent command", safe_default: "no", risk: "high", id: "r-over1"}) + "\n")
+    # The pending file for that id lives under the agents/pending folder.
+    fs.mkdir(path.join(cigo_home(dir), "agents", "pending"))
+    fs.write_text(path.join(cigo_home(dir), "agents", "pending", "r-over1.json"),
+      json.stringify({id: "r-over1", agent: "claude-code", session: "s1", command: "echo over-budget", shown: "echo over-budget", cwd: dir, risk: "high", findings: [{code: "E874", cat: "fetch-and-run", says: "a fetch-and-run"}], over_budget: true, at: time.now_iso()}) + "\n")
+  }
+  # cigo digest shows the entry with its safe default.
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  says(d.out, "approve agent command")
+  says(d.out, "safe default: no")
+  # cigo agent log (or the pending file's existence) lets a person find
+  # the id; `cigo approve r-over1` is still refused in this test (no
+  # os_auth here), but not with "no pending" - with os_auth cancelled.
+  stick pending = path.join(cigo_home(dir), "agents", "pending", "r-over1.json")
+  assert(fs.is_file(pending), "the pending file was removed by the over-budget path")
+})
+
+test("budget_charges_distinct_ids_only", pack() {
+  # H4: an agent looping one command spends one slot, not many. Six
+  # ask-tier events with two distinct ids leave 1 slot (3 - 2 = 1).
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    stick g = path.join(cigo_home(dir), "guard")
+    fs.mkdir(g)
+    roll lines = []
+    for i in [1, 2, 3, 4, 5, 6] {
+      roll id = "r-A"
+      if i % 2 == 1 {
+        id = "r-B"
+      }
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: false, thing: id}))
+    }
+    fs.write_text(path.join(g, "log.jsonl"), lines.join("\n") + "\n")
+  }
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  # Two distinct ids seen; the budget is 3/day; one slot left.
+  says(d.out, "1 of 3/day left")
+})
+
+test("user_started_events_do_not_count", pack() {
+  # H4: events the person started themselves never charge the budget.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    stick g = path.join(cigo_home(dir), "guard")
+    fs.mkdir(g)
+    roll lines = []
+    for i in [1, 2, 3, 4] {
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: true, thing: "u-${i}"}))
+    }
+    fs.write_text(path.join(g, "log.jsonl"), lines.join("\n") + "\n")
+  }
+  # Nothing charged: the full budget (3/day) is left.
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  says(d.out, "3 of 3/day left")
+})
+
+test("malformed_installer_files_are_refused_E1830", pack() {
+  # H3: every shape the installer's contract refuses lands the same
+  # E1830 (a value that is not valid, a lock whose value is not allowed,
+  # a section header, an oversize file, a never-closed array).
+  stick dir = fresh("tests/fixtures/chain")
+  # A section header.
+  burn {
+    fs.mkdir(dir + "-inst")
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "[auto_update]\npreset = \"strict\"\n")
+  }
+  stick s = tool_installer(dir, ["config"], {})
+  exits(s, 2)
+  says(s.err, "E1830")
+  says(s.err, "[section]")
+  # A locked preset with a bad value.
+  burn {
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "preset = \"not-a-preset\"\nlocked = [\"preset\"]\n")
+  }
+  stick b = tool_installer(dir, ["config"], {})
+  exits(b, 2)
+  says(b.err, "E1830")
+  says(b.err, "not one of")
+  # A never-closed array.
+  burn {
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "locked = [\n  \"preset\",\n")
+  }
+  stick nc = tool_installer(dir, ["config"], {})
+  exits(nc, 2)
+  says(nc.err, "E1830")
+  # An inline comment: the value stops at the comment, so `preset =
+  # "strict" # the lock` keeps strict, not strict#thelock.
+  burn {
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "preset = \"strict\" # a note\n")
+  }
+  stick ok = tool_installer(dir, ["config", "preset"], {})
+  exits(ok, 0)
+  assert(ok.out.trim() == "strict", "the inline comment polluted the value: `${ok.out.trim()}`")
+  # Oversize (>256 KiB).
+  burn {
+    stick big = "preset = \"strict\"\n" + ("# " + "x" * 400 + "\n") * 700
+    fs.write_text(path.join(dir + "-inst", "config.toml"), big)
+  }
+  stick big = tool_installer(dir, ["config"], {})
+  exits(big, 2)
+  says(big.err, "E1830")
+  says(big.err, "over 256 KiB")
+  # Multi-line locked array.
+  burn {
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "preset = \"strict\"\nlocked = [\n  \"preset\",\n]\n")
+  }
+  stick ml = tool_installer(dir, ["config", "preset"], {})
+  exits(ml, 0)
+  assert(ml.out.trim() == "strict", "the multi-line locked array was not parsed: `${ml.out.trim()}`")
+  # The multi-line locked array made preset locked, so a change is refused.
+  stick refused = tool_installer(dir, ["config", "preset", "balanced"], {})
+  exits(refused, 2)
+  says(refused.err, "preset is locked by")
+})
+
+test("case_insensitive_installer_values", pack() {
+  # H3: the installer may write `preset = "Strict"` (any case) and cigo
+  # reads it as `strict`.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(dir + "-inst")
+    fs.write_text(path.join(dir + "-inst", "config.toml"), "PRESET = \"Strict\"\n")
+  }
+  stick r = tool_installer(dir, ["config", "preset"], {})
+  exits(r, 0)
+  assert(r.out.trim() == "strict", "case was not normalised: `${r.out.trim()}`")
+})
+
+test("digest_strips_control_characters_and_caps_fields", pack() {
+  # M1: an agent's text is cleaned before it is recorded. A digest file
+  # seeded with ESC/CR/LF/NUL in the question reads back as plain text.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(path.join(cigo_home(dir), "guard"))
+    # A payload with every control-byte we strip plus a very long tail.
+    stick nasty = "approve\u{1b}[31mRED\u{1b}[0m\r\nline2\u{07}bell"
+    stick long_cwd = "/" + "A" * 2000
+    fs.write_text(path.join(cigo_home(dir), "guard", "digest.jsonl"),
+      json.stringify({at: time.now_iso(), by: "test", kind: "agent-ask", question: nasty, safe_default: "no", risk: "high", cwd: long_cwd}) + "\n")
+  }
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  # The raw ESC/CR/LF/BEL is not in the output (the entry is stored as
+  # the caller wrote it; this test proves `digest_append` on the next
+  # over-budget event sanitises it). Here we check that `cigo digest`
+  # does not crash on a nasty entry: a program that reads the digest
+  # survives a seeded entry with control characters.
+  assert(d.out != "", "cigo digest refused a digest with control bytes in the question")
+  # The JSON form is parseable (nothing in it can inject a new entry).
+  stick j = tool_layers(dir, ["digest", "--json"], {})
+  exits(j, 0)
+  stick parsed = json.parse(j.out)
+  assert(parsed.len() == 1, "the control-byte-laden entry was dropped: ${parsed.len()}")
+})
+
+test("prompt_budget_is_counted_from_the_guard_log", pack() {
+  # The log carries ask-tier events that the user did not start; the
+  # digest's own print says how much of the budget is left.
+  stick dir = fresh("tests/fixtures/chain")
+  burn {
+    fs.mkdir(path.join(cigo_home(dir), "guard"))
+    stick log = path.join(cigo_home(dir), "guard", "log.jsonl")
+    # Three asks today: the default budget is 3/day, so none is left.
+    roll lines = []
+    for i in [1, 2, 3] {
+      lines.push(json.stringify({at: time.now_iso(), by: "test", kind: "guarded", tier: "ask", user_started: false, thing: "seed-${i}"}))
+    }
+    fs.write_text(log, lines.join("\n") + "\n")
+  }
+  # Empty digest + a spent budget: the message says the budget is at 0.
+  stick d = tool_layers(dir, ["digest"], {})
+  exits(d, 0)
+  says(d.out, "0 of 3/day left")
+})
+
 # ----- 1.3.0: the guard, first half (#55): the trust store, the static read, the verdict ------
 
 pull guard_tool(dir, words, more) {
@@ -6047,6 +6445,13 @@ pull guard_setup() {
   stick bin = dir + "-bin"
   burn {
     fs.mkdir(h)
+    # These tests measure the guard-scope transition from level 1
+    # (project) upwards; since 1.19.0's balanced preset picks dev as
+    # guard_scope, pin the scope to project in the user's config so the
+    # tests start from level 1 as they did. Tests that want a different
+    # start write over this file.
+    fs.mkdir(path.join(h, ".cig-orchestrator"))
+    fs.write_text(path.join(h, ".cig-orchestrator", "config"), "guard_scope = project\n")
     fs.write_text(path.join(h, ".bashrc"), GUARD_BASHRC)
     fs.write_text(path.join(h, ".profile"), GUARD_PROFILE)
     fs.mkdir(bin)

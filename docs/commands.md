@@ -468,6 +468,9 @@ cigo guard cache [stats | clear] [--json]
 cigo guard check-line [--json] one command line from stdin, read as the agent hook reads it: the
                               findings, the risk, the tier, and whether the read came from the cache
 cigo guard tier [<risk> [<c>]] the tier matrix (risk × confidence → silent/notice/ask/gate), the whole table, one row or one cell
+cigo guard preset [<name>]    the preset (chill, balanced, strict, paranoid, ci, agent-heavy, research); alias for cigo config preset.
+                              Prints the current preset with no name; with a name, switches it (the confirmation shows the
+                              guard level first; a looser preset asks the system's own password prompt).
 cigo guard uninstall          every shim and startup-file block it wrote, removed; --yes does it
 cigo undo last                the newest guarded call, taken back (cig unburn of its run)
 cigo run-url <url> [--trust]  the safe way to curl | sh (below)
@@ -608,6 +611,85 @@ line is read afresh. A hit gives exactly the findings a fresh read gives.
   says what it found, and whether the read came from the cache. The suite
   holds the cache to it: every sample of the detection corpus, read as a
   command line, gives the same findings from the cache as from a fresh read.
+
+### Presets: one word for a sensible combination
+
+`preset` picks the bundle of security defaults every other setting starts
+from, including the guard level. Individual settings still override it.
+
+| preset | `guard_scope` | `security` | `rehearse` | `prompt_budget` | `versions` | `registry_meta` |
+|---|---|---|---|---|---|---|
+| `chill` | dev | report | never | 1/day | never | off |
+| `balanced` (default) | dev | standard | auto | 3/day | ask | off |
+| `strict` | agents | strict | auto | 5/day | ask | online |
+| `paranoid` | system | strict | always | 10/day | always | online |
+| `ci` | project | strict | auto | 0 | never | off |
+| `agent-heavy` | agents | strict | always | 3/day | ask | off |
+| `research` | system | standard | auto | 5/day | ask | off |
+
+- `cigo config preset <name>` and the alias `cigo guard preset <name>`
+  both switch the preset. The confirmation **shows the guard level
+  first**, since the level is the loudest consequence:
+
+  ```
+  preset: balanced -> strict  (guard level 2 dev -> 4 agents)
+  ```
+
+- **Looser needs OS authentication.** The ladder is
+  `chill < balanced < strict < paranoid`; the special-purpose presets
+  (`ci`, `agent-heavy`, `research`) are not compared. A looser preset
+  asks the system's own password prompt (polkit on Linux, osascript on
+  macOS) before anything is written. Under CI, a looser preset is
+  refused outright: a preset is loosened at a terminal, by a person,
+  never from a script.
+- `cigo config diff` prints every setting that is not what the current
+  preset would set it to.
+- The installer may **lock** `preset` in its machine layer
+  (`/etc/cigscript/config.toml` on Linux and the BSDs; a configuration
+  profile `io.github.otmof-ops.cigscript` on macOS; `HKLM\SOFTWARE\
+  Policies\otmof-ops\CigScript` on Windows: cigo reads the TOML file
+  today, and states the gap on macOS and Windows until the reader is
+  added there). A locked preset cannot be changed by the person, a
+  project file or the environment, the way cigo's own `!locked` system
+  values work. `cigo config` names the installer's file as the source.
+
+### The prompt budget: `cigo digest`
+
+A prompt that is always answered the same way is noise, and so is a
+prompt the person did not start. Over the day's **prompt budget**,
+ask-tier prompts that the person did not start take the **safe default**
+(refuse, or run in the box) and the question goes to `cigo digest`.
+Gate-tier prompts always happen, since they are for something the
+person is doing.
+
+- `prompt_budget` is `3/day` by default (`N/day`, `N/hour`, or `0` for
+  every ask-tier goes to the digest). Presets set it: `chill` 1/day,
+  `balanced` 3/day, `strict` 5/day, `paranoid` 10/day, `ci` 0,
+  `agent-heavy` 3/day, `research` 5/day.
+- `digest_when` says when the digest is shown on its own:
+  `next-prompt` (the next time a terminal is attached), `daily` (once
+  a day), `manual` (only when asked).
+- `cigo digest` prints the shunted questions, each with its safe
+  default already applied. `--json` prints them as JSON; `--clear`
+  takes them off the list.
+- The digest records each question's kind, the command or the thing
+  it was about, its risk, and the safe default that cigo picked for
+  it. Nothing is applied: the safe default is what the guard already
+  did (for an agent command, refuse), and the digest is the record.
+
+**The surfaces that count against the budget today.** The agent-run
+flow's ask-tier prompts (when an agent's command is rated high and
+has not been approved or remembered) count. When the budget is spent,
+the next such prompt is written to the digest instead of writing a
+pending approval that waits for a person; the agent's command is
+refused, and the person sees one entry in `cigo digest` when they
+next ask for it.
+
+**Surfaces not yet counted** (W14b): quiet hours, batching several of
+the same kind, and the rule-suggestion offer after 10 identical
+approvals. Their settings (`quiet_hours`, `quiet_fullscreen`,
+`suggest_rules`) are listed in `cigo config` so admins can lock or
+preset them.
 
 ### `cigo guard stats`: the guard measures its own noise
 

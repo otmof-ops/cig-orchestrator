@@ -7,6 +7,49 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **Presets pick the guard level, and the installer may lock the preset (#66,
+  DECISIONS 16).**
+  - `SETTINGS.guard_scope.presets` is filled in: `chill` and `balanced` pick
+    `dev`, `strict` and `agent-heavy` pick `agents`, `paranoid` and `research`
+    pick `system`, `ci` picks `project`. Picking a preset now changes the guard
+    level with it, and `cigo config diff` still shows every setting that is not
+    what the preset would set.
+  - `cigo guard preset [<name>]` is an alias for `cigo config preset`. With no
+    name, it prints the preset in force; with a name, it switches it.
+  - The confirmation line shows the guard level first:
+    `preset: balanced -> strict  (guard level 2 dev -> 4 agents)`.
+  - **Looser needs OS authentication.** `chill < balanced < strict < paranoid`;
+    a looser preset asks the system's own password prompt (polkit on Linux,
+    osascript on macOS) before anything is written, and is refused outright
+    under CI. The flag and environment-variable stand-ins for OS authentication
+    are refused: a preset is loosened at a terminal, by a person.
+  - **The installer may lock the preset.** cigo reads an installer machine
+    layer at `/etc/cigscript/config.toml` on Linux and the BSDs (the file the
+    installer writes; cig-installer `docs/ORGANIZATIONS.md`), and respects a
+    locked `preset = "strict"` there: the person cannot change it, nor can a
+    project file or `CIGO_PRESET`. macOS (`/Library/Managed Preferences/
+    io.github.otmof-ops.cigscript.plist`) and Windows (`HKLM\SOFTWARE\
+    Policies\otmof-ops\CigScript`) are stated gaps for now, since cigo would
+    need a new dependency (`plutil` or `reg`) to read them. `cigo config` names
+    the installer's file as the source. Override the path with
+    `CIGO_INSTALLER_MACHINE` (tests use it).
+- **The prompt budget and the digest (#66, W14a).**
+  - New settings: `prompt_budget` (default `3/day`; `N/day`, `N/hour`, or
+    `0`), `digest_when` (`next-prompt`, `daily`, `manual`; default
+    `next-prompt`), `quiet_hours` (a span like `22:00-07:00`, empty off),
+    `quiet_fullscreen` (`on`/`off`), `suggest_rules` (`on`/`off`). Presets
+    set `prompt_budget`: `chill` 1/day, `balanced` 3/day, `strict` 5/day,
+    `paranoid` 10/day, `ci` 0, `agent-heavy` 3/day, `research` 5/day.
+  - `cigo digest [--clear|--json]` reads the digest, prints how much of the
+    budget is left, and clears entries. The digest records each question's
+    kind, risk and safe default (`no`), so a person sees what cigo refused
+    for them.
+  - Over budget, the agent-run flow's ask-tier prompts (an agent's high-rated
+    command, not approved and not remembered) take the safe default (refuse)
+    and the question is written to the digest. The pending approval is not
+    written: the person never sees a prompt they did not start.
+  - Not yet wired (W14b): `quiet_hours` enforcement, batching of similar
+    questions, the `suggest_rules` offer after 10 identical approvals.
 - **`cig bench` measures cigo: `bench/bench.toml`, the corpus score and cigo's
   phases (#112).**
   - `bench/bench.toml` holds `scripts/bench.cig`'s cases (latency over a fixed
