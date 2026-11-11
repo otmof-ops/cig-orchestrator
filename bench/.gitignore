@@ -1,0 +1,5 @@
+# what runs leave behind
+.cig-orchestrator/
+.score-work/
+.bench-work/
+.cig-bench/

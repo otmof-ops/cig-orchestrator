@@ -21,6 +21,8 @@ a flag.
 - [The manifest](manifest.md): every key in `cig-tasks.json`.
 - [Commands](commands.md): every command and flag, exit codes, and the files
   cigo keeps.
+- [Measuring cigo](benchmarks.md): `cig bench`, the cases, the corpus score and
+  cigo's phases.
 - [Toolchains](../TOOLCHAINS.md): the 61 toolchains cigo knows, what
   recognizes each, and its stages.
 

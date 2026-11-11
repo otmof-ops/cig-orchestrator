@@ -7,6 +7,23 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+- **`cig bench` measures cigo: `bench/bench.toml`, the corpus score and cigo's
+  phases (#112).**
+  - `bench/bench.toml` holds `scripts/bench.cig`'s cases (latency over a fixed
+    52-task project, the hook with a benign command, `curl | sh`, a heredoc and a
+    200-command script, the guard's line check) and the detection corpus as a scored
+    case; `bench/box.toml` holds the cases that make a box. `scripts/bench.cig` is now
+    a wrapper for `cig bench`. See docs/benchmarks.md.
+  - `bench/score-corpus.cig` prints `recall_medium`, `recall_high`, `recall_critical`,
+    `false_positives` and `grey_flagged` from `audit --json`, and exits 1 when a benign
+    sample is flagged.
+  - With `CIG_TIMINGS_FD` set, cigo writes its phases (`launcher`, `cig-check`, `rules`,
+    `config`, `read`, `decide`, `output`, `exit`) as timings lines (format 1) to that
+    descriptor, and only then; they add up to the wall time. Needs a cig with
+    `cig bench --timings` (cig-script#197).
+  - `.github/workflows/bench-nightly.yml` runs the suite nightly through cig-script's
+    reusable workflow.
+
 - **A `cigarscript` toolchain, and a CigarScript component in the polyglot
   example (cig-compile#13).** The knowledge base now has 61 toolchains.
   - A directory with `cigar.toml`, `.cigar-version` or a `.cigar` file is

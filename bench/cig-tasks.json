@@ -1,0 +1,399 @@
+{
+  "project": "bench",
+  "tasks": {
+    "task-01": {
+      "cmd": [
+        "echo",
+        "hello from task-01"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-02": {
+      "cmd": [
+        "echo",
+        "hello from task-02"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-03": {
+      "cmd": [
+        "echo",
+        "hello from task-03"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-04": {
+      "cmd": [
+        "echo",
+        "hello from task-04"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-05": {
+      "cmd": [
+        "echo",
+        "hello from task-05"
+      ],
+      "desc": "a one-line task (bench fixture)",
+      "needs": [
+        "task-04"
+      ]
+    },
+    "task-06": {
+      "cmd": [
+        "echo",
+        "hello from task-06"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-07": {
+      "cmd": [
+        "echo",
+        "hello from task-07"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-08": {
+      "cmd": [
+        "echo",
+        "hello from task-08"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-09": {
+      "cmd": [
+        "echo",
+        "hello from task-09"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-10": {
+      "cmd": [
+        "echo",
+        "hello from task-10"
+      ],
+      "desc": "a one-line task (bench fixture)",
+      "needs": [
+        "task-09"
+      ]
+    },
+    "task-11": {
+      "cmd": [
+        "echo",
+        "hello from task-11"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-12": {
+      "cmd": [
+        "echo",
+        "hello from task-12"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-13": {
+      "cmd": [
+        "echo",
+        "hello from task-13"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-14": {
+      "cmd": [
+        "echo",
+        "hello from task-14"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-15": {
+      "cmd": [
+        "echo",
+        "hello from task-15"
+      ],
+      "desc": "a one-line task (bench fixture)",
+      "needs": [
+        "task-14"
+      ]
+    },
+    "task-16": {
+      "cmd": [
+        "echo",
+        "hello from task-16"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-17": {
+      "cmd": [
+        "echo",
+        "hello from task-17"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-18": {
+      "cmd": [
+        "echo",
+        "hello from task-18"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-19": {
+      "cmd": [
+        "echo",
+        "hello from task-19"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-20": {
+      "cmd": [
+        "echo",
+        "hello from task-20"
+      ],
+      "desc": "a one-line task (bench fixture)",
+      "needs": [
+        "task-19"
+      ]
+    },
+    "task-21": {
+      "cmd": [
+        "echo",
+        "hello from task-21"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-22": {
+      "cmd": [
+        "echo",
+        "hello from task-22"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-23": {
+      "cmd": [
+        "echo",
+        "hello from task-23"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-24": {
+      "cmd": [
+        "echo",
+        "hello from task-24"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-25": {
+      "cmd": [
+        "echo",
+        "hello from task-25"
+      ],
+      "desc": "a one-line task (bench fixture)",
+      "needs": [
+        "task-24"
+      ]
+    },
+    "task-26": {
+      "cmd": [
+        "echo",
+        "hello from task-26"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-27": {
+      "cmd": [
+        "echo",
+        "hello from task-27"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-28": {
+      "cmd": [
+        "echo",
+        "hello from task-28"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-29": {
+      "cmd": [
+        "echo",
+        "hello from task-29"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-30": {
+      "cmd": [
+        "echo",
+        "hello from task-30"
+      ],
+      "desc": "a one-line task (bench fixture)",
+      "needs": [
+        "task-29"
+      ]
+    },
+    "task-31": {
+      "cmd": [
+        "echo",
+        "hello from task-31"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-32": {
+      "cmd": [
+        "echo",
+        "hello from task-32"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-33": {
+      "cmd": [
+        "echo",
+        "hello from task-33"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-34": {
+      "cmd": [
+        "echo",
+        "hello from task-34"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-35": {
+      "cmd": [
+        "echo",
+        "hello from task-35"
+      ],
+      "desc": "a one-line task (bench fixture)",
+      "needs": [
+        "task-34"
+      ]
+    },
+    "task-36": {
+      "cmd": [
+        "echo",
+        "hello from task-36"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-37": {
+      "cmd": [
+        "echo",
+        "hello from task-37"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-38": {
+      "cmd": [
+        "echo",
+        "hello from task-38"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-39": {
+      "cmd": [
+        "echo",
+        "hello from task-39"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-40": {
+      "cmd": [
+        "echo",
+        "hello from task-40"
+      ],
+      "desc": "a one-line task (bench fixture)",
+      "needs": [
+        "task-39"
+      ]
+    },
+    "task-41": {
+      "cmd": [
+        "echo",
+        "hello from task-41"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-42": {
+      "cmd": [
+        "echo",
+        "hello from task-42"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-43": {
+      "cmd": [
+        "echo",
+        "hello from task-43"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-44": {
+      "cmd": [
+        "echo",
+        "hello from task-44"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-45": {
+      "cmd": [
+        "echo",
+        "hello from task-45"
+      ],
+      "desc": "a one-line task (bench fixture)",
+      "needs": [
+        "task-44"
+      ]
+    },
+    "task-46": {
+      "cmd": [
+        "echo",
+        "hello from task-46"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-47": {
+      "cmd": [
+        "echo",
+        "hello from task-47"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-48": {
+      "cmd": [
+        "echo",
+        "hello from task-48"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-49": {
+      "cmd": [
+        "echo",
+        "hello from task-49"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-50": {
+      "cmd": [
+        "echo",
+        "hello from task-50"
+      ],
+      "desc": "a one-line task (bench fixture)",
+      "needs": [
+        "task-49"
+      ]
+    },
+    "task-51": {
+      "cmd": [
+        "echo",
+        "hello from task-51"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    },
+    "task-52": {
+      "cmd": [
+        "echo",
+        "hello from task-52"
+      ],
+      "desc": "a one-line task (bench fixture)"
+    }
+  }
+}

@@ -8,6 +8,17 @@
 # A symlink to this file (ln -s <checkout>/bin/cigo ~/.local/bin/cigo) is
 # followed to the checkout, hop by hop, with no readlink -f (macOS and the
 # BSDs lack it). The installed copy has its tool= line rewritten below.
+# `cig bench --timings` (cig-script#179) names a descriptor in CIG_TIMINGS_FD: the time
+# this launcher takes goes there as one line, and the descriptor is handed on as
+# CIGO_TIMINGS_FD for orchestrate.cig's own phases (cig-orchestrator#112). Nothing is
+# timed, and no process started, when the variable is unset, or where `date` has no
+# nanoseconds (macOS): then cig writes its own phases, as it does for any program.
+t0=""
+case "${CIG_TIMINGS_FD:-}" in
+  [3-9]|[1-9][0-9])
+    t0=$(date +%s%N 2>/dev/null)
+    case "$t0" in ''|*[!0-9]*) t0="" ;; esac ;;
+esac
 self=$0
 while [ -h "$self" ]; do
   link=$(readlink -- "$self")
@@ -139,6 +150,37 @@ esac
 CIGO_TOOL=$tool
 CIGO_LAUNCHER=$0
 export CIGO_TOOL CIGO_LAUNCHER
+
+if [ -n "$t0" ]; then
+  t1=$(date +%s%N)
+  d=$((t1 - t0))
+  # shellcheck disable=SC2034  # read by the eval below
+  line=$(printf '{"v":1,"product":"cigo","phase":"launcher","ms":%d.%03d}' $((d / 1000000)) $((d / 1000 % 1000)))
+  # The descriptor is digits only (checked above), so the eval takes nothing else.
+  if eval "printf '%s\\n' \"\$line\" >&$CIG_TIMINGS_FD" 2>/dev/null; then
+    CIGO_TIMINGS_FD=$CIG_TIMINGS_FD
+    CIGO_EXEC_NS=$t1
+    CIGO_TIMINGS_END=${TMPDIR:-/tmp}/cigo-phases-$$
+    export CIGO_TIMINGS_FD CIGO_EXEC_NS CIGO_TIMINGS_END
+    unset CIG_TIMINGS_FD
+    # Not exec: the time after the script ends is the last phase, `exit`.
+    # shellcheck disable=SC2086
+    cig $global run $run "$tool" -- "$@"
+    rc=$?
+    t2=$(date +%s%N)
+    end_ms=$(cat -- "$CIGO_TIMINGS_END" 2>/dev/null)
+    rm -f -- "$CIGO_TIMINGS_END"
+    case "$end_ms" in
+      ''|*[!0-9]*) ;;
+      *)
+        d=$((t2 - end_ms * 1000000))
+        # shellcheck disable=SC2034  # read by the eval below
+        line=$(printf '{"v":1,"product":"cigo","phase":"exit","ms":%d.%03d}' $((d / 1000000)) $((d / 1000 % 1000)))
+        eval "printf '%s\\n' \"\$line\" >&$CIGO_TIMINGS_FD" 2>/dev/null ;;
+    esac
+    exit "$rc"
+  fi
+fi
 
 # The flag lists are single words, split on purpose.
 # shellcheck disable=SC2086

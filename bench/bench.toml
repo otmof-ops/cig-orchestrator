@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
+# SPDX-License-Identifier: FSL-1.1-ALv2
+#
+# cigo's benchmark suite (cig-orchestrator#112, cig-script#179): what `scripts/bench.cig`
+# measured (#88, #90), the detection corpus as a scored case, and the guard and
+# the hook on the same footing. Run it from the repository root:
+#
+#   cig bench                    every case (no box is made)
+#   cig bench --group hook       the hook alone (the cases that run on every agent call)
+#   cig bench --timings          where each case's time went, by phase
+#   cig bench --against v1.17.0  A/B against a release's checkout, interleaved
+#   cig bench --watch            rerun the cases when orchestrate.cig or bin/ changes
+#   cig bench bench/box.toml     the cases that make a box: run them in a VM or a CI runner
+#
+# This folder is a cigo project of its own (cig-tasks.json: 52 one-line tasks), so
+# `list`, `audit` and `run` read a project of a fixed size wherever the checkout
+# is. A case runs in a scratch home (`home = "isolated"`): ~/.cig-orchestrator, the
+# blacklist and the guard of the person running it are not read or written.
+#
+# What the expected output checks: where the output is the same on every machine it
+# is a file in fixtures/ and a different answer is WRONG, not a time. The hook
+# and the line check print the launcher's path and whether the verdict cache hit,
+# so those cases check the exit code only. Nothing here gates a time (cig-script#153).
+# The quality case's gate is its exit: a benign sample rated medium or above is wrong.
+
+format = 1
+
+[bench]
+product = "cigo"
+version = ["cigo", "--version"]
+home    = "isolated"
+binary  = "bin/cigo"
+watch   = ["orchestrate.cig", "bin/**", "tests/fixtures/detection/**", "bench/**"]
+
+[defaults]
+samples = 9
+per     = 5
+warmup  = 1
+env     = { NO_COLOR = "1", CIG_DOCTOR = "0", CIG_SEAL_KEY = "file", CI = "", CIGO_REHEARSE = "never", CIGO_OSV = "off", CIGO_OSV_API = "file:///nonexistent/osv-api", CIGO_OSV_DUMPS = "file:///nonexistent/osv-dumps", CIGO_BLACKLIST_DIR = "/nonexistent/cigo-bench/blacklist.d", CIG_INTERNAL_TRACKER_DIR = "/nonexistent/cigo-bench/tracker" }
+
+[[case]]
+name   = "version"
+group  = "latency"
+run    = ["cigo", "--version"]
+expect = { exit = 0 }
+
+[[case]]
+name   = "help"
+group  = "latency"
+run    = ["cigo", "--help"]
+expect = { exit = 0 }
+
+[[case]]
+name   = "list, 52 tasks"
+group  = "latency"
+run    = ["cigo", "list"]
+expect = { exit = 0, stdout = "fixtures/list.expect" }
+
+[[case]]
+name   = "audit, 52 tasks"
+group  = "latency"
+run    = ["cigo", "audit"]
+expect = { exit = 0, stdout = "fixtures/audit-52.expect" }
+
+[[case]]
+name   = "audit, one task"
+group  = "latency"
+run    = ["cigo", "audit", "task-01"]
+expect = { exit = 0, stdout = "fixtures/audit-1.expect" }
+
+[[case]]
+name   = "blacklist why"
+group  = "latency"
+run    = ["cigo", "blacklist", "why", "example.invalid"]
+expect = { exit = 0, stdout = "fixtures/blacklist-why.expect" }
+
+[[case]]
+name   = "run, a one-line task"
+group  = "latency"
+run    = ["cigo", "run", "--no-box", "task-01"]
+per    = 1
+expect = { exit = 0 }
+
+[[case]]
+name   = "hook, benign command"
+group  = "hook"
+run    = ["cigo", "agent", "hook", "claude-code"]
+stdin  = "fixtures/hook-benign.json"
+expect = { exit = 0 }
+measure = ["wall", "rss"]
+
+[[case]]
+name   = "hook, curl | sh"
+group  = "hook"
+run    = ["cigo", "agent", "hook", "claude-code"]
+stdin  = "fixtures/hook-curl-sh.json"
+expect = { exit = 0 }
+measure = ["wall", "rss"]
+
+[[case]]
+name   = "hook, a long heredoc"
+group  = "hook"
+run    = ["cigo", "agent", "hook", "claude-code"]
+stdin  = "fixtures/hook-heredoc.json"
+per    = 2
+expect = { exit = 0 }
+measure = ["wall", "rss"]
+
+[[case]]
+name   = "hook, a 200-command script"
+group  = "hook"
+run    = ["cigo", "agent", "hook", "claude-code"]
+stdin  = "fixtures/hook-200-commands.json"
+per    = 1
+expect = { exit = 0 }
+measure = ["wall", "rss"]
+
+[[case]]
+name   = "guard line check, benign"
+group  = "guard"
+run    = ["cigo", "guard", "check-line"]
+stdin  = "fixtures/guard-benign.in"
+expect = { exit = 0 }
+
+[[case]]
+name   = "guard line check, curl | sh"
+group  = "guard"
+run    = ["cigo", "guard", "check-line"]
+stdin  = "fixtures/guard-curl-sh.in"
+expect = { exit = 0 }
+
+[[case]]
+name   = "detection corpus score"
+group  = "quality"
+run    = ["cig", "run", "score-corpus.cig"]
+per    = 1
+expect = { exit = 0, stdout = "fixtures/corpus-score.expect" }
+

@@ -29,6 +29,49 @@
 
 pack { "." }
 
+# ----- phases for `cig bench --timings` (cig-orchestrator#112, cig-script#179) ----------
+#
+# The launcher hands the descriptor `cig bench` named in CIG_TIMINGS_FD over as
+# CIGO_TIMINGS_FD, with the moment it started cig (CIGO_EXEC_NS), and stops cig from
+# writing its own phases: cigo's seven cover the run, so the lines never overlap. Each
+# `phase(name)` call closes one phase; the lines are written once, at the end, in the
+# format cig's docs/BENCH.md gives, and the end's time goes to the file the launcher
+# names (CIGO_TIMINGS_END) so it can write the eighth, `exit`: what cig does after the
+# script ends (its rollback, run record and retention) and this write. With the
+# variable unset, a call is a single test.
+stick TIMING_FD = env.get("CIGO_TIMINGS_FD", "")
+roll PHASE_AT = 0
+roll PHASE_LINES = []
+
+pull phase(name) {
+  if TIMING_FD == "" {
+    snuff
+  }
+  stick now = time.now_ms()
+  if PHASE_AT > 0 {
+    PHASE_LINES.push('{"v":1,"product":"cigo","phase":"' + name + '","ms":' + str(now - PHASE_AT) + "}")
+  }
+  PHASE_AT = now
+}
+
+pull phase_flush() {
+  if TIMING_FD == "" or PHASE_LINES.is_empty() or not text.matches(TIMING_FD, "^([3-9]|[1-9][0-9])$") {
+    snuff
+  }
+  burn {
+    try {
+      proc.run("sh", ["-c", 'cat >&"$1"; if [ -n "$2" ]; then printf "%s" "$3" > "$2"; fi', "sh", TIMING_FD, env.get("CIGO_TIMINGS_END", ""), str(PHASE_AT)], {stdin: PHASE_LINES.join("\n") + "\n", timeout_ms: 5000})
+    } ashtray e {
+    }
+  }
+}
+
+if TIMING_FD != "" {
+  stick exec_ns = env.get("CIGO_EXEC_NS", "")
+  PHASE_AT = pick(text.matches(exec_ns, "^[0-9]{16,}$"), int(exec_ns.slice(0, exec_ns.len() - 6)), time.now_ms())
+  phase("cig-check")
+}
+
 stick VERSION = "1.18.0"
 # The cigs this version runs on; the header pin above says the same to cig itself.
 stick CIG_NEEDS = ">=1.20.0"
@@ -17469,8 +17512,10 @@ pull do_agent_hook(which_agent) {
   stick cwd = str(call.get("cwd", fs.cwd()))
   stick session = str(call.get("session_id", ""))
   stick findings = line_findings(line) + line_blacklist(line)
+  phase("read")
   stick risk = risk_of(findings)
   stick tier = tier_for(risk, findings)
+  phase("decide")
   # In an agent's session a gate has no one to answer it, so it is refused,
   # as refuse is; ask waits for a person.
   if tier == "gate" or tier == "refuse" {
@@ -18286,8 +18331,10 @@ pull project_settings_early() {
 }
 
 pull dispatch() {
+  phase("rules")
   project_settings_early()
   maybe_crash(command)
+  phase("config")
   if command == "help" or command == "--help" or command == "-h" {
     do_help()
   } else if command == "version" or command == "--version" {
@@ -18337,6 +18384,7 @@ pull dispatch() {
     do_update_db(pick(fs.is_file(path.join(ROOT, MANIFEST)), pack() => build_graph(load()), pack() => null)())
   } else if ["list", "show", "plan", "check", "run", "versions", "audit", "trust"].contains(command) {
     stick g = build_graph(load())
+    phase("read")
     if command == "list" {
       do_list(g)
     } else if command == "audit" {
@@ -18362,7 +18410,10 @@ pull dispatch() {
 
 try {
   dispatch()
+  phase("output")
+  phase_flush()
 } ashtray what_went_wrong {
+  phase_flush()
   # A task failing, or a usage error, is cigo doing its job. A runtime or
   # type error inside orchestrate.cig is a bug in cigo: it gets a report, the
   # way cig's own crashes do, and then the error carries on so cig rolls the

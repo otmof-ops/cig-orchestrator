@@ -1,0 +1,5 @@
+recall_medium: 0.964
+recall_high: 0.964
+recall_critical: 0.821
+false_positives: 0
+grey_flagged: 3

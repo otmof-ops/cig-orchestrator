@@ -1,0 +1,105 @@
+bench: 52 tasks in cig-tasks.json
+  task-01  echo 'hello from task-01'
+           # a one-line task (bench fixture)
+  task-02  echo 'hello from task-02'
+           # a one-line task (bench fixture)
+  task-03  echo 'hello from task-03'
+           # a one-line task (bench fixture)
+  task-04  echo 'hello from task-04'
+           # a one-line task (bench fixture)
+  task-05  echo 'hello from task-05'   needs task-04
+           # a one-line task (bench fixture)
+  task-06  echo 'hello from task-06'
+           # a one-line task (bench fixture)
+  task-07  echo 'hello from task-07'
+           # a one-line task (bench fixture)
+  task-08  echo 'hello from task-08'
+           # a one-line task (bench fixture)
+  task-09  echo 'hello from task-09'
+           # a one-line task (bench fixture)
+  task-10  echo 'hello from task-10'   needs task-09
+           # a one-line task (bench fixture)
+  task-11  echo 'hello from task-11'
+           # a one-line task (bench fixture)
+  task-12  echo 'hello from task-12'
+           # a one-line task (bench fixture)
+  task-13  echo 'hello from task-13'
+           # a one-line task (bench fixture)
+  task-14  echo 'hello from task-14'
+           # a one-line task (bench fixture)
+  task-15  echo 'hello from task-15'   needs task-14
+           # a one-line task (bench fixture)
+  task-16  echo 'hello from task-16'
+           # a one-line task (bench fixture)
+  task-17  echo 'hello from task-17'
+           # a one-line task (bench fixture)
+  task-18  echo 'hello from task-18'
+           # a one-line task (bench fixture)
+  task-19  echo 'hello from task-19'
+           # a one-line task (bench fixture)
+  task-20  echo 'hello from task-20'   needs task-19
+           # a one-line task (bench fixture)
+  task-21  echo 'hello from task-21'
+           # a one-line task (bench fixture)
+  task-22  echo 'hello from task-22'
+           # a one-line task (bench fixture)
+  task-23  echo 'hello from task-23'
+           # a one-line task (bench fixture)
+  task-24  echo 'hello from task-24'
+           # a one-line task (bench fixture)
+  task-25  echo 'hello from task-25'   needs task-24
+           # a one-line task (bench fixture)
+  task-26  echo 'hello from task-26'
+           # a one-line task (bench fixture)
+  task-27  echo 'hello from task-27'
+           # a one-line task (bench fixture)
+  task-28  echo 'hello from task-28'
+           # a one-line task (bench fixture)
+  task-29  echo 'hello from task-29'
+           # a one-line task (bench fixture)
+  task-30  echo 'hello from task-30'   needs task-29
+           # a one-line task (bench fixture)
+  task-31  echo 'hello from task-31'
+           # a one-line task (bench fixture)
+  task-32  echo 'hello from task-32'
+           # a one-line task (bench fixture)
+  task-33  echo 'hello from task-33'
+           # a one-line task (bench fixture)
+  task-34  echo 'hello from task-34'
+           # a one-line task (bench fixture)
+  task-35  echo 'hello from task-35'   needs task-34
+           # a one-line task (bench fixture)
+  task-36  echo 'hello from task-36'
+           # a one-line task (bench fixture)
+  task-37  echo 'hello from task-37'
+           # a one-line task (bench fixture)
+  task-38  echo 'hello from task-38'
+           # a one-line task (bench fixture)
+  task-39  echo 'hello from task-39'
+           # a one-line task (bench fixture)
+  task-40  echo 'hello from task-40'   needs task-39
+           # a one-line task (bench fixture)
+  task-41  echo 'hello from task-41'
+           # a one-line task (bench fixture)
+  task-42  echo 'hello from task-42'
+           # a one-line task (bench fixture)
+  task-43  echo 'hello from task-43'
+           # a one-line task (bench fixture)
+  task-44  echo 'hello from task-44'
+           # a one-line task (bench fixture)
+  task-45  echo 'hello from task-45'   needs task-44
+           # a one-line task (bench fixture)
+  task-46  echo 'hello from task-46'
+           # a one-line task (bench fixture)
+  task-47  echo 'hello from task-47'
+           # a one-line task (bench fixture)
+  task-48  echo 'hello from task-48'
+           # a one-line task (bench fixture)
+  task-49  echo 'hello from task-49'
+           # a one-line task (bench fixture)
+  task-50  echo 'hello from task-50'   needs task-49
+           # a one-line task (bench fixture)
+  task-51  echo 'hello from task-51'
+           # a one-line task (bench fixture)
+  task-52  echo 'hello from task-52'
+           # a one-line task (bench fixture)

@@ -112,6 +112,7 @@ manifest; [your own toolchains](docs/custom-toolchains.md) shows how.
 | [Your own toolchains](docs/custom-toolchains.md) | change a built-in toolchain for your project, or teach cigo a new one |
 | [cigo in CI](docs/ci.md) | run the same chain on GitHub Actions or GitLab CI |
 | [Troubleshooting](docs/troubleshooting.md) | understand a message, or a task that won't run |
+| [Measuring cigo](docs/benchmarks.md) | time the hook and the guard with `cig bench --watch`, see where a start goes, and read the corpus score |
 | [How it works](docs/how-it-works.md) | read the tool's insides before you change them |
 | [Roadmap](docs/roadmap.md) | see what's coming, and how a request gets there |
 
