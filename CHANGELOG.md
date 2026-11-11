@@ -7,6 +7,21 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+### Changed
+
+- **The default guard level moved from `project` to `dev` (#66, DECISIONS 16).**
+  The default preset is still `balanced`, but it now picks `guard_scope = dev`
+  (level 2: package managers and scripts, through shims). The shims are not
+  wired up by the preset, so the installed level stays at 1 until
+  `cigo guard scope dev --yes` writes them; `cigo guard status` says so
+  ("preset balanced chose dev; nothing is installed yet"). A one-time notice
+  is printed on the first `cigo guard` or `cigo guard setup` run at a
+  terminal where the default is still in force and the shims are missing,
+  and the fact is stamped in `guard/state.json` (`default_notice_shown`) so
+  it is not shown again.
+
+### Added
+
 - **Presets pick the guard level, and the installer may lock the preset (#66,
   DECISIONS 16).**
   - `SETTINGS.guard_scope.presets` is filled in: `chill` and `balanced` pick

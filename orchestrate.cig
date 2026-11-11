@@ -13628,9 +13628,14 @@ pull read_installer_machine(file, strict) {
 
 # One `key = value` file (the user's, or an administrator's): {key: {value,
 # locked}}. `!locked` after a value makes it final for every later layer.
+# An absent or empty file name reads as "no layer"; the installer's
+# contract (ORGANIZATIONS.md) is that absence is skipped (unreadable or
+# malformed is E1830, which read_installer_machine covers). `pick` is
+# eager, so callers may still hand this an empty path for the optional
+# extra files (CIGO_SYSTEM_CONFIG unset); do not pass "" to fs.is_file.
 pull read_conf(file) {
   roll out = {}
-  if not fs.is_file(file) {
+  if file == "" or not fs.is_file(file) {
     snuff out
   }
   for line in fs.read_text(file).lines() {
@@ -13772,7 +13777,7 @@ pull config_full() {
     roll inst_locked = {}
     for k in inst_extra.locked { inst_locked[k] = true }
     for k in inst_real.locked { inst_locked[k] = true }
-    stick inst_source = pick(fs.is_file(INSTALLER_MACHINE), INSTALLER_MACHINE, INSTALLER_MACHINE_EXTRA)
+    stick inst_source = pick(INSTALLER_MACHINE != "" and fs.is_file(INSTALLER_MACHINE), INSTALLER_MACHINE, INSTALLER_MACHINE_EXTRA)
     # System file: same union story. Real file wins for locks.
     stick sys_real = read_conf(SYSTEM_CONFIG)
     stick sys_extra = pick(SYSTEM_CONFIG_EXTRA != "" and SYSTEM_CONFIG_EXTRA != SYSTEM_CONFIG, read_conf(SYSTEM_CONFIG_EXTRA), {})
@@ -14362,7 +14367,7 @@ pull switch_preset(want) {
 # installer file first (strict read), then the env-override file, then
 # the system config file.
 pull lock_source_text(full) {
-  if fs.is_file(INSTALLER_MACHINE) {
+  if INSTALLER_MACHINE != "" and fs.is_file(INSTALLER_MACHINE) {
     stick l = read_installer_machine(INSTALLER_MACHINE, false)
     if l.ok and l.locked.get("preset", false) {
       snuff tilde(INSTALLER_MACHINE)
@@ -14507,7 +14512,14 @@ pull write_setting(key, value) {
   }
   log.info(pick(value == null, "unset ${key}", "${key} = ${value}") + " in ${tilde(CONFIG_FILE)}")
   if GUARD_SETTINGS.contains(key) and was != str(value ?? "") {
-    guard_note({kind: "config", thing: key, outcome: pick(value == null, "unset (was ${was})", "set to ${value}" + pick(was == "", "", " (was ${was})"))})
+    # L4 part two (SEC-004): the config event carries `from`/`to` for
+    # every floored setting, not only `guard_scope`, so `cigo guard
+    # stats` and the log render the old and new level together. The
+    # defaults stand in for an unset layer: `was` is the file's
+    # previous value, which is "" when the setting was taking its
+    # layered default; an unset write records that too.
+    stick to_v = pick(value == null, "", str(value))
+    guard_note({kind: "config", thing: key, outcome: pick(value == null, "unset (was ${was})", "set to ${value}" + pick(was == "", "", " (was ${was})")), from: was, to: to_v})
   }
 }
 
@@ -14901,25 +14913,20 @@ pull budget_over() {
 # M1: strip C0/C1/ESC control bytes and cap a free-text field. Used on
 # every string that reaches the digest from an agent (agent name,
 # session id, cwd, the id itself, the shown command, the question).
+# C0 is 0x00-0x1F except \t (0x09) which is replaced with a space so a
+# tab-aligned log line still breaks on fields; DEL 0x7F and C1 (0x80-
+# 0x9F) are stripped. Uses text.replace rather than a per-byte loop
+# (cigscript strings have no byte_at method; `.slice(i, i+1)` returns a
+# character and the engine's codepoint extraction is a regex category
+# match).
 pull sanitise(s, cap) {
-  roll out = ""
-  roll i = 0
   stick src = str(s)
-  stick n = pick(cap > 0 and src.len() > cap, cap, src.len())
-  while i < n {
-    stick c = src.slice(i, i + 1)
-    stick cp = c.byte_at(0)
-    i += 1
-    # C0 is 0x00-0x1F except \t (0x09) which is kept visible; DEL 0x7F
-    # and C1 (0x80-0x9F) are also stripped.
-    if cp == 9 {
-      out = out + " "
-    } else if cp < 32 or cp == 127 or (cp >= 128 and cp <= 159) {
-      continue
-    } else {
-      out = out + c
-    }
-  }
+  roll out = pick(cap > 0 and src.len() > cap, src.slice(0, cap), src)
+  # Tab to space (kept visible, bounded width).
+  out = text.replace(out, "\t", " ")
+  # Strip C0 (0x00-0x08, 0x0a-0x1f, i.e. every C0 but the tab the line
+  # above converted), DEL (0x7f) and C1 (0x80-0x9f).
+  out = text.replace(out, "[\\x00-\\x08\\x0a-\\x1f\\x7f-\\x9f]", "")
   if cap > 0 and src.len() > cap {
     out = out + "..."
   }
@@ -15794,13 +15801,68 @@ stick GUARD_QUESTION = [
   "  (it shows what it would change first; --yes makes the change)",
 ]
 
+# M3 (SEC-004): the default preset's guard level changed from project to
+# dev in 1.19.0 (D#16). The change is silent and the shims are not in
+# place yet, so a person who upgrades sees `guard_scope = dev` without
+# anything wired up for it. Fire a one-time notice on the first guard or
+# setup command a person runs, if the preset is still the default and
+# nothing has been installed yet; store the fact in guard/state.json so
+# it is not repeated. CI and pipes (no terminal) do not see the notice.
+pull default_preset_notice_lines() {
+  if not attended() {
+    snuff []
+  }
+  stick st = guard_state()
+  if st.get("default_notice_shown", null) != null {
+    snuff []
+  }
+  stick c = config_full()
+  if c.preset != "balanced" or c.source.get("guard_scope", "default") != "preset" {
+    snuff []
+  }
+  # No shims and no profile blocks: nothing installed yet.
+  stick tools = as_list(st.get("shims", [])).filter(pack(t) => fs.is_file(path.join(SHIMS_DIR, t)))
+  stick profiles = as_list(st.get("profiles", [])).filter(pack(f) => has_block(f))
+  if not tools.is_empty() or not profiles.is_empty() {
+    snuff []
+  }
+  snuff [
+    "cigo: the default preset now chooses level 2 (dev: package managers and scripts); the shims for it are not wired up yet, so the guard is still at level 1 (project) until `cigo guard scope dev --yes` installs them.",
+    "  cigo guard setup shows what each level covers.",
+  ]
+}
+
+# Fire and persist: print any lines, then stamp state.json so the
+# notice is not shown again.
+pull default_preset_notice_fire() {
+  stick lines = default_preset_notice_lines()
+  if lines.is_empty() {
+    snuff
+  }
+  for l in lines {
+    exhale l
+  }
+  roll st = guard_state()
+  st.default_notice_shown = time.now_iso()
+  save_guard_state(st)
+}
+
 pull do_guard() {
   stick sub = targets.get(0, "")
   if sub == "" {
     expect_flags(["--json"])
+    # M3: one-time notice before the status; only fires at a terminal
+    # when the default preset's guard_scope has not been installed.
+    if not flags.contains("--json") {
+      default_preset_notice_fire()
+    }
     do_guard_status()
   } else if sub == "setup" {
     expect_flags([])
+    # M3: the one-time notice is fired before the setup question, so
+    # a person who runs `cigo guard setup` after upgrading is told
+    # the default moved before they pick.
+    default_preset_notice_fire()
     for line in GUARD_QUESTION {
       exhale line
     }
