@@ -22,6 +22,10 @@ repository root lists versions it must not pick.
   `cig bench`, which the suite's four bench tests and the nightly need,
   and it lists runs without starting a process for each dead pid, which is
   what made the suite slow on macOS and Windows (#119).
+- The `phases_add_up` test allows a process's own start and exit 10 ms
+  when that is more than 5% of the wall time. CI runs the bench tests
+  for the first time with cig 1.21.0, and on Alpine that fixed cost was
+  3.5 to 5.6 ms of a 66 to 84 ms hook.
 - **The test suite is the same whatever else is on the machine.** It
   clears its shared home's crash queue and lock notes before each call,
   so a detached flusher from an earlier call cannot hold a pack lock, and
