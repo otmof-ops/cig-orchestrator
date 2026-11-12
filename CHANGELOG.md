@@ -27,10 +27,13 @@ repository root lists versions it must not pick.
   Windows cannot run as a program. They ran there for the first time
   with cig 1.21.0. Windows cases for the manifest are still to write.
 - The `phases_add_up` test holds cigo's phases to within 15% of the wall
-  time, where it held them to 5%. What no phase covers is the process's
-  own start and exit, and CI measured it for the first time with cig
-  1.21.0: under 5% on a Linux runner, 5.3 to 6.7% in an Alpine container,
-  9.2% and 11.2% on the two macOS runners.
+  time, where it held them to 5%, on the best of three runs, and on macOS
+  it checks the phases and prints the sum without holding it. What no
+  phase covers is the process's own start and exit and the small programs
+  the launcher starts to read the clock. CI measured it for the first time
+  with cig 1.21.0: under 5% on a Linux runner, 5.3 to 6.7% in an Alpine
+  container, and 9%, 11% and 31% on macOS, where starting a process costs
+  several times more and varies with the runner.
 - **The test suite is the same whatever else is on the machine.** It
   clears its shared home's crash queue and lock notes before each call,
   so a detached flusher from an earlier call cannot hold a pack lock, and
