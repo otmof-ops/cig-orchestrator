@@ -1,6 +1,6 @@
 name: release
 
-# A tag `vX.Y.Z` is a release: one tarball, its checksum, a build attestation, and the licence
+# A tag `vX.Y.Z` is a release: one tarball, its checksum, a build attestation, and the license
 # beside them. The installer's manifest reads these.
 #
 # Row 7 of carton 0.2.0: the release reuses the tagged SHA's green ci.yml run instead of
