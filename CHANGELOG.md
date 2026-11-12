@@ -5,7 +5,7 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
-## Unreleased
+## 1.19.0 — 2026-11-12
 
 ### Changed
 
@@ -256,7 +256,7 @@ repository root lists versions it must not pick.
     no network), `sarif_rule_ids_are_the_codes` and
     `rehearse_reports_in_the_cig_voice_and_plain_in_ci`.
 
-- **License: FSL-1.1-ALv2 from the next release.** The code moves from Apache-2.0 to
+- **License: FSL-1.1-ALv2.** The code moves from Apache-2.0 to
   the Functional Source License 1.1 with an Apache-2.0 future license: free to
   use, study, change and share, not to sell or to offer in a competing
   product or service, and each version becomes Apache-2.0 two years after it

@@ -24,7 +24,7 @@ language: a `Makefile` or a `release.sh` whose only job is to call the
 others in order, scrape one tool's output with `jq` for the next, and hope
 nothing fails halfway.
 
-**`cigo` is that glue, done once.** It knows the standard workflow of 60
+**`cigo` is that glue, done once.** It knows the standard workflow of 61
 toolchains, finds every language in your project, runs one stage across all
 of them in dependency order, and hands values from one language to the next
 as data. Your tools and scripts stay exactly as they are, and none of them
