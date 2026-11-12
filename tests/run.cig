@@ -4304,6 +4304,17 @@ pull bench_cig_ready() {
   snuff r.code == 0 and r.out.contains("--timings")
 }
 
+# bench/bench.toml starts bin/cigo, the POSIX launcher, which Windows cannot run as a
+# program ("not a valid Win32 application"). Until the manifest has Windows cases, the
+# tests that run it say so and step aside there.
+pull bench_cases_start_here() {
+  if on_windows {
+    exhale "      (skipped: bench/bench.toml starts the POSIX launcher; it has no Windows cases yet)"
+    snuff false
+  }
+  snuff true
+}
+
 pull bench_cig(words, more) {
   snuff hop_env(root, "cig", words, more)
 }
@@ -4311,6 +4322,9 @@ pull bench_cig(words, more) {
 test("bench_manifest_runs_clean: every case of bench/bench.toml and bench/box.toml parses, and each case of bench.toml passes its expect (#112)", pack() {
   if not bench_cig_ready() {
     exhale "      (skipped: this cig has no `cig bench --timings`)"
+    snuff
+  }
+  if not bench_cases_start_here() {
     snuff
   }
   stick r = bench_cig(["--json", "bench", "--samples", "1", "--per", "1", "--warmup", "0"], {})
@@ -4337,6 +4351,9 @@ test("bench_manifest_runs_clean: every case of bench/bench.toml and bench/box.to
 test("isolated_bench_leaves_the_user_alone: the home, the blacklist and the guard are byte for byte the same after cig bench (#112)", pack() {
   if not bench_cig_ready() {
     exhale "      (skipped: this cig has no `cig bench --timings`)"
+    snuff
+  }
+  if not bench_cases_start_here() {
     snuff
   }
   stick user = path.join(work, "bench-user")
@@ -4412,6 +4429,9 @@ test("corpus_score_matches_audit: bench/score-corpus.cig prints the numbers a ha
 test("phases_add_up: cigo's phases on CIG_TIMINGS_FD sum to the wall time within 5% or 10 ms, and nothing is written without the variable (#112)", pack() {
   if not bench_cig_ready() {
     exhale "      (skipped: this cig has no `cig bench --timings`)"
+    snuff
+  }
+  if not bench_cases_start_here() {
     snuff
   }
   stick r = bench_cig(["--json", "bench", "--group", "hook", "--only", "benign", "--samples", "3", "--per", "1", "--timings"], {})

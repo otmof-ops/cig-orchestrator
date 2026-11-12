@@ -22,6 +22,10 @@ repository root lists versions it must not pick.
   `cig bench`, which the suite's four bench tests and the nightly need,
   and it lists runs without starting a process for each dead pid, which is
   what made the suite slow on macOS and Windows (#119).
+- The three tests that run `bench/bench.toml` step aside on Windows and
+  say why: the manifest starts `bin/cigo`, the POSIX launcher, which
+  Windows cannot run as a program. They ran there for the first time
+  with cig 1.21.0. Windows cases for the manifest are still to write.
 - The `phases_add_up` test allows a process's own start and exit 10 ms
   when that is more than 5% of the wall time. CI runs the bench tests
   for the first time with cig 1.21.0, and on Alpine that fixed cost was
