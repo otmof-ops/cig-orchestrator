@@ -12,7 +12,7 @@ inputs:
   cig-version:
     description: The cig release to install, as its tag.
     required: false
-    default: v1.20.0
+    default: v1.21.0
   userns:
     description: >-
       On Linux, let cig make its box by turning off Ubuntu's restriction on

@@ -13,7 +13,7 @@ set -eu
 version=${CIG_VERSION:?CIG_VERSION is not set}
 case "$version" in
   v[0-9]*.[0-9]*.[0-9]*) ;;
-  *) echo "setup: cig-version is a release tag like v1.20.0, not '$version'" >&2; exit 2 ;;
+  *) echo "setup: cig-version is a release tag like v1.21.0, not '$version'" >&2; exit 2 ;;
 esac
 
 case "$(uname -s)-$(uname -m)" in

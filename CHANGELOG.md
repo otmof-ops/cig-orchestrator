@@ -9,6 +9,12 @@ repository root lists versions it must not pick.
 
 ### Changed
 
+- **cigo needs cig 1.21.0 or newer.** The floor moves from 1.20.0 in the
+  tool, both launchers, the setup action's default and the docs, and CI and
+  the nightly bench run on it. cig 1.21.0 is the first release with
+  `cig bench`, which the suite's four bench tests and the nightly need,
+  and it lists runs without starting a process for each dead pid, which is
+  what made the suite slow on macOS and Windows (#119).
 - **The test suite is the same whatever is on PATH.** The cigarscript
   toolchain's setup stage runs `ciginstaller install carton --yes` when
   it finds a real `ciginstaller`; a developer or CI runner with that

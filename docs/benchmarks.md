@@ -80,5 +80,5 @@ The script's clock is whole milliseconds, so a phase is good to about a millisec
 ## CI
 
 `.github/workflows/bench-nightly.yml` calls cig-script's reusable `bench.yml` on a schedule
-with cig 1.20.0 and appends each run to `history/cigo.jsonl` on the `bench-history` branch
+with cig 1.21.0 and appends each run to `history/cigo.jsonl` on the `bench-history` branch
 (`cig bench history`). It waits on cig-script#197, which adds that workflow.

@@ -1902,7 +1902,7 @@ test("the launcher refuses a cig older than the tool's floor, and names the tool
   }
   stick old = launch_env(dir, launcher, ["version"], {PATH: fake + path_sep + env.get("PATH", "")})
   exits(old, 2)
-  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.20.0 or newer")
+  says(old.err, "cig 1.1.2 is too old; cig-orchestrator needs 1.21.0 or newer")
   stick j = json.parse(launch(dir, launcher, ["version", "--json"]).out)
   assert(str(j.tool).ends_with("orchestrate.cig"), json.stringify(j))
 })
@@ -6753,7 +6753,7 @@ test("the setup action: a composite action beside cigo that installs cig by its 
   if not on_windows {
     stick bad = hop_env(root, "sh", [path.join(root, "setup", "install.sh")], {CIG_VERSION: "latest"})
     exits(bad, 2)
-    says(bad.err, "a release tag like v1.20.0")
+    says(bad.err, "a release tag like v1.21.0")
     exits(hop_env(root, "sh", ["-n", path.join(root, "setup", "install.sh")], {}), 0)
   }
   stick ci = fs.read_text(path.join(root, "docs", "ci.md"))

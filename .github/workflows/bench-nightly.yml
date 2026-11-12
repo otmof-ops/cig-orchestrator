@@ -2,9 +2,9 @@
 # reusable bench.yml runs bench/bench.toml on a schedule and appends one line per run
 # to `history/cigo.jsonl` on the `bench-history` branch, which `cig bench history`
 # reads. A timing never fails it (timings are reported, never gated: cig-script#153);
-# a case whose output is wrong does. Pull requests do not run it: the heavy suites
-# run nightly, the fast ones on a pull request once a cig release has `cig bench`'s
-# debugging flags (the pinned cig is 1.20.0, which does not).
+# a case whose output is wrong does. Pull requests do not run it yet: the heavy suites
+# run nightly, and the fast ones join pull requests in a later change (the pinned cig,
+# 1.21.0, has the `cig bench` flags that needs).
 name: bench-nightly
 
 on:
@@ -19,7 +19,7 @@ jobs:
   bench:
     uses: otmof-ops/cig-script/.github/workflows/bench.yml@main
     with:
-      cig-version: "1.20.0"
+      cig-version: "1.21.0"
     permissions:
       contents: write
       pull-requests: write
