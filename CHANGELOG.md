@@ -5,6 +5,19 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## Unreleased
+
+### Changed
+
+- **The test suite is the same whatever is on PATH.** The cigarscript
+  toolchain's setup stage runs `ciginstaller install carton --yes` when
+  it finds a real `ciginstaller`; a developer or CI runner with that
+  binary first on PATH would have the polyglot example's four
+  `poly_stub_env` tests, and the fifth test that uses the real
+  `cigcompile` and `cigar`, stop at E1840. Every one of those tests
+  now puts a ciginstaller stub (exit 0) first on PATH, so the setup
+  stage never reaches the machine's installer.
+
 ## 1.19.0 — 2026-11-12
 
 ### Changed

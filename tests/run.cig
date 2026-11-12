@@ -102,6 +102,43 @@ pull fresh_at(fixture, rel) {
 
 # Any program, in `dir`, with this suite's own cig home: {code, out, err}.
 pull hop_env(dir, program, words, more) {
+  # Before each call, clear the shared home's crash queue and the
+  # left-behind lock notes from any earlier call. Cig spawns a detached
+  # `cig crash flush --quiet` at the end of every run whose ashtray has
+  # anything in it, and that detached cig inherits every open file
+  # descriptor the parent had, including the pack lock's. The parent
+  # exits but the flusher keeps the kernel's flock on the lock file
+  # until it finishes its send attempt; while that goes on, a later
+  # run on an overlapping pack (the whole repo overlaps every test dir
+  # under .test-work) is refused with E759. Clearing the ashtray
+  # removes the input to `spawn_flush`; clearing `locks/` drops the
+  # stale lock file entries so the next run creates fresh ones (a
+  # lingering flusher keeps the old inode alive through its fd, so the
+  # kernel's lock stays with it until the flusher exits, but the next
+  # run no longer shares a path with it). A test that inspects a crash
+  # it queues passes its own CIGSCRIPT_HOME in `more`; that home is
+  # left as the test wrote it.
+  if not more.has("CIGSCRIPT_HOME") {
+    burn {
+      for sub in ["crashes", "ashtray"] {
+        stick d = path.join(home, sub)
+        if fs.is_dir(d) {
+          for f in fs.glob(path.join(d, "*.json")) {
+            fs.rm(f)
+          }
+        }
+      }
+      stick locks = path.join(home, "locks")
+      if fs.is_dir(locks) {
+        for f in fs.glob(path.join(locks, "*.who")) {
+          fs.rm(f)
+        }
+        for f in fs.glob(path.join(locks, "*.lock")) {
+          fs.rm(f)
+        }
+      }
+    }
+  }
   roll r = null
   burn {
     r = proc.run(program, words, {
@@ -1216,8 +1253,10 @@ pull has_node_and_python() {
 
 # The CigarScript component's tools, as stand-ins first on PATH, so the
 # example's own tests need no cigcompile: `cigcompile build` writes bin/ the
-# way the real one does, and everything else succeeds. The tests that use the
-# real programs say so (has_cigar_tools).
+# way the real one does, and everything else succeeds. ciginstaller is
+# stubbed too, so cigarscript's setup stage never reaches a real one that a
+# developer or CI may have on PATH (where it would fail with E1840). The
+# tests that use the real programs say so (has_cigar_tools).
 pull poly_stub_env(dir) {
   stick bin = dir + "-cigar-bin"
   burn {
@@ -1226,11 +1265,14 @@ pull poly_stub_env(dir) {
       for name in ["cigcompile", "cigar"] {
         fs.write_text(path.join(bin, name + ".cmd"), "@echo off\r\nif \"%1\"==\"--version\" echo " + name + " 0.1.0\r\nif \"%1\"==\"build\" if not \"%2\"==\"--check\" (mkdir bin 2>nul & echo program> bin\\release-note)\r\nexit /b 0\r\n")
       }
+      fs.write_text(path.join(bin, "ciginstaller.cmd"), "@echo off\r\nif \"%1\"==\"--version\" echo ciginstaller 0.1.0\r\nexit /b 0\r\n")
     } else {
       for name in ["cigcompile", "cigar"] {
         fs.write_text(path.join(bin, name), "#!/bin/sh\ncase \"$1\" in\n  --version) echo " + name + " 0.1.0 ;;\n  build) case \" $* \" in *\" --check \"*) ;; *) mkdir -p bin && echo program > bin/release-note ;; esac ;;\nesac\nexit 0\n")
         proc.run("chmod", ["+x", path.join(bin, name)], {timeout_ms: 10000})
       }
+      fs.write_text(path.join(bin, "ciginstaller"), "#!/bin/sh\ncase \"$1\" in\n  --version) echo ciginstaller 0.1.0 ;;\nesac\nexit 0\n")
+      proc.run("chmod", ["+x", path.join(bin, "ciginstaller")], {timeout_ms: 10000})
     }
   }
   snuff {PATH: bin + path_sep + env.get("PATH", "")}
@@ -1238,6 +1280,24 @@ pull poly_stub_env(dir) {
 
 pull poly(dir, words) {
   snuff hop_env(dir, tool_prog("cig"), tool_args(words), poly_stub_env(dir))
+}
+
+# A bin with a ciginstaller stub alone, first on PATH, so cigarscript\x27s
+# setup stage does not call a real ciginstaller a developer or CI runner
+# may have on PATH (where it would fail with E1840). Used by the test
+# that uses the real cigcompile and cigar.
+pull ci_stub_bin(dir) {
+  stick bin = dir + "-ci-stub"
+  burn {
+    fs.mkdir(bin)
+    if on_windows {
+      fs.write_text(path.join(bin, "ciginstaller.cmd"), "@echo off\r\nif \"%1\"==\"--version\" echo ciginstaller 0.1.0\r\nexit /b 0\r\n")
+    } else {
+      fs.write_text(path.join(bin, "ciginstaller"), "#!/bin/sh\ncase \"$1\" in\n  --version) echo ciginstaller 0.1.0 ;;\nesac\nexit 0\n")
+      proc.run("chmod", ["+x", path.join(bin, "ciginstaller")], {timeout_ms: 10000})
+    }
+  }
+  snuff bin
 }
 
 # Does this machine have the real cigcompile and cigar as well?
@@ -1326,13 +1386,18 @@ test("the polyglot example with the real cigcompile and cigar: ci and release, a
     snuff
   }
   stick dir = fresh("examples/polyglot")
-  stick ci = tool_in(dir, ["run", "ci"])
+  # The real cigcompile and cigar stay on PATH; ciginstaller is stubbed
+  # first so cigarscript's setup does not call a real installer that may
+  # be on the developer's or CI runner's PATH (and fail with E1840).
+  stick dir_env = {PATH: ci_stub_bin(dir) + path_sep + env.get("PATH", "")}
+  stick ci = hop_env(dir, tool_prog("cig"), tool_args(["run", "ci"]), dir_env)
   exits(ci, 0)
   in_order(ci.out, ["] cigar:lint:", "] cigar:check:", "] cigar:build:", "] cigar:test:"])
   assert(there(dir, "cigar/bin/release-note"), "cigcompile wrote no program")
   # A release in a copy of its own, so that taking it back takes the program with it.
   stick rdir = fresh("examples/polyglot")
-  stick rel = tool_in(rdir, ["run", "release"])
+  stick rdir_env = {PATH: ci_stub_bin(rdir) + path_sep + env.get("PATH", "")}
+  stick rel = hop_env(rdir, tool_prog("cig"), tool_args(["run", "release"]), rdir_env)
   exits(rel, 0)
   says(rel.out, "live: public/2.3.0/index.html (196 bytes)")
   assert(there(rdir, "cigar/bin/release-note"), "the release built no program")
@@ -1343,7 +1408,7 @@ test("the polyglot example with the real cigcompile and cigar: ci and release, a
   burn {
     fs.write_text(path.join(rdir, "cigar/zz-broken.cigar"), "exhale (\n")
   }
-  stick bad = tool_in(rdir, ["run", "cigar:build"])
+  stick bad = hop_env(rdir, tool_prog("cig"), tool_args(["run", "cigar:build"]), rdir_env)
   exits(bad, 1)
   assert(not there(rdir, "cigar/bin/release-note"), "a failed build left a program behind")
 })
