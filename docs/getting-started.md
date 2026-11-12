@@ -6,7 +6,7 @@ every language with one command.
 ## 1. Install cig and cigo
 
 cigo is written in [CigScript](https://github.com/otmof-ops/cig-script), so
-it needs the `cig` runtime, 1.20.0 or newer. [ciginstaller](https://github.com/otmof-ops/cig-installer)
+it needs the `cig` runtime, 1.21.0 or newer. [ciginstaller](https://github.com/otmof-ops/cig-installer)
 installs both and checks the floor:
 
 ```sh

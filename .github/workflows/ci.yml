@@ -2,27 +2,85 @@ name: ci
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
 
 permissions:
   contents: read
 
+# A new push to a pull request cancels its earlier run. A push to main finishes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # A docs-only change (docs/** and *.md where the job does not build or test docs) skips the heavy
+  # jobs: the macOS and Windows test matrix, the native cigo path, the setup-action smoke test, the
+  # alpine container and the Windows installer path. The Linux `ci` matrix entry still runs
+  # (cigo's suite covers README examples). One `ci-ok` verdict always reports. Plain `git`, no
+  # third-party action.
+  changes:
+    name: what changed
+    runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.filter.outputs.code_changed }}
+      ci_oses: ${{ steps.filter.outputs.ci_oses }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: filter
+        name: are any non-docs paths touched
+        env:
+          GH_EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          case "$GH_EVENT" in
+            pull_request)
+              base="$BASE_SHA"
+              git fetch --no-tags --prune --depth=50 origin "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 || true
+              files=$(git diff --name-only "$base"...HEAD)
+              ;;
+            *)
+              if git rev-parse HEAD^ >/dev/null 2>&1; then
+                files=$(git diff --name-only HEAD^ HEAD)
+              else
+                files=$(git ls-tree -r --name-only HEAD)
+              fi
+              ;;
+          esac
+          echo "changed files:"
+          printf '%s\n' "$files"
+          code_changed=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              docs/*|*.md) ;;
+              *) code_changed=true; break ;;
+            esac
+          done <<EOF
+          $files
+          EOF
+          if [ "$code_changed" = true ]; then
+            ci_oses='[{"os":"ubuntu-latest","asset":"linux-x86_64","ext":""},{"os":"ubuntu-24.04-arm","asset":"linux-aarch64","ext":""},{"os":"macos-latest","asset":"macos-aarch64","ext":""},{"os":"macos-15-intel","asset":"macos-x86_64","ext":""},{"os":"windows-latest","asset":"windows-x86_64","ext":".exe"}]'
+          else
+            ci_oses='[{"os":"ubuntu-latest","asset":"linux-x86_64","ext":""}]'
+          fi
+          echo "code_changed=$code_changed" >> "$GITHUB_OUTPUT"
+          echo "ci_oses=$ci_oses" >> "$GITHUB_OUTPUT"
+          echo "code_changed=$code_changed"
+          echo "ci_oses=$ci_oses"
+
   ci:
     name: ci (${{ matrix.os }})
+    needs: changes
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-latest,    asset: linux-x86_64,   ext: "" }
-          - { os: ubuntu-24.04-arm, asset: linux-aarch64,  ext: "" }
-          - { os: macos-latest,     asset: macos-aarch64,  ext: "" }
-          - { os: macos-15-intel,   asset: macos-x86_64,   ext: "" }
-          - { os: windows-latest,   asset: windows-x86_64, ext: ".exe" }
+        include: ${{ fromJSON(needs.changes.outputs.ci_oses) }}
     env:
-      CIG_VERSION: v1.20.0
+      CIG_VERSION: v1.21.0
       CIGO_TEST_TIMINGS: test-timings.json
     defaults:
       run:
@@ -99,10 +157,12 @@ jobs:
   # `cig run orchestrate.cig --`.
   native:
     name: native cigo (cigcompile#8)
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     env:
-      CIG_RUNTIME_VERSION: v1.20.0
-      CIGCOMPILE_VERSION: v0.3.0
+      CIG_RUNTIME_VERSION: v1.21.0
+      CIGCOMPILE_VERSION: v0.4.0
       CIGO_TEST_TIMINGS: test-timings.json
     steps:
       - uses: actions/checkout@v7
@@ -142,6 +202,8 @@ jobs:
   # The setup action as a workflow uses it (#56): cig and cigo on PATH in one step.
   setup-action:
     name: the setup action (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -159,10 +221,12 @@ jobs:
   # musl and BusyBox, with bash installed: what Alpine users have.
   ci-alpine:
     name: ci (alpine)
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     container: alpine:latest
     env:
-      CIG_VERSION: v1.20.0
+      CIG_VERSION: v1.21.0
       CIGO_TEST_TIMINGS: test-timings.json
     steps:
       # git first: without it, checkout downloads a tarball and leaves no .git,
@@ -194,9 +258,11 @@ jobs:
   # PATH as a user would have it), and the installer stubs.
   ci-windows-installers:
     name: installers (windows)
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: windows-latest
     env:
-      CIG_VERSION: v1.20.0
+      CIG_VERSION: v1.21.0
       CIGO_TEST_TIMINGS: test-timings.json
     defaults:
       run:
@@ -282,37 +348,22 @@ jobs:
           # deliberate 1; every check above passed
           exit 0
 
-  # A tag vX.Y.Z is a release: one tarball, its checksum, a build attestation,
-  # and the licence beside them. The installer's manifest reads these.
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [ci, ci-alpine, ci-windows-installers]
+  # The one verdict every pull request reports: did every needed job pass or skip.
+  ci-ok:
+    name: ci
+    if: always()
+    needs: [changes, ci, native, setup-action, ci-alpine, ci-windows-installers]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
     steps:
-      - uses: actions/checkout@v7
-      - name: the tarball and its checksum (the assets the installer's manifest reads)
+      - name: every needed job passed or was skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          tag="$GITHUB_REF_NAME"
-          grep -q "^stick VERSION = \"${tag#v}\"" orchestrate.cig || { echo "orchestrate.cig says another version than $tag" >&2; exit 1; }
-          dir="cig-orchestrator-$tag"
-          mkdir -p "$dir/bin"
-          cp orchestrate.cig install.sh install.ps1 LICENSE NOTICE README.md CHANGELOG.md TOOLCHAINS.md YANKED "$dir/"
-          cp bin/cigo bin/cigo.launch.ps1 bin/cigo.cmd "$dir/bin/"
-          cp -r LICENSES docs "$dir/"
-          tar -czf "$dir.tar.gz" "$dir"
-          sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
-          cat "$dir.tar.gz.sha256"
-      - uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: cig-orchestrator-${{ github.ref_name }}.tar.gz
-      - uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            cig-orchestrator-${{ github.ref_name }}.tar.gz
-            cig-orchestrator-${{ github.ref_name }}.tar.gz.sha256
-            LICENSE
-            NOTICE
+          set -euo pipefail
+          printf '%s\n' "$NEEDS"
+          failed=$(printf '%s' "$NEEDS" | jq -r 'to_entries | map(select(.value.result != "success" and .value.result != "skipped")) | map(.key) | join(" ")')
+          if [ -n "$failed" ]; then
+            echo "::error::failed or cancelled: $failed"
+            exit 1
+          fi
+          echo "every needed job passed or was skipped"

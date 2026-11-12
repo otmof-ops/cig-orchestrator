@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/otmof-ops/cig-script"><img alt="a CigScript tool" src="https://img.shields.io/badge/a-CigScript%20tool-f97316"></a>
-  <img alt="needs cig 1.20.0 or newer" src="https://img.shields.io/badge/needs-cig%201.20.0%2B-6b7280">
+  <img alt="needs cig 1.21.0 or newer" src="https://img.shields.io/badge/needs-cig%201.21.0%2B-6b7280">
   <a href="TOOLCHAINS.md"><img alt="61 toolchains" src="https://img.shields.io/badge/toolchains-61-6b7280"></a>
   <a href="docs/roadmap.md"><img alt="actively maintained" src="https://img.shields.io/badge/status-actively%20maintained-f97316"></a>
   <a href="LICENSE"><img alt="license FSL-1.1-ALv2" src="https://img.shields.io/badge/license-FSL--1.1--ALv2-6b7280"></a>
@@ -165,7 +165,7 @@ your sanity.
 
 ## Install
 
-Needs `cig` 1.20.0 or newer. cigo is installed by
+Needs `cig` 1.21.0 or newer. cigo is installed by
 [ciginstaller](https://github.com/otmof-ops/cig-installer), which also
 installs and checks the `cig` it runs on. With ciginstaller on the machine:
 

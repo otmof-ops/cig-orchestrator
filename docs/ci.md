@@ -22,7 +22,7 @@ cig comes from its release, checked against the checksum published beside
 it; cigo is the checkout of the action itself, so `@v1` is the cigo of the
 newest `v1.x` release (the `v1` tag moves with each release; pin
 `@v1.18.0`, or a commit, to stop it moving). Two inputs: `cig-version` (a
-release tag, `v1.20.0` by default) and `userns` (on Linux, `true` by default:
+release tag, `v1.21.0` by default) and `userns` (on Linux, `true` by default:
 turns off Ubuntu's restriction on unprivileged user namespaces so cig can make
 its box, which `cigo rehearse` needs; the runner is thrown away afterwards).
 Windows runners use the steps further down.

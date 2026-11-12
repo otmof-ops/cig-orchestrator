@@ -8,7 +8,7 @@ $tool = Join-Path (Split-Path -Parent $PSScriptRoot) 'orchestrate.cig'
 # The cig this cigo is written for: the same floor as the `# cig` pin in the
 # tool, checked here for cigs too old to read the pin themselves.
 $needsMajor = 1
-$needsMinor = 20
+$needsMinor = 21
 $needsPatch = 0
 
 $cigCmd = Get-Command cig -ErrorAction SilentlyContinue

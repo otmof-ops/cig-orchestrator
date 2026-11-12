@@ -5,6 +5,38 @@ the project follows semantic versioning, and from 0.3.0 every version is a
 tag `vX.Y.Z` with a release `cigo update` can install. `YANKED` at the
 repository root lists versions it must not pick.
 
+## Unreleased
+
+### Changed
+
+- The `cigarscript` toolchain's setup stage no longer runs `ciginstaller
+  install carton`. A task runs in cig's box, where the family home cannot be
+  written, so setup now checks that `cigcompile` answers, and `cigar` too
+  when it is on PATH (check and test fall back to cigcompile without it),
+  through the shims so a project's pin is honored; when one does not answer,
+  it fails with the command to run outside the task. The suite's `ciginstaller`
+  stand-ins, which only kept that install away from a real installer, are gone.
+- **cigo needs cig 1.21.0 or newer.** The floor moves from 1.20.0 in the
+  tool, both launchers, the setup action's default and the docs, and CI and
+  the nightly bench run on it. cig 1.21.0 is the first release with
+  `cig bench`, which the suite's four bench tests and the nightly need,
+  and it lists runs without starting a process for each dead pid, which is
+  what made the suite slow on macOS and Windows (#119).
+- The three tests that run `bench/bench.toml` step aside on Windows and
+  say why: the manifest starts `bin/cigo`, the POSIX launcher, which
+  Windows cannot run as a program. They ran there for the first time
+  with cig 1.21.0. Windows cases for the manifest are still to write.
+- The `phases_add_up` test holds cigo's phases to within 15% of the wall
+  time, where it held them to 5%. What no phase covers is the process's
+  own start and exit, and CI measured it for the first time with cig
+  1.21.0: under 5% on a Linux runner, 5.3 to 6.7% in an Alpine container,
+  9.2% and 11.2% on the two macOS runners.
+- **The test suite is the same whatever else is on the machine.** It
+  clears its shared home's crash queue and lock notes before each call,
+  so a detached flusher from an earlier call cannot hold a pack lock, and
+  with the setup stage installing nothing, a `ciginstaller` on PATH
+  changes nothing.
+
 ## 1.19.0 — 2026-11-12
 
 ### Changed
