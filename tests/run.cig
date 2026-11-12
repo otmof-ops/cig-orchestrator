@@ -4426,7 +4426,7 @@ test("corpus_score_matches_audit: bench/score-corpus.cig prints the numbers a ha
   assert(plain.out == fs.read_text(path.join(bench_dir, "fixtures", "corpus-score.expect")), "the committed score differs from the corpus's today:\n${plain.out}")
 })
 
-test("phases_add_up: cigo's phases on CIG_TIMINGS_FD sum to the wall time within 5% or 10 ms, and nothing is written without the variable (#112)", pack() {
+test("phases_add_up: cigo's phases on CIG_TIMINGS_FD sum to within 15% of the wall time, and nothing is written without the variable (#112)", pack() {
   if not bench_cig_ready() {
     exhale "      (skipped: this cig has no `cig bench --timings`)"
     snuff
@@ -4450,10 +4450,11 @@ test("phases_add_up: cigo's phases on CIG_TIMINGS_FD sum to the wall time within
   }
   assert(not t.overlap, "the phases overlap: ${json.stringify(t)}")
   # What no phase covers is the process's own start and exit: the time before the
-  # launcher's first line and after its last. That is a fixed cost, not a share of
-  # the run, and on a slow runner it is 4 to 6 ms, which is more than 5% of a hook
-  # that takes 70 ms. So the bound is 5% of the wall time, and never under 10 ms.
-  stick slack = math.max(t.wall_ms * 0.05, 10.0)
+  # launcher's first line and after its last. It is the system's cost, and it grows
+  # with the machine's: under 5% of the wall time on a Linux runner, 5.3 to 6.7% in
+  # an Alpine container, 9.2% and 11.2% on the two macOS runners. A phase left out
+  # would be far more than that, so the bound is 15% of the wall time.
+  stick slack = t.wall_ms * 0.15
   assert(math.abs(t.wall_ms - sum) <= slack, "the phases add up to ${sum} ms, the wall is ${t.wall_ms} ms (other ${t.other_ms}, allowed ${slack})")
   # Unset, cigo writes nothing to any descriptor and prints exactly what it did.
   stick plain = hop_env(root, "sh", ["-c", 'cd bench && CIG_TIMINGS_FD= "$1" --version 9>"$2"; test ! -s "$2"', "sh", launcher, path.join(work, "no-phases.txt")], {})

@@ -26,10 +26,11 @@ repository root lists versions it must not pick.
   say why: the manifest starts `bin/cigo`, the POSIX launcher, which
   Windows cannot run as a program. They ran there for the first time
   with cig 1.21.0. Windows cases for the manifest are still to write.
-- The `phases_add_up` test allows a process's own start and exit 10 ms
-  when that is more than 5% of the wall time. CI runs the bench tests
-  for the first time with cig 1.21.0, and on Alpine that fixed cost was
-  3.5 to 5.6 ms of a 66 to 84 ms hook.
+- The `phases_add_up` test holds cigo's phases to within 15% of the wall
+  time, where it held them to 5%. What no phase covers is the process's
+  own start and exit, and CI measured it for the first time with cig
+  1.21.0: under 5% on a Linux runner, 5.3 to 6.7% in an Alpine container,
+  9.2% and 11.2% on the two macOS runners.
 - **The test suite is the same whatever else is on the machine.** It
   clears its shared home's crash queue and lock notes before each call,
   so a detached flusher from an earlier call cannot hold a pack lock, and
