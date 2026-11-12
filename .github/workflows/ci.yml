@@ -162,7 +162,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CIG_RUNTIME_VERSION: v1.21.0
-      CIGCOMPILE_VERSION: v0.3.0
+      CIGCOMPILE_VERSION: v0.4.0
       CIGO_TEST_TIMINGS: test-timings.json
     steps:
       - uses: actions/checkout@v7
