@@ -9,20 +9,24 @@ repository root lists versions it must not pick.
 
 ### Changed
 
+- The `cigarscript` toolchain's setup stage no longer runs `ciginstaller
+  install carton`. A task runs in cig's box, where the family home cannot be
+  written, so setup now checks that `cigcompile` answers, and `cigar` too
+  when it is on PATH (check and test fall back to cigcompile without it),
+  through the shims so a project's pin is honored; when one does not answer,
+  it fails with the command to run outside the task. The suite's `ciginstaller`
+  stand-ins, which only kept that install away from a real installer, are gone.
 - **cigo needs cig 1.21.0 or newer.** The floor moves from 1.20.0 in the
   tool, both launchers, the setup action's default and the docs, and CI and
   the nightly bench run on it. cig 1.21.0 is the first release with
   `cig bench`, which the suite's four bench tests and the nightly need,
   and it lists runs without starting a process for each dead pid, which is
   what made the suite slow on macOS and Windows (#119).
-- **The test suite is the same whatever is on PATH.** The cigarscript
-  toolchain's setup stage runs `ciginstaller install carton --yes` when
-  it finds a real `ciginstaller`; a developer or CI runner with that
-  binary first on PATH would have the polyglot example's four
-  `poly_stub_env` tests, and the fifth test that uses the real
-  `cigcompile` and `cigar`, stop at E1840. Every one of those tests
-  now puts a ciginstaller stub (exit 0) first on PATH, so the setup
-  stage never reaches the machine's installer.
+- **The test suite is the same whatever else is on the machine.** It
+  clears its shared home's crash queue and lock notes before each call,
+  so a detached flusher from an earlier call cannot hold a pack lock, and
+  with the setup stage installing nothing, a `ciginstaller` on PATH
+  changes nothing.
 
 ## 1.19.0 — 2026-11-12
 

@@ -24,7 +24,8 @@ Each language keeps its own tests (`python3 -m unittest`, `node --test`,
 `release` runs every language's lint, check, build and tests, then packages
 the CigarScript program (`cigcompile build --sbom`), before the chain.
 Nothing to install beyond Python 3, Node 18, and `cigcompile` and `cigar`
-(`ciginstaller install carton`).
+(`ciginstaller install carton`, run in a terminal: the `cigarscript` setup
+stage only checks that both answer, and installs nothing from inside a task).
 
 ```
 cd examples/polyglot

@@ -981,9 +981,14 @@ stick TOOLCHAINS = {
     pins: {cigar: [".cigar-version", "cigar.toml:cigar"]},
     install: "https://github.com/otmof-ops/cig-installer",
     touches: {build: ["?bin/**"], package: ["?bin/**"], clean: ["?bin/**"]},
-    note: "stages run on the top-level .cigar scripts of the component; the installer picks the cigcompile and cigar a pin (.cigar-version, or `cigar = \"1.0\"` in cigar.toml) names, and setup fetches a carton; there is no formatter yet (cigar has no fmt), so no format stages; test dry-runs each .cigar file with `cigar run --dry-run` (cigcompile test needs cig to run the script, and cig cannot run a .cigar file), and cigcompile test runs for .cig scripts; package writes each program with its SBOM, and signing (`--sign KEY`) is a stage override because the key is the project's; builds go to bin/, which a failed chain rolls back",
+    note: "stages run on the top-level .cigar scripts of the component; the installer picks the cigcompile and cigar a pin (.cigar-version, or `cigar = \"1.0\"` in cigar.toml) names, and setup checks that cigcompile (and cigar, when it is on PATH) answers, installing nothing (run `ciginstaller install carton` outside a task when one is missing); there is no formatter yet (cigar has no fmt), so no format stages; test dry-runs each .cigar file with `cigar run --dry-run` (cigcompile test needs cig to run the script, and cig cannot run a .cigar file), and cigcompile test runs for .cig scripts; package writes each program with its SBOM, and signing (`--sign KEY`) is a stage override because the key is the project's; builds go to bin/, which a failed chain rolls back",
     stages: {
-      setup: [{when: ["tool:ciginstaller"], cmd: ["ciginstaller", "install", "carton", "--yes"]}],
+      # setup changes nothing: a task runs in cig's box, where the family home cannot be written,
+      # so it checks that the tools answer (through the shims, so the project's pin is honored)
+      # and says how to get them when one does not. cigcompile is needed; cigar is used when it
+      # is on PATH (check and test fall back to cigcompile), so it is asked only then.
+      setup: [{when: ["os:unix"], shell: "for t in cigcompile cigar; do if [ \"\$t\" = cigar ] && ! command -v cigar > /dev/null 2>&1; then echo \"cigar is not on PATH: check and test use cigcompile\"; continue; fi; v=\$(\"\$t\" --version 2>&1) || { echo \"cigarscript needs \$t, and \\`\$t --version\\` does not answer here: \${v:-it is not on PATH}. Install it outside this task: ciginstaller install carton\" >&2; exit 1; }; echo \"\$v\"; done"},
+        {when: ["tool:cigar"], cmds: [["cigcompile", "--version"], ["cigar", "--version"]]}, ["cigcompile", "--version"]],
       lint: [["cigcompile", "build", "--check", "."]],
       check: [{when: ["tool:cigar"], cmd: ["cigar", "check", "."]}, ["cigcompile", "build", "--check", "."]],
       build: [["cigcompile", "build", "."]],

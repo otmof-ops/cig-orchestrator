@@ -975,7 +975,7 @@ pull own_stubs(dir, names) {
   snuff bin
 }
 
-test("cigarscript: setup asks the installer for the carton", pack() {
+test("cigarscript: setup checks that cigcompile and cigar answer, and installs nothing", pack() {
   if on_windows {
     snuff
   }
@@ -984,10 +984,38 @@ test("cigarscript: setup asks the installer for the carton", pack() {
     fs.write_text(path.join(dir, "cigar.toml"), "cigar = \"0.1\"\n")
   }
   exits(tool_in(dir, ["adopt", "--write"]), 0)
-  stick bin = own_stubs(dir, ["ciginstaller"])
+  stick bin = own_stubs(dir, ["ciginstaller", "cigcompile", "cigar"])
   stick with_stubs = stubbed(dir)
   exits(hop_env(dir, tool_prog("cig"), tool_args(["run", "setup"]), with_stubs.merge({PATH: bin + path_sep + with_stubs.PATH})), 0)
-  says(stub_log(dir), "ciginstaller install carton --yes @" + norm(dir))
+  says(stub_log(dir), "cigcompile --version @" + norm(dir))
+  says(stub_log(dir), "cigar --version @" + norm(dir))
+  never_says(stub_log(dir), "ciginstaller")
+})
+
+test("cigarscript: setup without cigcompile fails and says how to get it outside the task", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/empty")
+  burn {
+    fs.write_text(path.join(dir, "cigar.toml"), "cigar = \"0.1\"\n")
+  }
+  exits(tool_in(dir, ["adopt", "--write"]), 0)
+  stick bin = own_stubs(dir, ["cigar", "ciginstaller"])
+  burn {
+    proc.run("ln", ["-s", proc.which("cig"), path.join(bin, "cig")], {timeout_ms: 10000})
+  }
+  stick bare = bin + path_sep + "/usr/bin" + path_sep + "/bin"
+  stick probe = hop_env(dir, "sh", ["-c", "command -v cigcompile"], {PATH: bare})
+  if probe.code == 0 {
+    exhale "      (skipped: a cigcompile is installed in a system folder)"
+    snuff
+  }
+  stick r = hop_env(dir, tool_prog("cig"), tool_args(["run", "setup"]), {PATH: bare, STUB_LOG: dir + "-stub.log"})
+  exits(r, 1)
+  says(r.out + r.err, "cigarscript needs cigcompile")
+  says(r.out + r.err, "Install it outside this task: ciginstaller install carton")
+  never_says(stub_log(dir), "ciginstaller")
 })
 
 test("cigarscript: check falls back to cigcompile when cigar is not installed", pack() {
@@ -1253,10 +1281,9 @@ pull has_node_and_python() {
 
 # The CigarScript component's tools, as stand-ins first on PATH, so the
 # example's own tests need no cigcompile: `cigcompile build` writes bin/ the
-# way the real one does, and everything else succeeds. ciginstaller is
-# stubbed too, so cigarscript's setup stage never reaches a real one that a
-# developer or CI may have on PATH (where it would fail with E1840). The
-# tests that use the real programs say so (has_cigar_tools).
+# way the real one does, and everything else succeeds. cigarscript's setup
+# stage only asks each of them for --version, which they answer. The tests
+# that use the real programs say so (has_cigar_tools).
 pull poly_stub_env(dir) {
   stick bin = dir + "-cigar-bin"
   burn {
@@ -1265,14 +1292,11 @@ pull poly_stub_env(dir) {
       for name in ["cigcompile", "cigar"] {
         fs.write_text(path.join(bin, name + ".cmd"), "@echo off\r\nif \"%1\"==\"--version\" echo " + name + " 0.1.0\r\nif \"%1\"==\"build\" if not \"%2\"==\"--check\" (mkdir bin 2>nul & echo program> bin\\release-note)\r\nexit /b 0\r\n")
       }
-      fs.write_text(path.join(bin, "ciginstaller.cmd"), "@echo off\r\nif \"%1\"==\"--version\" echo ciginstaller 0.1.0\r\nexit /b 0\r\n")
     } else {
       for name in ["cigcompile", "cigar"] {
         fs.write_text(path.join(bin, name), "#!/bin/sh\ncase \"$1\" in\n  --version) echo " + name + " 0.1.0 ;;\n  build) case \" $* \" in *\" --check \"*) ;; *) mkdir -p bin && echo program > bin/release-note ;; esac ;;\nesac\nexit 0\n")
         proc.run("chmod", ["+x", path.join(bin, name)], {timeout_ms: 10000})
       }
-      fs.write_text(path.join(bin, "ciginstaller"), "#!/bin/sh\ncase \"$1\" in\n  --version) echo ciginstaller 0.1.0 ;;\nesac\nexit 0\n")
-      proc.run("chmod", ["+x", path.join(bin, "ciginstaller")], {timeout_ms: 10000})
     }
   }
   snuff {PATH: bin + path_sep + env.get("PATH", "")}
@@ -1280,24 +1304,6 @@ pull poly_stub_env(dir) {
 
 pull poly(dir, words) {
   snuff hop_env(dir, tool_prog("cig"), tool_args(words), poly_stub_env(dir))
-}
-
-# A bin with a ciginstaller stub alone, first on PATH, so cigarscript\x27s
-# setup stage does not call a real ciginstaller a developer or CI runner
-# may have on PATH (where it would fail with E1840). Used by the test
-# that uses the real cigcompile and cigar.
-pull ci_stub_bin(dir) {
-  stick bin = dir + "-ci-stub"
-  burn {
-    fs.mkdir(bin)
-    if on_windows {
-      fs.write_text(path.join(bin, "ciginstaller.cmd"), "@echo off\r\nif \"%1\"==\"--version\" echo ciginstaller 0.1.0\r\nexit /b 0\r\n")
-    } else {
-      fs.write_text(path.join(bin, "ciginstaller"), "#!/bin/sh\ncase \"$1\" in\n  --version) echo ciginstaller 0.1.0 ;;\nesac\nexit 0\n")
-      proc.run("chmod", ["+x", path.join(bin, "ciginstaller")], {timeout_ms: 10000})
-    }
-  }
-  snuff bin
 }
 
 # Does this machine have the real cigcompile and cigar as well?
@@ -1386,18 +1392,15 @@ test("the polyglot example with the real cigcompile and cigar: ci and release, a
     snuff
   }
   stick dir = fresh("examples/polyglot")
-  # The real cigcompile and cigar stay on PATH; ciginstaller is stubbed
-  # first so cigarscript's setup does not call a real installer that may
-  # be on the developer's or CI runner's PATH (and fail with E1840).
-  stick dir_env = {PATH: ci_stub_bin(dir) + path_sep + env.get("PATH", "")}
-  stick ci = hop_env(dir, tool_prog("cig"), tool_args(["run", "ci"]), dir_env)
+  # The real cigcompile and cigar on PATH: cigarscript's setup asks each
+  # for its version and installs nothing.
+  stick ci = hop_env(dir, tool_prog("cig"), tool_args(["run", "ci"]), {})
   exits(ci, 0)
   in_order(ci.out, ["] cigar:lint:", "] cigar:check:", "] cigar:build:", "] cigar:test:"])
   assert(there(dir, "cigar/bin/release-note"), "cigcompile wrote no program")
   # A release in a copy of its own, so that taking it back takes the program with it.
   stick rdir = fresh("examples/polyglot")
-  stick rdir_env = {PATH: ci_stub_bin(rdir) + path_sep + env.get("PATH", "")}
-  stick rel = hop_env(rdir, tool_prog("cig"), tool_args(["run", "release"]), rdir_env)
+  stick rel = hop_env(rdir, tool_prog("cig"), tool_args(["run", "release"]), {})
   exits(rel, 0)
   says(rel.out, "live: public/2.3.0/index.html (196 bytes)")
   assert(there(rdir, "cigar/bin/release-note"), "the release built no program")
@@ -1408,7 +1411,7 @@ test("the polyglot example with the real cigcompile and cigar: ci and release, a
   burn {
     fs.write_text(path.join(rdir, "cigar/zz-broken.cigar"), "exhale (\n")
   }
-  stick bad = hop_env(rdir, tool_prog("cig"), tool_args(["run", "cigar:build"]), rdir_env)
+  stick bad = hop_env(rdir, tool_prog("cig"), tool_args(["run", "cigar:build"]), {})
   exits(bad, 1)
   assert(not there(rdir, "cigar/bin/release-note"), "a failed build left a program behind")
 })
