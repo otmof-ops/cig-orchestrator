@@ -7,6 +7,21 @@ repository root lists versions it must not pick.
 
 ## Unreleased
 
+### Added
+
+- **cigo measured on each of cig's engines** (`bench/engines.toml`,
+  `docs/benchmarks.md`, `bench/engines-2026-11-22.json`). cig can run a
+  script on its bytecode VM (`cig run --engine vm`, `CIG_ENGINE=vm`, or
+  `cig config engine vm`; cig-script#254, in the release after 1.24.0),
+  where it lowers the script once and keeps the module. On a development
+  machine, with a cig built from that change, a second or later call of
+  cigo takes between 0.24 and 0.40 of the tree-walker's time over
+  seven cases (`--version`, `--help`, `list`, `audit` of one task, the
+  hook twice, the guard's line check) and less than half the memory, and
+  the suite gives the same verdict on every test on either engine. The
+  tree-walker is still cig's default, and nothing in cigo changes which
+  engine runs it.
+
 ### Changed
 
 - The `cigarscript` toolchain's setup stage no longer runs `ciginstaller

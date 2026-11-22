@@ -77,6 +77,59 @@ The script's clock is whole milliseconds, so a phase is good to about a millisec
 `date` has no nanoseconds (macOS) the launcher writes nothing and cig writes its own phases.
 `CIGO_TIMINGS_END` is the file the script leaves its end time in for the launcher.
 
+## On each of cig's engines
+
+cig can run a script on its bytecode VM instead of its tree-walker: `cig run --engine vm`,
+`CIG_ENGINE=vm`, or `cig config engine vm` (cig-script#254, in the release after 1.24.0).
+The tree-walker is still cig's default. On the VM cig lowers the script to bytecode once
+and keeps the module in its tin; a later run loads it. cigo is one script of 20,664 lines,
+which the tree-walker parses and checks at every start, so the engine shows in every call.
+
+`bench/engines.toml` runs seven cases of `bench.toml` on each engine, a pair at a time. It
+keeps one home for the whole run (`home = "shared"`), because the module is kept in the
+home. Point the homes at a scratch folder, never at your own:
+
+```
+d=$(mktemp -d) && HOME=$d CIGSCRIPT_HOME=$d/cig CIGO_HOME=$d/cigo cig bench bench/engines.toml
+```
+
+As measured on 2026-11-22 on a development machine, with cig built from cig-script at
+`6188571` (it gives its version as 1.24.0) and cigo at `0d6c934`: 21 samples of 5
+runs for each case, as `cig bench --markdown` printed them (a `~` marks a case whose
+samples vary by more than 5%). The samples are in `bench/engines-2026-11-22.json`.
+
+| case | group | median ms | p10 to p90 ms | CV | RSS MB |
+|---|---|---:|---|---:|---:|
+| `version: tree-walker` | tree | 58.2 | 54.5 to 60.6 | 3.9% | 47.0 |
+| `version: vm` | vm | 13.8~ | 13.2 to 15.2 | 6.4% | 18.4 |
+| `help: tree-walker` | tree | 56.8 | 56.0 to 60.9 | 3.2% | 47.0 |
+| `help: vm` | vm | 14.4 | 13.7 to 15.2 | 3.9% | 18.6 |
+| `list, 52 tasks: tree-walker` | tree | 59.4 | 57.4 to 60.9 | 2.6% | 47.0 |
+| `list, 52 tasks: vm` | vm | 15.8 | 15.2 to 17.4 | 4.9% | 19.1 |
+| `audit, one task: tree-walker` | tree | 70.3 | 68.2 to 72.3 | 2.7% | 47.0 |
+| `audit, one task: vm` | vm | 28.4 | 27.7 to 29.2 | 2.1% | 21.5 |
+| `hook, benign command: tree-walker` | tree | 59.9 | 57.5 to 62.0 | 2.9% | 47.0 |
+| `hook, benign command: vm` | vm | 15.9 | 15.5 to 16.9 | 3.4% | 19.1 |
+| `hook, curl piped to sh: tree-walker` | tree | 65.4 | 63.1 to 67.2 | 2.6% | 47.1 |
+| `hook, curl piped to sh: vm` | vm | 21.2 | 20.5 to 22.5 | 4.3% | 21.2 |
+| `guard line check, benign: tree-walker` | tree | 61.5 | 59.4 to 62.2 | 2.8% | 47.0 |
+| `guard line check, benign: vm` | vm | 16.3 | 15.7 to 17.2 | 3.8% | 19.1 |
+
+- **On the VM a call takes between 0.24 and 0.40 of the tree-walker's time** on these
+  cases, and less than half the memory.
+- **These are second and later calls.** The first call after cigo or cig is updated
+  lowers the script, once. cig-script measured that on `orchestrate.cig` run with no
+  arguments: 392.8 ms against the tree-walker's 53.4
+  ([its first-runs document](https://github.com/otmof-ops/cig-script/blob/main/docs/ENGINES-FIRST-RUNS-2026-11-22.md)).
+- **The same answers.** `tests/run.cig` gives the same verdict on every one of its 346
+  tests on either engine.
+- **Not the baseline's machine.** `bench/baseline-2026-11-13.json` was measured on the
+  test machine with cig as released, before the VM. These numbers are from another
+  machine and compare one cig with itself; the comparison with that baseline waits for a
+  run there.
+- A cig from before `cig run --engine` ignores `CIG_ENGINE`: both sides are then the
+  tree-walker.
+
 ## CI
 
 `.github/workflows/bench-nightly.yml` calls cig-script's reusable `bench.yml` on a schedule
