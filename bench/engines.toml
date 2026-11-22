@@ -1,19 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Jay Taylor (https://github.com/otmof-ops/cig-orchestrator)
 # SPDX-License-Identifier: FSL-1.1-ALv2
 #
-# cigo on each of cig's engines (cig-script#254): cases of bench.toml, each run on the
-# tree-walker and on the bytecode VM, a pair at a time. See docs/benchmarks.md.
+# cigo on each of cig's engines: cases of bench.toml, each run on the tree-walker and on
+# the bytecode VM, a pair at a time. See docs/benchmarks.md.
 #
-# On the VM cig lowers a script once and keeps its module in its tin, so this manifest
-# keeps one home for the whole run (`home = "shared"`) where bench.toml gives every
-# sample a fresh one: the first warm-up run of a VM case lowers orchestrate.cig, and
-# every timed run loads the module, as a second and later call of cigo does. Point the
+# cigo's launcher chooses the engine (#142): it asks cig for the VM where a module of cigo
+# is kept in cig's tin, which `cigo __lower` sees to, and for the tree-walker where
+# `engine` is `tree`. So the VM cases here are cigo as it runs once it is installed, and
+# the tree-walker cases set CIGO_ENGINE=tree, the way out. The module is kept in the
+# home, so this manifest keeps one home for the whole run (`home = "shared"`) where
+# bench.toml gives every sample a fresh one, and cigo is lowered into it first. Point the
 # homes at a scratch folder, never at your own:
 #
-#   d=$(mktemp -d) && HOME=$d CIGSCRIPT_HOME=$d/cig CIGO_HOME=$d/cigo cig bench bench/engines.toml
+#   d=$(mktemp -d) && export HOME=$d CIGSCRIPT_HOME=$d/cig CIGO_HOME=$d/cigo
+#   bin/cigo __lower && cig bench bench/engines.toml
 #
-# A cig from before `cig run --engine` ignores CIG_ENGINE: both sides are then the
-# tree-walker.
+# With a cig from before 1.25.0 the launcher asks for nothing and both sides are the
+# tree-walker. The two "hook as installed" pairs pass `--no-check`, as the hook an
+# agent's settings carry does.
 
 format = 1
 
@@ -33,56 +37,52 @@ env     = { NO_COLOR = "1", CIG_DOCTOR = "0", CIG_SEAL_KEY = "file", CI = "", CI
 name   = "version: tree-walker"
 group  = "tree"
 run    = ["cigo", "--version"]
-env    = { CIG_ENGINE = "tree" }
+env    = { CIGO_ENGINE = "tree" }
 expect = { exit = 0 }
 
 [[case]]
 name   = "version: vm"
 group  = "vm"
 run    = ["cigo", "--version"]
-env    = { CIG_ENGINE = "vm" }
 expect = { exit = 0 }
 
 [[case]]
 name   = "help: tree-walker"
 group  = "tree"
 run    = ["cigo", "--help"]
-env    = { CIG_ENGINE = "tree" }
+env    = { CIGO_ENGINE = "tree" }
 expect = { exit = 0 }
 
 [[case]]
 name   = "help: vm"
 group  = "vm"
 run    = ["cigo", "--help"]
-env    = { CIG_ENGINE = "vm" }
 expect = { exit = 0 }
 
 [[case]]
 name   = "list, 52 tasks: tree-walker"
 group  = "tree"
 run    = ["cigo", "list"]
-env    = { CIG_ENGINE = "tree" }
+env    = { CIGO_ENGINE = "tree" }
 expect = { exit = 0, stdout = "fixtures/list.expect" }
 
 [[case]]
 name   = "list, 52 tasks: vm"
 group  = "vm"
 run    = ["cigo", "list"]
-env    = { CIG_ENGINE = "vm" }
 expect = { exit = 0, stdout = "fixtures/list.expect" }
 
 [[case]]
 name   = "audit, one task: tree-walker"
 group  = "tree"
 run    = ["cigo", "audit", "task-01"]
-env    = { CIG_ENGINE = "tree" }
+env    = { CIGO_ENGINE = "tree" }
 expect = { exit = 0, stdout = "fixtures/audit-1.expect" }
 
 [[case]]
 name   = "audit, one task: vm"
 group  = "vm"
 run    = ["cigo", "audit", "task-01"]
-env    = { CIG_ENGINE = "vm" }
 expect = { exit = 0, stdout = "fixtures/audit-1.expect" }
 
 [[case]]
@@ -90,7 +90,7 @@ name   = "hook, benign command: tree-walker"
 group  = "tree"
 run    = ["cigo", "agent", "hook", "claude-code"]
 stdin  = "fixtures/hook-benign.json"
-env    = { CIG_ENGINE = "tree" }
+env    = { CIGO_ENGINE = "tree" }
 expect = { exit = 0 }
 
 [[case]]
@@ -98,7 +98,6 @@ name   = "hook, benign command: vm"
 group  = "vm"
 run    = ["cigo", "agent", "hook", "claude-code"]
 stdin  = "fixtures/hook-benign.json"
-env    = { CIG_ENGINE = "vm" }
 expect = { exit = 0 }
 
 [[case]]
@@ -106,7 +105,7 @@ name   = "hook, curl piped to sh: tree-walker"
 group  = "tree"
 run    = ["cigo", "agent", "hook", "claude-code"]
 stdin  = "fixtures/hook-curl-sh.json"
-env    = { CIG_ENGINE = "tree" }
+env    = { CIGO_ENGINE = "tree" }
 expect = { exit = 0 }
 
 [[case]]
@@ -114,7 +113,36 @@ name   = "hook, curl piped to sh: vm"
 group  = "vm"
 run    = ["cigo", "agent", "hook", "claude-code"]
 stdin  = "fixtures/hook-curl-sh.json"
-env    = { CIG_ENGINE = "vm" }
+expect = { exit = 0 }
+
+[[case]]
+name   = "hook as installed, benign command: tree-walker"
+group  = "tree"
+run    = ["cigo", "--no-check", "agent", "hook", "claude-code"]
+stdin  = "fixtures/hook-benign.json"
+env    = { CIGO_ENGINE = "tree" }
+expect = { exit = 0 }
+
+[[case]]
+name   = "hook as installed, benign command: vm"
+group  = "vm"
+run    = ["cigo", "--no-check", "agent", "hook", "claude-code"]
+stdin  = "fixtures/hook-benign.json"
+expect = { exit = 0 }
+
+[[case]]
+name   = "hook as installed, curl piped to sh: tree-walker"
+group  = "tree"
+run    = ["cigo", "--no-check", "agent", "hook", "claude-code"]
+stdin  = "fixtures/hook-curl-sh.json"
+env    = { CIGO_ENGINE = "tree" }
+expect = { exit = 0 }
+
+[[case]]
+name   = "hook as installed, curl piped to sh: vm"
+group  = "vm"
+run    = ["cigo", "--no-check", "agent", "hook", "claude-code"]
+stdin  = "fixtures/hook-curl-sh.json"
 expect = { exit = 0 }
 
 [[case]]
@@ -122,7 +150,7 @@ name   = "guard line check, benign: tree-walker"
 group  = "tree"
 run    = ["cigo", "guard", "check-line"]
 stdin  = "fixtures/guard-benign.in"
-env    = { CIG_ENGINE = "tree" }
+env    = { CIGO_ENGINE = "tree" }
 expect = { exit = 0 }
 
 [[case]]
@@ -130,5 +158,4 @@ name   = "guard line check, benign: vm"
 group  = "vm"
 run    = ["cigo", "guard", "check-line"]
 stdin  = "fixtures/guard-benign.in"
-env    = { CIG_ENGINE = "vm" }
 expect = { exit = 0 }

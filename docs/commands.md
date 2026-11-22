@@ -115,13 +115,17 @@ the range of cig it supports, whether the installed cig is inside it, and
 where the tool is installed.
 
 **`cigo update`** runs `ciginstaller update`, which checks, verifies and
-installs the next carton; `--check` only says whether there is one. Updates
-come by carton, so there is no cigo version to name: `ciginstaller carton
-list` shows them and `ciginstaller update --to <carton>` moves to one. A
-cigo running from a git checkout is updated with `git pull` instead, and
-`update` says so. The setting `update_channel` (`stable` or `prerelease`)
-says which releases cigo's own are considered, and a release listed in the
-repository's `YANKED` file is never picked.
+installs the next carton; `--check` only says whether there is one. Once
+the installer is done, cigo lowers itself for cig's VM (the new cigo on
+PATH runs the step, `cigo __lower`), so that no call after the update
+pays for it; its one line says which engine cigo runs on from here.
+Updates come by carton, so there is no cigo
+version to name: `ciginstaller carton list` shows them and `ciginstaller
+update --to <carton>` moves to one. A cigo running from a git checkout is
+updated with `git pull` instead, and `update` says so. The setting
+`update_channel` (`stable` or `prerelease`) says which releases cigo's own
+are considered, and a release listed in the repository's `YANKED` file is
+never picked.
 
 **`cigo uninstall`** runs `ciginstaller uninstall cigo`, which first runs
 `cigo guard uninstall --yes` when the guard is installed. Your settings and
@@ -179,7 +183,16 @@ three of this machine's own, which a project cannot set at all:
 `guard_scope` (`project` < `dev` < `downloads` < `agents` < `system`),
 `guard_commands`, `guard_agents` and `guard_pause_max` ([the guard's
 reach](#the-guards-reach-cigo-guard)), and `agent_approval` (`tty` <
-`os-auth` < `never`; floored).
+`os-auth` < `never`; floored), and `engine` (`auto` or `tree`), which of
+cig's engines runs cigo itself: with `auto`, cig's bytecode VM where cig
+has one (from 1.25.0) and a module of this cigo is kept in cig's tin, and
+the tree-walker until then; with `tree`, always the tree-walker. On the
+VM a call of cigo takes about a third to a half of the time
+([benchmarks](benchmarks.md#on-each-of-cigs-engines)). Lowering cigo's
+script is paid when cigo is installed or updated, never on a call, and
+`cigo config engine auto` pays it there and then at a terminal;
+`CIGO_ENGINE=tree` is the tree-walker for one call
+([how it works](how-it-works.md#which-of-cigs-engines-runs-cigo)).
 
 **`cigo outputs`** shows what the last run's tasks handed on; `cigo outputs
 stats` shows one task's, as JSON.

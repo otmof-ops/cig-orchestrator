@@ -149,6 +149,8 @@ stick SETTINGS = {
     doc: "offer (once) to make a rule after the same ask is approved 10 times; never loosens anything on its own. RESERVED: not read yet (W14b)"},
   self_seal: {values: ["off", "on"], default: "on", floor: true, presets: {},
     doc: "sealing of the sensitive parts of cigo's self record (the trust store, approvals, rules and config): on by default (off is the loosest, on is the tightest). Turning it off goes through the system's own password prompt (cigo config self_seal off); no flag or environment variable stands in for that, and a `self_seal = off` written by hand to the user config or the manifest does not loosen the effective value: a signed proof under `cigo-self-proof` beside the config is what cigo reads. cigo self verify checks the MACed record even when sealing is off; the W25 restore will need the sensitive parts sealed. See cigo self where, cigo self verify and cigo self build"},
+  engine: {values: ["tree", "auto"], default: "auto", floor: false, machine: true, presets: {},
+    doc: "which of cig's engines runs cigo itself: auto (cig's bytecode VM, where cig has one, from 1.25.0, and a module of this cigo is kept in cig's tin, which starts cigo in about a third of the time; the tree-walker until then, since lowering the script is paid when cigo is installed or updated and never on a call), tree (always the tree-walker)"}
 }
 # The old shape, kept for the places that read a default and a doc.
 roll CONFIG_KEYS = {}
@@ -5802,7 +5804,7 @@ pull doctor_project() {
 # is a finding too: the entry always answers in the shape.
 pull doctor_findings() {
   roll out = doctor_cig()
-  for part in [pack() => doctor_launcher(), pack() => doctor_guard_findings(), pack() => doctor_rehearse_findings(), pack() => doctor_project()] {
+  for part in [pack() => doctor_launcher(), pack() => doctor_guard_findings(), pack() => doctor_rehearse_findings(), pack() => doctor_engine(), pack() => doctor_project()] {
     try {
       out = out + part()
     } ashtray e {
@@ -14873,6 +14875,14 @@ pull do_config() {
   if key == "self_seal" and value != null and value == "off" and not self_seal_proof_holds() {
     fail("cigo: the proof did not hold after writing ${key} = off; ${key} may be inconsistent and needs a fresh `cigo config self_seal off`")
   }
+  # engine (#142): the launcher reads its own copy of this setting, and
+  # with `auto` it wants a module kept, so the step runs now, at the
+  # terminal that asked, with the value the setting has from here on: the
+  # layers are read again, since another layer may still say otherwise.
+  if key == "engine" {
+    PROBE.remove("config_full")
+    exhale engine_lowered_line(engine_lower(str(config().engine)))
+  }
 }
 
 # The settings cigo guard stats watches for a "notice was followed by a
@@ -14914,6 +14924,313 @@ pull write_setting(key, value) {
     stick to_v = pick(value == null, "", str(value))
     guard_note({kind: "config", thing: key, outcome: pick(value == null, "unset (was ${was})", "set to ${value}" + pick(was == "", "", " (was ${was})")), from: was, to: to_v})
   }
+}
+
+# ----- which of cig's engines runs cigo (#142) ------------------------------------------
+#
+# From 1.25.0 cig can run a script on its bytecode VM: the first such run
+# lowers the script and keeps the module in cig's tin, and later runs load
+# it. For cigo that is a start in about a third of the time, and a first
+# run several times slower than the tree-walker's. The hook runs on every
+# command an agent makes, so cigo never pays for the lowering on a call: its
+# launcher asks cig for the VM only when CIGO_HOME/engine has a line
+# `vm|<key>` for the key the launcher made on that call (the cig and the
+# tool file it found, cig's home and keys folder, the installer's carton and
+# shim index), and `cigo __lower` is what writes that line, once it has seen
+# cig keep the module. The installer runs `cigo __lower` after it installs
+# or updates cig or cigo, `cigo update` runs it, and `cigo config engine
+# auto` runs it. The file holds at most 8 such lines, newest first, or one
+# line `tree` where the `engine` setting says so. The key is the
+# launcher's: this script keeps the one it was handed (CIGO_ENGINE_KEY) and
+# never makes one, so each launcher need only agree with itself.
+
+stick ENGINE_FILE = path.join(CIGO_HOME, "engine")
+stick ENGINE_KEEPS = 8
+stick ENGINE_CIG = ">=1.25.0"
+
+pull engine_cig_has_vm() {
+  snuff cig_pin_ok(ENGINE_CIG, cig.version()) == true
+}
+
+# The engine file's lines, newest first; none when it is not there.
+pull engine_lines() {
+  if not fs.is_file(ENGINE_FILE) {
+    snuff []
+  }
+  roll body = ""
+  try {
+    body = fs.read_text(ENGINE_FILE)
+  } ashtray unread {
+    snuff []
+  }
+  snuff body.replace("\r\n", "\n").split("\n").filter(pack(l) => l != "")
+}
+
+# Write the file as `lines`, when that is not what it says already.
+pull engine_write(lines) {
+  stick kept = lines.slice(0, math.min(lines.len(), ENGINE_KEEPS))
+  if kept == engine_lines() {
+    snuff true
+  }
+  snuff write_outside(ENGINE_FILE, kept.map(pack(l) => l + "\n").join(""))
+}
+
+# Where this call's cig keeps its state and its keys: a module is kept
+# there, and found there only.
+pull engine_place() {
+  snuff {home: env.get("CIGSCRIPT_HOME", path.join(fs.home(), ".cigscript")), keys: env.get("CIG_KEYS_DIR", "")}
+}
+
+# What cig's record of this very run says of its engine: {engine: "vm",
+# module: "cached" | "lowered"}, {engine: "tree"}, or {engine: "tree",
+# asked: "vm", why}. Null where there is no record to read (a dry run keeps
+# none).
+pull engine_of_this_run() {
+  stick id = str(cig.run_id() ?? "")
+  if id == "" {
+    snuff null
+  }
+  stick record = path.join(engine_place().home, "runs", id, "run.json")
+  if not fs.is_file(record) {
+    snuff null
+  }
+  try {
+    stick ran = json.parse(fs.read_text(record)).get("engine", null)
+    if type_of(ran) == "map" {
+      snuff ran
+    }
+  } ashtray unread {
+  }
+  snuff null
+}
+
+# The launcher asked cig for the VM because the file says a module is kept
+# for this call's key. Where cig did not load one after all (the module is
+# gone from the tin, or cannot be read: this call lowered the script, or ran
+# on the tree-walker), the line goes, so the calls after this one ask for
+# nothing and none of them lowers. `cigo config engine auto`, or the next
+# install, lowers again and looks again.
+pull engine_held_to_its_word() {
+  if env.get("CIGO_ENGINE_ASKED", "") != "vm" {
+    snuff
+  }
+  stick ran = engine_of_this_run()
+  if ran == null or (str(ran.get("engine", "")) == "vm" and str(ran.get("module", "")) == "cached") {
+    snuff
+  }
+  stick key = env.get("CIGO_ENGINE_KEY", "")
+  if key != "" {
+    engine_write(engine_lines().filter(pack(l) => l != "vm|" + key))
+  }
+}
+
+# One sentence for what engine_of_this_run() found.
+pull engine_said(ran) {
+  if ran == null {
+    snuff "which engine is running cigo cannot be read here: cig kept no record of this run"
+  }
+  if str(ran.get("engine", "")) == "vm" {
+    snuff pick(str(ran.get("module", "")) == "cached", "cigo is running on cig's VM, from the module kept in cig's tin", "cigo is running on cig's VM, and its script was lowered on this call")
+  }
+  if ran.get("asked", null) != null {
+    snuff "cigo is running on cig's tree-walker: cig was asked for the VM and ${clip(str(ran.get("why", "gave no reason")), 200)}"
+  }
+  snuff "cigo is running on cig's tree-walker"
+}
+
+# `cigo __engine [--json]`: which engine is running this call. It writes
+# nothing; `cigo __lower` starts it on the VM to see what cig does.
+pull do_engine() {
+  expect_flags(["--json"])
+  expect_no_targets()
+  stick ran = engine_of_this_run()
+  if not flags.contains("--json") {
+    exhale engine_said(ran)
+    snuff
+  }
+  stick seen = ran ?? {}
+  stick place = engine_place()
+  stick key = env.get("CIGO_ENGINE_KEY", "")
+  exhale json.stringify({engine: seen.get("engine", null), module: seen.get("module", null), asked: seen.get("asked", null), why: seen.get("why", null), cig: cig.version(), setting: str(config().engine), key: pick(key == "", null, key), home: place.home, keys: place.keys})
+}
+
+# cigo's script started once on the VM by the cig on PATH, the way the
+# launcher starts it: what that run said of itself, or {failed: why}.
+pull engine_probe(tool) {
+  roll r = null
+  roll failed = null
+  burn {
+    try {
+      r = proc.run("cig", ["run", "--engine", "vm", tool, "--", "__engine", "--json"], {reads: true, timeout_ms: 120000})
+    } ashtray stopped {
+      failed = clip(str(stopped.get("message", stopped)), 200)
+    }
+  }
+  if failed != null {
+    snuff {failed: "cig could not be started (${failed})"}
+  }
+  if r.get("simulated", false) {
+    snuff {failed: "a dry run lowers nothing"}
+  }
+  if r.code != 0 {
+    snuff {failed: "cig did not run cigo on its VM (exit ${r.code}: ${clip(str(r.get("err", "")).trim(), 200)})"}
+  }
+  try {
+    stick said = json.parse(str(r.out).trim())
+    if type_of(said) == "map" {
+      snuff said
+    }
+  } ashtray unread {
+  }
+  snuff {failed: "the VM run did not answer as `cigo __engine --json` does"}
+}
+
+# Why a probe's answer does not count as a module kept for this call, or
+# null when it does.
+pull engine_refusal(said) {
+  if said.has("failed") {
+    snuff str(said.failed)
+  }
+  if str(said.get("engine", "")) != "vm" {
+    if said.get("why", null) != null {
+      snuff "cig ran cigo on the tree-walker: it ${clip(str(said.why), 200)}"
+    }
+    snuff "cig ran cigo on the tree-walker and gave no reason"
+  }
+  stick place = engine_place()
+  if str(said.get("home", "")) != place.home or str(said.get("keys", "")) != place.keys {
+    snuff "a step of this run gets a cig home of its own here (cig's tin guard), so a module kept from inside it is not one a later call would find"
+  }
+  snuff null
+}
+
+# The step: with `setting` as the `engine` setting, see to it that the
+# launcher's file says what is true for this call's key, lowering cigo's
+# script if that is what it takes. {engine, kept, lowered, reason}: the
+# engine the launcher will ask for from the next call, whether a module is
+# kept and named in the file, whether this call was the one that lowered,
+# and for the tree-walker the reason, as a clause.
+pull engine_lower(setting) {
+  stick unwritten = "${tilde(ENGINE_FILE)} could not be written, so cigo's launcher still reads what it said before"
+  if setting == "tree" {
+    if not engine_write(["tree"]) {
+      snuff {engine: "tree", kept: false, lowered: false, reason: unwritten}
+    }
+    snuff {engine: "tree", kept: false, lowered: false, reason: "`engine` is set to `tree` (`cigo config engine auto` asks for cig's VM again)"}
+  }
+  # Not `tree`: a `tree` line an earlier setting left goes.
+  stick lines = engine_lines().filter(pack(l) => l != "tree")
+  if not engine_cig_has_vm() {
+    if not engine_write(lines.filter(pack(l) => not l.starts_with("vm|"))) {
+      snuff {engine: "tree", kept: false, lowered: false, reason: unwritten}
+    }
+    snuff {engine: "tree", kept: false, lowered: false, reason: "cig ${cig.version()} runs scripts on its tree-walker only; cig 1.25.0 has the VM"}
+  }
+  stick key = env.get("CIGO_ENGINE_KEY", "")
+  stick tool = env.get("CIGO_TOOL", "")
+  if key == "" or tool == "" {
+    if not engine_write(lines) {
+      snuff {engine: "tree", kept: false, lowered: false, reason: unwritten}
+    }
+    snuff {engine: "tree", kept: false, lowered: false, reason: "cigo's launcher handed it no key for this call: cigo was started without its launcher, or the launcher could not read the size and time of cig or of cigo's script"}
+  }
+  stick mine = "vm|" + key
+  stick others = lines.filter(pack(l) => l != mine)
+  # Twice: the first run is the one that lowers, when nothing is kept yet;
+  # the second must find the module, or cig could not keep it and every
+  # call would lower again.
+  stick first = engine_probe(tool)
+  roll why = engine_refusal(first)
+  stick lowered = why == null and str(first.get("module", "")) == "lowered"
+  if why == null {
+    stick second = engine_probe(tool)
+    why = engine_refusal(second)
+    if why == null and str(second.get("module", "")) != "cached" {
+      why = "cig lowered cigo's script and did not keep the module (`cig doctor` says why)"
+    }
+  }
+  if why != null {
+    if not engine_write(others) {
+      why = why + "; and " + unwritten
+    }
+    snuff {engine: "tree", kept: false, lowered: lowered, reason: why}
+  }
+  if not engine_write([mine] + others) {
+    snuff {engine: "tree", kept: false, lowered: lowered, reason: unwritten}
+  }
+  snuff {engine: "vm", kept: true, lowered: lowered, reason: null}
+}
+
+pull engine_lowered_line(o) {
+  if o.engine == "vm" {
+    snuff "cigo runs on cig's VM from its next call: its module is kept in cig's tin"
+  }
+  snuff "cigo runs on cig's tree-walker: ${o.reason}"
+}
+
+# `cigo __lower [--json]`: the step, as the installer and `cigo update` run
+# it. Every outcome is exit 0, so an installer never fails on it; with
+# --json the answer is one document.
+pull do_engine_lower() {
+  expect_flags(["--json"])
+  expect_no_targets()
+  stick o = engine_lower(str(config().engine))
+  if flags.contains("--json") {
+    exhale json.stringify({tool: "cigo", version: VERSION, cig: cig.version(), engine: o.engine, kept: o.kept, lowered: o.lowered, reason: o.reason})
+    snuff
+  }
+  exhale engine_lowered_line(o)
+}
+
+# After an update: the cigo on PATH is the new one, and its own launcher is
+# what makes the key, so the step is its to run. It runs from a folder of
+# its own: the VM runs it starts are runs inside a run inside this one, and
+# cig lets a run share a pack with the run that started it, not with one
+# further out. No cigo on PATH is not an error, and neither is a cigo from
+# before the step.
+pull engine_lower_after_update() {
+  stick found = which("cigo")
+  stick apart = path.join(CIGO_HOME, "lower")
+  if found == null or not write_outside(path.join(apart, ".keep"), "") {
+    snuff
+  }
+  roll r = null
+  burn {
+    try {
+      r = proc.run(found, ["__lower"], {cwd: apart, reads: true, timeout_ms: 300000})
+    } ashtray stopped {
+      r = null
+    }
+  }
+  if r != null and r.code == 0 and not r.get("simulated", false) and str(r.out).trim() != "" {
+    exhale str(r.out).trim()
+  }
+}
+
+# The finding `engine` of `cigo __doctor`: which engine ran this call, where
+# its module came from, and for the tree-walker why.
+pull doctor_engine() {
+  stick ran = engine_of_this_run()
+  stick found = engine_said(ran)
+  if ran == null {
+    snuff [doctor_finding("engine", "note", found, "a dry run keeps no record, and nothing else says which engine ran", null)]
+  }
+  if str(ran.get("engine", "")) == "vm" {
+    snuff [doctor_finding("engine", pick(str(ran.get("module", "")) == "cached", "ok", "note"), found, "cig ${cig.version()} lowers a script once and keeps the module; cigo's launcher asks for the VM while one is kept for this cig and this cigo", pick(str(ran.get("module", "")) == "cached", null, "cigo config engine auto"))]
+  }
+  if ran.get("asked", null) != null {
+    snuff [doctor_finding("engine", "note", found, "cig runs on the tree-walker whatever it cannot run on the VM", null)]
+  }
+  if str(config().engine) == "tree" {
+    snuff [doctor_finding("engine", "ok", found, "`engine` is set to `tree`", null)]
+  }
+  if not engine_cig_has_vm() {
+    snuff [doctor_finding("engine", "note", found, "cig ${cig.version()} runs scripts on its tree-walker only; on cig 1.25.0 cigo starts in about a third of the time", "ciginstaller update")]
+  }
+  if env.get("CIG_ENGINE", "") != "" {
+    snuff [doctor_finding("engine", "ok", found, "CIG_ENGINE is set to `${clip(env.get("CIG_ENGINE", ""), 40)}`, and cigo's launcher leaves the choice to it", null)]
+  }
+  snuff [doctor_finding("engine", "note", found, "no module of this cigo is kept for this cig, here; cigo is lowered when it is installed or updated, never on a call", "cigo config engine auto")]
 }
 
 # ----- version, and the commands the installer owns now ------------------------------
@@ -14992,6 +15309,12 @@ pull do_update() {
     fail("`cigo update` has no cigo version to name: updates come by carton. `ciginstaller carton list` shows them, then `ciginstaller update --to <carton>`")
   }
   hand_to_installer("`cigo update`", ["update"] + flags.filter(pack(f) => f == "--check" or f == "--json"))
+  # The installer came back with 0 (hand_to_installer ends the run
+  # otherwise). A ciginstaller that lowers cigo itself has done it; one from
+  # before that has not, and then this is where the lowering is paid (#142).
+  if not flags.contains("--check") and not flags.contains("--json") {
+    engine_lower_after_update()
+  }
 }
 
 # `cigo uninstall` -> `ciginstaller uninstall cigo`. The installer runs
@@ -20565,6 +20888,7 @@ pull project_settings_early() {
 
 pull dispatch() {
   phase("rules")
+  engine_held_to_its_word()
   project_settings_early()
   maybe_crash(command)
   phase("config")
@@ -20582,6 +20906,10 @@ pull dispatch() {
     do_self_doctor()
   } else if command == "__dump-rules" {
     do_dump_rules()
+  } else if command == "__lower" {
+    do_engine_lower()
+  } else if command == "__engine" {
+    do_engine()
   } else if command == "crash" {
     do_crash()
   } else if command == "report" {

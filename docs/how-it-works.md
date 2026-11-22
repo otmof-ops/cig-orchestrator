@@ -169,6 +169,59 @@ accepted only when it is digits and dots; anything else is a
 `CIGO_FLOOR_CACHE=off` turns the cache off for a single run; the
 suite sets it so one test's writes do not land on another's home.
 
+### Which of cig's engines runs cigo
+
+From 1.25.0 cig can run a script on its bytecode VM: the first such run
+lowers the script and keeps the module in cig's tin, and later runs load
+it and read no source. For cigo that is a start in well under half the
+time ([benchmarks](benchmarks.md#on-each-of-cigs-engines)), and a first
+run several times slower than the tree-walker's. The hook runs on every
+command an agent makes, so the rule is that no call of cigo ever pays for
+the lowering.
+
+- **The step.** `cigo __lower` starts cigo twice on the VM (`cig run
+  --engine vm orchestrate.cig -- __engine --json`): the first run lowers,
+  when nothing is kept yet, and the second must say it loaded the kept
+  module, in the same cig home and with the same keys folder. Only then
+  does it put a line `vm|<key>` first in `CIGO_HOME/engine`, a file of at
+  most 8 such lines. ciginstaller runs the step after it installs or
+  updates cig or cigo, `cigo update` runs it once the installer is done,
+  and `cigo config engine auto` runs it at a terminal. It exits 0
+  whatever it finds, and says in one line (or with `--json`, one
+  document) which engine cigo runs on from its next call, and for the
+  tree-walker why.
+- **The key** is the launcher's, made on every call from what decides
+  whether cig will find the module: the cig on PATH and cigo's script
+  (path, size, time, links followed), cig's home, where cig keeps its
+  keys (`CIG_KEYS_DIR`, `XDG_CONFIG_HOME`), and under ciginstaller the
+  carton and the size and time of the shim index, since the cig on PATH
+  is then a shim that stays the same while the build behind it changes.
+  The one `stat` the launcher already ran for its floor cache takes the
+  extra files, and the file is read with the shell's own `read`: no
+  process is started that was not started before. The script never makes
+  a key: it keeps the one it is handed in `CIGO_ENGINE_KEY`, so the sh
+  and the PowerShell launcher need only each agree with itself.
+- **The launcher's rule.** A line for this call's key: `cig run --engine
+  vm`, and a `--no-check` on the line is left out (the installed agent
+  hook passes it; cig runs the tree-walker under it, and a kept module
+  was checked when it was lowered). A first line `tree`, or
+  `CIGO_ENGINE=tree`: `--engine tree`. `CIGO_ENGINE=auto` sets a kept
+  `tree` aside. A `CIG_ENGINE` already in the environment, or a cig
+  before 1.25.0: nothing is added. The choice is a flag and not a
+  variable, so nothing cigo starts is handed it.
+- **So a call with another key runs as it always has:** after an update
+  of cig or of cigo, under cig's tin guard or in its box (another home,
+  no keys), in a project pinned to another carton. The tree-walker is
+  never slower than it was; the VM comes back when the step has run.
+- **Held to its word.** A call the launcher started on the VM reads cig's
+  record of itself (`runs/<id>/run.json`, its `engine`), and where cig did
+  not load a kept module after all (the tin was cleared, the key went),
+  it takes its line out of the file: that one call lowered, and none
+  after it does. `cigo doctor` shows the engine and what to type.
+- **The way out** is the setting `engine` (`auto` or `tree`, this
+  machine's): `cigo config engine tree` writes it and the file's one line
+  `tree`. `cigo __engine` says which engine is running the call.
+
 ### Rules as data (#117 W8)
 
 The three tables the hook reads are written out beside the tool in

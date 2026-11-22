@@ -79,55 +79,80 @@ The script's clock is whole milliseconds, so a phase is good to about a millisec
 
 ## On each of cig's engines
 
-cig can run a script on its bytecode VM instead of its tree-walker: `cig run --engine vm`,
-`CIG_ENGINE=vm`, or `cig config engine vm` (cig-script#254, in the release after 1.24.0).
-The tree-walker is still cig's default. On the VM cig lowers the script to bytecode once
-and keeps the module in its tin; a later run loads it. cigo is one script of 20,664 lines,
-which the tree-walker parses and checks at every start, so the engine shows in every call.
+From 1.25.0 cig can run a script on its bytecode VM instead of its tree-walker. On the
+VM cig lowers the script to bytecode once and keeps the module in its tin; a later run
+loads it. cigo is one script of over 20,000 lines, which the tree-walker parses and
+checks at every start, so the engine shows in every call. cigo's launcher asks cig for
+the VM where a module of cigo is kept, which `cigo __lower` sees to when cigo is
+installed or updated; lowering never falls on a call
+([how it works](how-it-works.md#which-of-cigs-engines-runs-cigo)).
 
-`bench/engines.toml` runs seven cases of `bench.toml` on each engine, a pair at a time. It
-keeps one home for the whole run (`home = "shared"`), because the module is kept in the
-home. Point the homes at a scratch folder, never at your own:
+`bench/engines.toml` runs nine cases on each engine, a pair at a time: seven of
+`bench.toml`'s, and the agent hook twice more as an agent's settings start it, with
+`--no-check`. The VM side is cigo as its launcher runs it; the tree-walker side sets
+`CIGO_ENGINE=tree`. The manifest keeps one home for the whole run (`home = "shared"`),
+because the module is kept in the home, and cigo is lowered into it first. Point the
+homes at a scratch folder, never at your own:
 
 ```
-d=$(mktemp -d) && HOME=$d CIGSCRIPT_HOME=$d/cig CIGO_HOME=$d/cigo cig bench bench/engines.toml
+d=$(mktemp -d) && export HOME=$d CIGSCRIPT_HOME=$d/cig CIGO_HOME=$d/cigo
+bin/cigo __lower && cig bench bench/engines.toml
 ```
 
-As measured on 2026-11-22 on a development machine, with cig built from cig-script at
-`6188571` (it gives its version as 1.24.0) and cigo at `0d6c934`: 21 samples of 5
-runs for each case, as `cig bench --markdown` printed them (a `~` marks a case whose
-samples vary by more than 5%). The samples are in `bench/engines-2026-11-22.json`.
+As measured on 2026-11-23 on a development machine, with cig 1.25.0 as released (the
+static Linux x86_64 asset, held to its release's sha256) and cigo as of
+cig-orchestrator#142: 21 samples of 5 runs for each case, as `cig bench --markdown`
+printed them (a `~` marks a case whose samples vary by more than 5%). The samples are
+in `bench/engines-2026-11-23.json`.
 
 | case | group | median ms | p10 to p90 ms | CV | RSS MB |
 |---|---|---:|---|---:|---:|
-| `version: tree-walker` | tree | 58.2 | 54.5 to 60.6 | 3.9% | 47.0 |
-| `version: vm` | vm | 13.8~ | 13.2 to 15.2 | 6.4% | 18.4 |
-| `help: tree-walker` | tree | 56.8 | 56.0 to 60.9 | 3.2% | 47.0 |
-| `help: vm` | vm | 14.4 | 13.7 to 15.2 | 3.9% | 18.6 |
-| `list, 52 tasks: tree-walker` | tree | 59.4 | 57.4 to 60.9 | 2.6% | 47.0 |
-| `list, 52 tasks: vm` | vm | 15.8 | 15.2 to 17.4 | 4.9% | 19.1 |
-| `audit, one task: tree-walker` | tree | 70.3 | 68.2 to 72.3 | 2.7% | 47.0 |
-| `audit, one task: vm` | vm | 28.4 | 27.7 to 29.2 | 2.1% | 21.5 |
-| `hook, benign command: tree-walker` | tree | 59.9 | 57.5 to 62.0 | 2.9% | 47.0 |
-| `hook, benign command: vm` | vm | 15.9 | 15.5 to 16.9 | 3.4% | 19.1 |
-| `hook, curl piped to sh: tree-walker` | tree | 65.4 | 63.1 to 67.2 | 2.6% | 47.1 |
-| `hook, curl piped to sh: vm` | vm | 21.2 | 20.5 to 22.5 | 4.3% | 21.2 |
-| `guard line check, benign: tree-walker` | tree | 61.5 | 59.4 to 62.2 | 2.8% | 47.0 |
-| `guard line check, benign: vm` | vm | 16.3 | 15.7 to 17.2 | 3.8% | 19.1 |
+| `version: tree-walker` | tree | 40.7 | 40.0 to 41.1 | 1.2% | 57.1 |
+| `version: vm` | vm | 14.2 | 13.5 to 14.8 | 4.4% | 39.1 |
+| `help: tree-walker` | tree | 40.5 | 40.3 to 41.2 | 1.2% | 57.1 |
+| `help: vm` | vm | 14.5~ | 13.5 to 15.6 | 5.6% | 34.8 |
+| `list, 52 tasks: tree-walker` | tree | 42.7 | 42.0 to 43.5 | 1.8% | 57.3 |
+| `list, 52 tasks: vm` | vm | 16.7 | 16.0 to 17.6 | 4.2% | 37.2 |
+| `audit, one task: tree-walker` | tree | 53.8 | 53.5 to 55.1 | 1.3% | 60.2 |
+| `audit, one task: vm` | vm | 27.7 | 26.5 to 28.7 | 3.0% | 42.7 |
+| `hook, benign command: tree-walker` | tree | 42.5 | 42.0 to 43.4 | 1.8% | 57.8 |
+| `hook, benign command: vm` | vm | 16.6 | 16.0 to 17.6 | 3.8% | 37.7 |
+| `hook, curl piped to sh: tree-walker` | tree | 49.9 | 49.4 to 51.0 | 2.0% | 58.2 |
+| `hook, curl piped to sh: vm` | vm | 22.3 | 21.6 to 23.5 | 3.1% | 40.3 |
+| `hook as installed, benign command: tree-walker` | tree | 35.4 | 35.1 to 35.9 | 1.2% | 57.8 |
+| `hook as installed, benign command: vm` | vm | 16.9~ | 16.6 to 18.5 | 5.1% | 37.7 |
+| `hook as installed, curl piped to sh: tree-walker` | tree | 42.7 | 41.3 to 43.5 | 2.1% | 58.2 |
+| `hook as installed, curl piped to sh: vm` | vm | 22.6 | 22.0 to 23.9 | 3.3% | 40.3 |
+| `guard line check, benign: tree-walker` | tree | 43.7 | 43.4 to 44.1 | 1.2% | 57.8 |
+| `guard line check, benign: vm` | vm | 17.9~ | 17.4 to 18.7 | 5.5% | 46.2 |
 
-- **On the VM a call takes between 0.24 and 0.40 of the tree-walker's time** on these
-  cases, and less than half the memory.
-- **These are second and later calls.** The first call after cigo or cig is updated
-  lowers the script, once. cig-script measured that on `orchestrate.cig` run with no
-  arguments: 392.8 ms against the tree-walker's 53.4
-  ([its first-runs document](https://github.com/otmof-ops/cig-script/blob/main/docs/ENGINES-FIRST-RUNS-2026-11-22.md)).
-- **The same answers.** `tests/run.cig` gives the same verdict on every one of its 346
-  tests on either engine.
+- **On the VM a call takes between 0.35 and 0.53 of the tree-walker's time** on these
+  cases (`version` the least, the hook as installed on a `curl` piped to `sh` the most),
+  and between 0.61 and 0.80 of the memory.
+- **The agent hook, as installed, goes from 35.4 ms to 16.9** on a benign command, 0.48
+  of the time. It passes `--no-check`, which spares the tree-walker its check; on the VM
+  the launcher leaves the flag out, since a kept module was checked when it was lowered
+  and cig reads no source on such a run.
+- **These are second and later calls, and the first is not a call at all.** Lowering
+  cigo's script took 310.0 ms where a start on the tree-walker took 36.3 (the median of
+  11 runs of `cig run --engine vm orchestrate.cig -- --version`, each in a home with
+  nothing kept, against the same on the tree-walker; the runs are in
+  `bench/engines-first-run-2026-11-23.json`). `cigo __lower` pays it: the
+  installer runs that after it installs or updates cig or cigo, `cigo update` runs it,
+  and `cigo config engine auto` runs it at a terminal. Until it has run, every call is
+  on the tree-walker, as before.
+- **The same answers.** CI runs the whole of `tests/run.cig` a second time with cig's
+  VM as the engine (`ci (on cig's VM)`).
 - **Not the baseline's machine.** `bench/baseline-2026-11-13.json` was measured on the
-  test machine with cig as released, before the VM. These numbers are from another
-  machine and compare one cig with itself; the comparison with that baseline waits for a
-  run there.
-- A cig from before `cig run --engine` ignores `CIG_ENGINE`: both sides are then the
+  test machine with cig 1.21.0, before the VM. The numbers here are from another
+  machine and compare one cig with itself; the comparison with that baseline waits for
+  a run there.
+- **An earlier measurement.** `bench/engines-2026-11-22.json` is the same seven cases
+  on a development build of cig from before the release, with the engine chosen by
+  `CIG_ENGINE`: the tree-walker took 58.2 ms for `version` there and the VM 13.8. The
+  released cig's tree-walker is faster than that build's, so the ratios above are the
+  ones a person gets.
+- With a cig from before 1.25.0 the launcher asks for nothing: both sides are then the
   tree-walker.
 
 ## CI
