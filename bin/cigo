@@ -65,21 +65,69 @@ floor_cache_on=1
 case "${CIGO_FLOOR_CACHE:-on}" in
   off|0|no|false) floor_cache_on=0 ;;
 esac
+# One stat for every file the launcher wants the size and time of: the cig
+# it found (the floor cache keys on it) and, for the engine choice below,
+# the tool file and ciginstaller's shim index where there is one. Each line
+# of the answer ends with its file's own name, so a file that cannot be
+# read leaves the others' lines readable. Links are followed (-L): cig
+# reads the file a link names, so that file's size and time are the ones
+# that say whether it changed.
+shim_index=${CIGSCRIPT_HOME:-${HOME:-}/.cigscript}/installer/shim-index
+[ -f "$shim_index" ] || shim_index=""
 stat_line=""
 stat_size=""
 stat_mtime=""
+tool_size=""
+tool_mtime=""
+index_size=""
+index_mtime=""
 if [ -n "$cig_real" ]; then
-  stat_line=$(stat -c '%s %Y' -- "$cig_real" 2>/dev/null)
-  if [ -z "$stat_line" ]; then
-    stat_line=$(stat -f '%z %m' -- "$cig_real" 2>/dev/null)
+  if [ -n "$shim_index" ]; then
+    stat_out=$(stat -L -c '%s %Y %n' -- "$cig_real" "$tool" "$shim_index" 2>/dev/null)
+    if [ -z "$stat_out" ]; then
+      stat_out=$(stat -L -f '%z %m %N' -- "$cig_real" "$tool" "$shim_index" 2>/dev/null)
+    fi
+  else
+    stat_out=$(stat -L -c '%s %Y %n' -- "$cig_real" "$tool" 2>/dev/null)
+    if [ -z "$stat_out" ]; then
+      stat_out=$(stat -L -f '%z %m %N' -- "$cig_real" "$tool" 2>/dev/null)
+    fi
   fi
-  case "$stat_line" in
-    [0-9]*' '[0-9]*)
-      stat_size=${stat_line% *}
-      stat_mtime=${stat_line##* } ;;
-    *)
-      stat_line="" ;;
-  esac
+  nl='
+'
+  while [ -n "$stat_out" ]; do
+    stat_one=${stat_out%%"$nl"*}
+    case "$stat_out" in
+      *"$nl"*) stat_out=${stat_out#*"$nl"} ;;
+      *) stat_out="" ;;
+    esac
+    case "$stat_one" in
+      [0-9]*' '[0-9]*' '*)
+        one_size=${stat_one%% *}
+        stat_rest=${stat_one#* }
+        one_mtime=${stat_rest%% *}
+        one_name=${stat_rest#* }
+        case "$one_size$one_mtime" in
+          *[!0-9]*) ;;
+          *)
+            if [ "$one_name" = "$cig_real" ]; then
+              stat_size=$one_size
+              stat_mtime=$one_mtime
+            fi
+            if [ "$one_name" = "$tool" ]; then
+              tool_size=$one_size
+              tool_mtime=$one_mtime
+            fi
+            if [ -n "$shim_index" ] && [ "$one_name" = "$shim_index" ]; then
+              index_size=$one_size
+              index_mtime=$one_mtime
+            fi ;;
+        esac ;;
+    esac
+  done
+  if [ -n "$stat_size" ] && [ -n "$stat_mtime" ]; then
+    stat_line="$stat_size $stat_mtime"
+  fi
 fi
 cigo_home=${CIGO_HOME:-$HOME/.cig-orchestrator}
 cig_floor_cache=$cigo_home/cig-floor
@@ -137,6 +185,75 @@ case "$version" in
     exit 2 ;;
 esac
 
+# The engine (#142). From 1.25.0 cig can run cigo on its bytecode VM, from a
+# module of the script that it keeps in its tin; cigo then starts in about
+# a third of the time. Lowering the script takes several times a normal
+# start, so this launcher asks for the VM only where a module is already
+# kept: `cigo __lower` (the installer and `cigo update` run it) lowers the
+# script and leaves a line `vm|<key>` in CIGO_HOME/engine, and a call whose
+# own key is not in that file asks for nothing and runs as it always has.
+#
+# The key is what decides whether cig will find the module, as this launcher
+# sees it on every call: the cig on PATH and the tool file (path, size,
+# time), cig's home and where it keeps its keys (CIG_KEYS_DIR, else beside
+# its home or under XDG_CONFIG_HOME), and under ciginstaller the carton and
+# the shim index, since the cig on PATH is then a shim that stays the same
+# while the build behind it changes. So after an update of either, under
+# cig's tin guard or in its box (another home, no keys), or with another
+# home, the key differs and cigo runs on the tree-walker until it is
+# lowered again. The script never makes a key: it keeps the one it is
+# handed in CIGO_ENGINE_KEY.
+#
+# The choice goes to cig as a flag, not as CIG_ENGINE: a variable would
+# reach everything cigo starts, a task's own `cig run` included.
+# - CIG_ENGINE already set: the caller chose, and nothing is added.
+# - `engine = tree`: the file's first line is `tree` (`cigo config engine
+#   tree` writes it), or CIGO_ENGINE=tree; cig is told --engine tree.
+#   CIGO_ENGINE=auto sets a `tree` line aside, as the later layer.
+# - A cig before 1.25.0 is handed nothing.
+# With the VM asked for, `--no-check` is left out: a kept module was checked
+# when it was lowered, cig reads no source to check on such a run, and with
+# the flag cig would run the tree-walker, which is the one that can run a
+# script unchecked. The installed agent hook passes `--no-check`.
+unset CIGO_ENGINE_KEY CIGO_ENGINE_ASKED
+engine=""
+engine_cig=0
+if [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 25 ]; }; then
+  engine_cig=1
+fi
+if [ "$engine_cig" -eq 1 ]; then
+  if [ -n "$stat_line" ] && [ -n "$tool_size" ] && [ -n "$tool_mtime" ]; then
+    CIGO_ENGINE_KEY="$cig_real|$stat_size|$stat_mtime|$tool|$tool_size|$tool_mtime|${CIGSCRIPT_HOME:-${HOME:-}/.cigscript}|${CIG_KEYS_DIR:-}|${XDG_CONFIG_HOME:-}|${CIGI_CARTON:-}|$index_size|$index_mtime"
+    export CIGO_ENGINE_KEY
+  fi
+  if [ -z "${CIG_ENGINE:-}" ]; then
+    if [ "${CIGO_ENGINE:-}" = tree ]; then
+      engine="--engine tree"
+    elif [ -f "$cigo_home/engine" ] && [ -r "$cigo_home/engine" ]; then
+      engine_n=0
+      while IFS= read -r engine_line || [ -n "$engine_line" ]; do
+        engine_n=$((engine_n + 1))
+        if [ "$engine_line" = tree ]; then
+          if [ "$engine_n" -eq 1 ] && [ "${CIGO_ENGINE:-}" != auto ]; then
+            engine="--engine tree"
+            break
+          fi
+        elif [ -n "${CIGO_ENGINE_KEY:-}" ] && [ "$engine_line" = "vm|$CIGO_ENGINE_KEY" ]; then
+          # The script is told, so that it can see whether cig did load
+          # the module, and take the line out if it did not.
+          engine="--engine vm"
+          CIGO_ENGINE_ASKED=vm
+          export CIGO_ENGINE_ASKED
+          break
+        fi
+        if [ "$engine_n" -ge 8 ]; then
+          break
+        fi
+      done < "$cigo_home/engine"
+    fi
+  fi
+fi
+
 # Under Git Bash and MSYS2, arguments that look like POSIX paths (/prod) are
 # rewritten for native programs; a task argument is handed over as typed.
 # cig is a native program too, so the one path this launcher hands it, the
@@ -151,7 +268,10 @@ global=""
 run=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dry-run|--no-check|--no-rollback) run="$run $1"; shift ;;
+    --dry-run|--no-rollback) run="$run $1"; shift ;;
+    --no-check)
+      if [ "$engine" != "--engine vm" ]; then run="$run $1"; fi
+      shift ;;
     --max-steps=*)
       case "${1#--max-steps=}" in
         ''|*[!0-9]*) echo "cigo: --max-steps needs a number (--max-steps N or --max-steps=N)" >&2; exit 2 ;;
@@ -181,7 +301,7 @@ in_home() {
 }
 
 case "${1:-help}" in
-  adopt|help|version|toolchains|update|uninstall|doctor|crash|config|blacklist|quarantine|guard|undo|run-url|agent|approve|__dump-rules|--help|-h|--version)
+  adopt|help|version|toolchains|update|uninstall|doctor|crash|config|blacklist|quarantine|guard|undo|run-url|agent|approve|__dump-rules|__lower|__engine|--help|-h|--version)
     # From the home folder itself (or /), cig would take all of it as the
     # run's pack and watch every file in it around each step: these run
     # from an empty folder of cigo's instead, and the commands that work
@@ -208,18 +328,21 @@ case "${1:-help}" in
     if [ -f "$dir/cig-tasks.json" ] && [ "$dir" != "$PWD" ]; then
       cd "$dir" || exit 1
     fi
-    # The installer asks for `__doctor` from wherever it was run, a home
-    # folder included: with no project above, it runs from cigo's own empty
-    # folder like the commands above.
-    if [ ! -f "$dir/cig-tasks.json" ] && [ "${1:-}" = __doctor ]; then
-      if in_home && [ -n "${HOME:-}" ]; then
-        here="${CIGO_HOME:-$HOME/.cig-orchestrator}/here"
-        if mkdir -p "$here" 2>/dev/null; then
-          CIGO_CALLER_DIR=$PWD
-          export CIGO_CALLER_DIR
-          cd "$here" || exit 1
-        fi
-      fi
+    # The installer asks for `__doctor`, `__lower` or `__engine` from
+    # wherever it was run, a home folder included: with no project above,
+    # these run from cigo's own empty folder like the commands above.
+    if [ ! -f "$dir/cig-tasks.json" ]; then
+      case "${1:-}" in
+        __doctor|__lower|__engine)
+          if in_home && [ -n "${HOME:-}" ]; then
+            here="${CIGO_HOME:-$HOME/.cig-orchestrator}/here"
+            if mkdir -p "$here" 2>/dev/null; then
+              CIGO_CALLER_DIR=$PWD
+              export CIGO_CALLER_DIR
+              cd "$here" || exit 1
+            fi
+          fi ;;
+      esac
     fi
     ;;
 esac
@@ -244,7 +367,7 @@ if [ -n "$t0" ]; then
     unset CIG_TIMINGS_FD
     # Not exec: the time after the script ends is the last phase, `exit`.
     # shellcheck disable=SC2086
-    cig $global run $run "$tool" -- "$@"
+    cig $global run $engine $run "$tool" -- "$@"
     rc=$?
     t2=$(date +%s%N)
     end_ms=$(cat -- "$CIGO_TIMINGS_END" 2>/dev/null)
@@ -263,4 +386,4 @@ fi
 
 # The flag lists are single words, split on purpose.
 # shellcheck disable=SC2086
-exec cig $global run $run "$tool" -- "$@"
+exec cig $global run $engine $run "$tool" -- "$@"

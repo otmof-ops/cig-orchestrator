@@ -21,6 +21,44 @@ repository root lists versions it must not pick.
   the suite gives the same verdict on every test on either engine. The
   tree-walker is still cig's default, and nothing in cigo changes which
   engine runs it.
+- **cigo runs on cig's bytecode VM, where cig has one (#142).** From
+  1.25.0 cig can run a script from a module it lowers once and keeps in its
+  tin, and cigo, which the tree-walker reads and checks whole at every
+  start, takes between 0.35 and 0.53 of the tree-walker's time on it
+  (`docs/benchmarks.md`: `cigo --version` 40.7 ms to 14.2, the agent hook as
+  installed 35.4 ms to 16.9). What cigo decides is the same on either engine: CI
+  runs the whole suite a second time on the VM.
+  - **Lowering is paid when cigo is installed, never on a call.** It takes
+    several times a normal start, and the hook runs on every command an
+    agent makes. `cigo __lower` lowers the script, sees cig keep the
+    module, and notes the pair in `CIGO_HOME/engine`; ciginstaller runs it
+    after it installs or updates cig or cigo, `cigo update` runs it, and
+    `cigo config engine auto` runs it at a terminal. The launcher asks cig
+    for the VM only for a pair noted there. It tells one pair from another
+    by what it sees on every call, with the one `stat` it already ran: the
+    cig on PATH and cigo's script (path, size, time), cig's home and where
+    it keeps its keys, and under ciginstaller the carton and the shim
+    index. After an update of either, in cig's box or under its tin guard,
+    or with another cig home, cigo runs on the tree-walker as before until
+    it is lowered again.
+  - **Where cig no longer finds the module** (the tin was cleared, say),
+    the one call that finds out lowers, takes the pair out of the file, and
+    every call after it is on the tree-walker again until the step runs.
+  - **The agent hook gains too.** It passes `--no-check`, under which cig
+    runs the tree-walker; with the VM the launcher leaves the flag out,
+    since a kept module was checked when it was lowered.
+  - **Nothing cigo starts is handed the choice.** The launcher passes cig
+    `--engine`, not `CIG_ENGINE`, so a task's own `cig run` is on cig's
+    default as before.
+  - **A way out.** `cigo config engine tree` (a new setting of this
+    machine's, `engine`: `auto` or `tree`), `CIGO_ENGINE=tree` for one
+    call, or a `CIG_ENGINE` of your own, which the launcher leaves to
+    decide. A cig before 1.25.0 is handed nothing.
+  - `cigo doctor` has a finding `engine`: which engine ran, where its
+    module came from, and for the tree-walker why and what to type.
+  - `bench/engines.toml` measures cigo as its launcher runs it, with the
+    hook as installed among its cases; `bench/engines-2026-11-23.json` is
+    the run on cig 1.25.0 as released.
 
 ### Changed
 

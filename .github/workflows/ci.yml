@@ -151,6 +151,68 @@ jobs:
           path: test-timings.json
           if-no-files-found: warn
 
+  # The same checks and the same suite with cig's bytecode VM as the engine (#142), on
+  # the first cig that has one: the jobs above run cigo's floor, which has only the
+  # tree-walker. Everything the suite starts runs on the VM here, lowered once into the
+  # suite's own cig home, and the tests of the launcher's own choice, which need a cig
+  # with a VM, run here for real.
+  ci-vm:
+    name: ci (on cig's VM)
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CIG_VM_VERSION: v1.25.0
+      CIG_ENGINE: vm
+      CIGO_TEST_TIMINGS: test-timings.json
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Let cig make its box
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Install cig
+        run: |
+          mkdir -p "$HOME/.local/bin" && cd "$RUNNER_TEMP"
+          base="https://github.com/otmof-ops/cig-script/releases/download/$CIG_VM_VERSION"
+          name="cig-$CIG_VM_VERSION-linux-x86_64"
+          curl -fsSLO "$base/$name"
+          curl -fsSLO "$base/$name.sha256"
+          sha256sum -c "$name.sha256"
+          install -m 755 "$name" "$HOME/.local/bin/cig"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install shellcheck where the image lacks it
+        run: command -v shellcheck || sudo apt-get install -y shellcheck
+
+      - name: Versions
+        run: |
+          cig --version
+          shellcheck --version | head -2
+
+      - name: The repository's own checks (cig check, shellcheck, the suite), on the VM
+        run: bin/cigo --no-rollback run ci
+
+      - name: Keep the logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cigo-logs-vm
+          path: .cig-orchestrator/
+          include-hidden-files: true
+
+      - name: Keep the test timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-timings-vm
+          path: test-timings.json
+          if-no-files-found: warn
+
   # cigcompile#8: the same suite against cigo compiled to a native program
   # by cigcompile's own release, onto cig's release of the version it pins.
   # CIGO_TEST_BINARY makes the suite run it wherever it would run
@@ -352,7 +414,7 @@ jobs:
   ci-ok:
     name: ci
     if: always()
-    needs: [changes, ci, native, setup-action, ci-alpine, ci-windows-installers]
+    needs: [changes, ci, ci-vm, native, setup-action, ci-alpine, ci-windows-installers]
     runs-on: ubuntu-latest
     steps:
       - name: every needed job passed or was skipped

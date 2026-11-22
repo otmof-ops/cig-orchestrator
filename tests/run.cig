@@ -1935,11 +1935,18 @@ test("every floor names the cig the tool needs", pack() {
   says(readme, "Needs `cig` " + floor + " or newer")
   says(readme, "needs-cig%20" + floor + "%2B")
   says(fs.read_text(path.join(root, "docs", "getting-started.md")), "the `cig` runtime, " + floor + " or newer")
-  stick pins = text.find_all(fs.read_text(path.join(root, ".github", "workflows", "ci.yml")), 'CIG_VERSION: v[0-9][0-9.]*')
+  stick ci_text = fs.read_text(path.join(root, ".github", "workflows", "ci.yml"))
+  stick pins = text.find_all(ci_text, 'CIG_VERSION: v[0-9][0-9.]*')
   assert(pins.len() > 0, "ci.yml pins no CIG_VERSION")
   for got in pins {
     assert(got == "CIG_VERSION: v" + floor, "ci.yml has " + got + ": CI runs on the floor, " + floor)
   }
+  # One job more runs the suite on cig's bytecode VM (#142), which the floor
+  # does not have: on a cig that has one, 1.25.0 or later.
+  stick vm = text.captures(ci_text, 'CIG_VM_VERSION: v([0-9]+)\.([0-9]+)\.([0-9]+)')
+  assert(vm != null, "ci.yml has no job on cig's VM (CIG_VM_VERSION)")
+  assert(int(vm[1]) > 1 or (int(vm[1]) == 1 and int(vm[2]) >= 25), "the VM job's cig is " + vm[0] + ": cig has a VM from 1.25.0")
+  says(ci_text, "CIG_ENGINE: vm")
 })
 
 # ----- the launcher and the installer, on every shell (0.4.0) -----------------------
@@ -2154,6 +2161,512 @@ test("__doctor through the launcher: the tool and the launcher agree, a checkout
   exits(home_run, 0)
   assert(read(work, "home-run-seen") == "true", "the empty folder was not used: " + home_run.err)
   finding_of(json.parse(home_run.out), "cig-floor")
+})
+
+# ----- which of cig's engines runs cigo (#142) --------------------------------------------
+
+# These tests are about what the launcher chooses when nobody has chosen:
+# whatever the suite itself runs under (CI runs it once with CIG_ENGINE=vm),
+# the cigo of a test starts with no choice made and no key handed down.
+stick ENGINE_UNSAID = {CIG_ENGINE: "", CIGO_ENGINE: "", CIGO_ENGINE_KEY: ""}
+
+# A stand-in cig for the launcher's own rule: `--version` says `cig <version>`,
+# and any other call adds one line to calls.log beside it, its arguments each
+# in [], then the key and the CIG_ENGINE it was handed (`-` for one not set),
+# and does nothing else.
+pull stand_in_cig(name, version) {
+  stick stub = path.join(work, name)
+  burn {
+    fs.mkdir(stub)
+    fs.write_text(path.join(stub, "cig"), [
+      '#!/bin/sh',
+      'if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then',
+      '  echo "cig ' + version + '"',
+      '  exit 0',
+      'fi',
+      '{',
+      '  for a in "$@"; do printf "[%s]" "$a"; done',
+      '  printf " key=%s env=%s\n" "${CIGO_ENGINE_KEY:--}" "${CIG_ENGINE:--}"',
+      '} >> "$(dirname "$0")/calls.log"',
+    ].join("\n") + "\n")
+    stick m = proc.run("chmod", ["755", path.join(stub, "cig")], {timeout_ms: 10000})
+    assert(m.code == 0, m.err)
+  }
+  snuff stub
+}
+
+# A copy of the launcher beside a tool file of its own, so a test can change
+# the tool: the launcher finds its tool one folder up from itself.
+pull launcher_copy(dir, tool_text) {
+  stick top = dir + "-cigo"
+  burn {
+    fs.mkdir(path.join(top, "bin"))
+    fs.write_text(path.join(top, "orchestrate.cig"), tool_text)
+    fs.cp(launcher, path.join(top, "bin", "cigo"))
+    stick m = proc.run("chmod", ["755", path.join(top, "bin", "cigo")], {timeout_ms: 10000})
+    assert(m.code == 0, m.err)
+  }
+  snuff {launcher: path.join(top, "bin", "cigo"), tool: path.join(top, "orchestrate.cig")}
+}
+
+# The launcher run once against the stand-in: what cig was handed, {flag: the
+# engine it was asked for with --engine ("" for none), key, env: the
+# CIG_ENGINE it saw, line}.
+pull handed(dir, l, words, stub, more) {
+  stick r = launch_env(dir, l, words, {PATH: stub + path_sep + env.get("PATH", ""), CIGO_FLOOR_CACHE: "on"}.merge(ENGINE_UNSAID).merge(more))
+  exits(r, 0)
+  stick lines = fs.read_text(path.join(stub, "calls.log")).lines().filter(pack(x) => x != "")
+  stick line = lines.last()
+  stick at_key = line.find(" key=")
+  stick at_env = line.find(" env=")
+  assert(at_key >= 0 and at_env > at_key, "the stand-in's line: " + line)
+  roll flag = ""
+  stick f = text.captures(line, '\[--engine\]\[([a-z]+)\]')
+  if f != null {
+    flag = f[1]
+  }
+  snuff {flag: flag, key: line.slice(at_key + 5, at_env), env: line.slice(at_env + 5), line: line}
+}
+
+test("engine: a line for this call's key asks cig for the VM, as a flag; any other key asks for nothing", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick stub = stand_in_cig(path.base(dir) + "-cig", "1.25.0")
+  stick copy = launcher_copy(dir, "# a tool file\n")
+  stick cig_home = dir + "-cig-home"
+  stick e = {CIGO_HOME: dir + "-cigo-home", CIGSCRIPT_HOME: cig_home}
+  stick file = path.join(e.CIGO_HOME, "engine")
+  burn {
+    fs.mkdir(e.CIGO_HOME)
+  }
+  # No file: nothing is added, and cigo is handed its key.
+  stick none = handed(dir, copy.launcher, ["version"], stub, e)
+  assert(none.flag == "" and none.env == "-", none.line)
+  assert(none.key != "-" and none.key.contains(copy.tool) and none.key.contains(path.join(stub, "cig")) and none.key.contains(cig_home), none.line)
+  stick key = none.key
+  # A line for the key: the VM, by flag. The variable is not set, so nothing
+  # cigo starts is handed the choice.
+  burn {
+    fs.write_text(file, "vm|" + key + "\n")
+  }
+  stick vm = handed(dir, copy.launcher, ["version"], stub, e)
+  assert(vm.flag == "vm" and vm.env == "-" and vm.key == key, vm.line)
+  says(vm.line, "[run][--engine][vm]")
+  # With the VM, --no-check is left out (cig would run the tree-walker).
+  stick unchecked = handed(dir, copy.launcher, ["--no-check", "version"], stub, e)
+  assert(unchecked.flag == "vm", unchecked.line)
+  never_says(unchecked.line, "[--no-check]")
+  # The line need not be the first, nor end in a newline; a ninth is not read.
+  burn {
+    fs.write_text(file, "vm|another\nvm|" + key)
+  }
+  assert(handed(dir, copy.launcher, ["version"], stub, e).flag == "vm", "a second line was not read")
+  burn {
+    fs.write_text(file, ["1", "2", "3", "4", "5", "6", "7", "8"].map(pack(n) => "vm|other-" + n).join("\n") + "\nvm|" + key + "\n")
+  }
+  assert(handed(dir, copy.launcher, ["version"], stub, e).flag == "", "a ninth line was read")
+  burn {
+    fs.write_text(file, "vm|" + key + "\n")
+  }
+  # Every part of the key: another cig home, another place for cig's keys, a carton.
+  for other in [{CIGSCRIPT_HOME: cig_home + "-other"}, {CIG_KEYS_DIR: dir + "-keys"}, {XDG_CONFIG_HOME: dir + "-config"}, {CIGI_CARTON: "0.2.0"}] {
+    stick moved = handed(dir, copy.launcher, ["version"], stub, e.merge(other))
+    assert(moved.flag == "" and moved.key != key and moved.key != "-", json.stringify(other) + ": " + moved.line)
+  }
+  # The installer's shim index, once there is one, and again when it is written again.
+  burn {
+    fs.mkdir(path.join(cig_home, "installer"))
+    fs.write_text(path.join(cig_home, "installer", "shim-index"), "one\n")
+  }
+  stick indexed = handed(dir, copy.launcher, ["version"], stub, e)
+  assert(indexed.flag == "" and indexed.key != key, indexed.line)
+  burn {
+    fs.write_text(file, "vm|" + indexed.key + "\n")
+  }
+  assert(handed(dir, copy.launcher, ["version"], stub, e).flag == "vm", "the key with an index did not match itself")
+  burn {
+    fs.write_text(path.join(cig_home, "installer", "shim-index"), "one\ntwo\n")
+  }
+  stick reindexed = handed(dir, copy.launcher, ["version"], stub, e)
+  assert(reindexed.flag == "" and reindexed.key != indexed.key, reindexed.line)
+  burn {
+    fs.write_text(file, "vm|" + reindexed.key + "\n")
+  }
+  # The tool file.
+  burn {
+    fs.write_text(copy.tool, "# a tool file, changed\n")
+  }
+  stick retooled = handed(dir, copy.launcher, ["version"], stub, e)
+  assert(retooled.flag == "" and retooled.key != reindexed.key, retooled.line)
+  burn {
+    fs.write_text(file, "vm|" + retooled.key + "\n")
+  }
+  assert(handed(dir, copy.launcher, ["version"], stub, e).flag == "vm", "the key after a tool change did not match itself")
+  # A tool file that is a link: the file it names is the one read, so a
+  # change there is a change.
+  burn {
+    fs.write_text(copy.tool + ".real", "# the tool a link names\n")
+    stick ln = proc.run("ln", ["-sf", copy.tool + ".real", copy.tool], {timeout_ms: 10000})
+    assert(ln.code == 0, ln.err)
+  }
+  stick linked = handed(dir, copy.launcher, ["version"], stub, e)
+  assert(linked.flag == "" and linked.key != retooled.key, linked.line)
+  burn {
+    fs.write_text(file, "vm|" + linked.key + "\n")
+  }
+  assert(handed(dir, copy.launcher, ["version"], stub, e).flag == "vm", "the key of a linked tool did not match itself")
+  burn {
+    fs.write_text(copy.tool + ".real", "# the tool a link names, changed\n")
+  }
+  stick relinked = handed(dir, copy.launcher, ["version"], stub, e)
+  assert(relinked.flag == "" and relinked.key != linked.key, relinked.line)
+  # The cig.
+  burn {
+    fs.write_text(file, "vm|" + relinked.key + "\n")
+    stick c = path.join(stub, "cig")
+    fs.write_text(c, fs.read_text(c) + "# longer\n")
+    stick m = proc.run("chmod", ["755", c], {timeout_ms: 10000})
+    assert(m.code == 0, m.err)
+  }
+  stick recigged = handed(dir, copy.launcher, ["version"], stub, e)
+  assert(recigged.flag == "" and recigged.key != relinked.key, recigged.line)
+})
+
+test("engine: `tree` first in the file or CIGO_ENGINE=tree asks for the tree-walker, CIGO_ENGINE=auto sets a kept `tree` aside, and a CIG_ENGINE of the caller's is left to decide", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick stub = stand_in_cig(path.base(dir) + "-cig", "1.25.0")
+  stick e = {CIGO_HOME: dir + "-cigo-home", CIGSCRIPT_HOME: dir + "-cig-home"}
+  stick file = path.join(e.CIGO_HOME, "engine")
+  burn {
+    fs.mkdir(e.CIGO_HOME)
+    fs.write_text(file, "tree\n")
+  }
+  stick tree = handed(dir, launcher, ["--no-check", "version"], stub, e)
+  assert(tree.flag == "tree" and tree.env == "-", tree.line)
+  # Without the VM, --no-check stays.
+  says(tree.line, "[--no-check]")
+  stick aside = handed(dir, launcher, ["version"], stub, e.merge({CIGO_ENGINE: "auto"}))
+  assert(aside.flag == "", aside.line)
+  # The caller's CIG_ENGINE: no flag, whatever the file says.
+  stick callers = handed(dir, launcher, ["version"], stub, e.merge({CIG_ENGINE: "vm"}))
+  assert(callers.flag == "" and callers.env == "vm", callers.line)
+  # A kept module and CIGO_ENGINE=tree: the tree-walker. And the caller's
+  # CIG_ENGINE=tree over a kept module: no flag, cig reads the variable.
+  burn {
+    fs.write_text(file, "vm|" + tree.key + "\n")
+  }
+  assert(handed(dir, launcher, ["version"], stub, e).flag == "vm", "the key did not match itself")
+  assert(handed(dir, launcher, ["version"], stub, e.merge({CIGO_ENGINE: "tree"})).flag == "tree", "CIGO_ENGINE=tree over a kept module")
+  stick left = handed(dir, launcher, ["version"], stub, e.merge({CIG_ENGINE: "tree"}))
+  assert(left.flag == "" and left.env == "tree", left.line)
+  # `tree` counts on the first line only.
+  burn {
+    fs.write_text(file, "vm|another\ntree\n")
+  }
+  assert(handed(dir, launcher, ["version"], stub, e).flag == "", "a `tree` on the second line was taken")
+  # A file that cannot be read, and a folder where the file would be: nothing
+  # is asked for, and nothing is said about it.
+  burn {
+    fs.write_text(file, "vm|" + tree.key + "\n")
+    stick m = proc.run("chmod", ["000", file], {timeout_ms: 10000})
+    assert(m.code == 0, m.err)
+  }
+  stick unread = launch_env(dir, launcher, ["version"], {PATH: stub + path_sep + env.get("PATH", ""), CIGO_FLOOR_CACHE: "on"}.merge(ENGINE_UNSAID).merge(e))
+  exits(unread, 0)
+  assert(unread.err.trim() == "", "the launcher said: " + unread.err)
+  burn {
+    stick m = proc.run("chmod", ["600", file], {timeout_ms: 10000})
+    assert(m.code == 0, m.err)
+    fs.rm(file)
+    fs.mkdir(file)
+  }
+  stick folder = launch_env(dir, launcher, ["version"], {PATH: stub + path_sep + env.get("PATH", ""), CIGO_FLOOR_CACHE: "on"}.merge(ENGINE_UNSAID).merge(e))
+  exits(folder, 0)
+  assert(folder.err.trim() == "", "the launcher said: " + folder.err)
+  assert(handed(dir, launcher, ["version"], stub, e).flag == "", "a folder at the file's place asked for an engine")
+})
+
+test("engine: a cig of a later major version is asked as 1.25.0 is", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick stub = stand_in_cig(path.base(dir) + "-cig", "2.0.0")
+  stick e = {CIGO_HOME: dir + "-cigo-home", CIGSCRIPT_HOME: dir + "-cig-home"}
+  burn {
+    fs.mkdir(e.CIGO_HOME)
+  }
+  stick first = handed(dir, launcher, ["version"], stub, e)
+  assert(first.flag == "" and first.key != "-", first.line)
+  burn {
+    fs.write_text(path.join(e.CIGO_HOME, "engine"), "vm|" + first.key + "\n")
+  }
+  assert(handed(dir, launcher, ["version"], stub, e).flag == "vm", "cig 2.0.0 was not asked for the VM")
+})
+
+test("engine: a cig before 1.25.0 is handed nothing, whatever the file says", pack() {
+  if on_windows {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick stub = stand_in_cig(path.base(dir) + "-cig", "1.24.9")
+  stick e = {CIGO_HOME: dir + "-cigo-home", CIGSCRIPT_HOME: dir + "-cig-home"}
+  burn {
+    fs.mkdir(e.CIGO_HOME)
+    fs.write_text(path.join(e.CIGO_HOME, "engine"), "tree\n")
+  }
+  # A key in the environment already (a call from inside another cigo) does not pass through.
+  stick old = handed(dir, launcher, ["--no-check", "version"], stub, e.merge({CIGO_ENGINE_KEY: "inherited", CIGO_ENGINE: "tree"}))
+  assert(old.flag == "" and old.key == "-" and old.env == "-", old.line)
+  says(old.line, "[run][--no-check]")
+})
+
+# The cig on PATH runs scripts on its VM (1.25.0 on). The suite's main jobs
+# run cigo's floor, which is older: there these tests have nothing to run.
+pull cig_has_vm() {
+  stick v = cig(root, ["--version"])
+  stick m = text.captures(str(v.out), '(\d+)\.(\d+)\.(\d+)')
+  if m == null {
+    snuff false
+  }
+  snuff int(m[1]) > 1 or (int(m[1]) == 1 and int(m[2]) >= 25)
+}
+
+# cigo through a launcher, with homes of its own: `cigo __engine --json`, parsed.
+pull engine_now(dir, l, e) {
+  stick r = launch_env(dir, l, ["__engine", "--json"], e)
+  exits(r, 0)
+  snuff json.parse(r.out)
+}
+
+pull lower_now(dir, l, e) {
+  stick r = launch_env(dir, l, ["__lower", "--json"], e)
+  exits(r, 0)
+  snuff json.parse(r.out)
+}
+
+# Every record in a cig home: [{args, engine}].
+pull records_of(cig_home) {
+  roll out = []
+  for f in fs.glob(path.join(cig_home, "runs", "*", "run.json")) {
+    stick rec = json.load(f)
+    out.push({args: rec.get("args", []), engine: rec.get("engine", null) ?? {}})
+  }
+  snuff out
+}
+
+test("engine: cigo is lowered by `cigo __lower` and by no other call: before it and after cigo changes every call is on the tree-walker, after it on the VM from the kept module, the agent hook's included", pack() {
+  if on_windows or not cig_has_vm() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick copy = launcher_copy(dir, fs.read_text(tool))
+  stick cig_home = dir + "-cig-home"
+  stick e = {HOME: dir + "-home", CIGO_HOME: dir + "-cigo-home", CIGSCRIPT_HOME: cig_home, CIGO_FLOOR_CACHE: "on", CIGO_LAUNCHER: copy.launcher, CLAUDECODE: "", CLAUDE_CODE_ENTRYPOINT: "", CIGO_AGENT: ""}.merge(ENGINE_UNSAID)
+  burn {
+    fs.mkdir(e.HOME)
+  }
+  # The hook as an agent's settings start it: through the launcher, with --no-check.
+  pull hook() {
+    stick payload = json.stringify({session_id: "e1", cwd: dir, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: {command: "echo hello"}})
+    stick r = hop_env(dir, "sh", ["-c", 'printf "%s" "$1" | "$2" --no-check agent hook claude-code', "sh", payload, copy.launcher], e)
+    exits(r, 0)
+    says(json.parse(r.out).hookSpecificOutput.updatedInput.command, " -- 'echo hello'")
+  }
+  # Before: the tree-walker, and nothing is lowered by a call.
+  assert(engine_now(dir, copy.launcher, e).engine == "tree", "before the step")
+  hook()
+  assert(not fs.is_file(path.join(e.CIGO_HOME, "engine")), "a call wrote the engine file")
+  # The step lowers, and says so.
+  stick first = lower_now(dir, copy.launcher, e)
+  assert(first.tool == "cigo" and first.engine == "vm" and first.kept == true and first.lowered == true and first.reason == null, json.stringify(first))
+  # After: the VM, from the kept module; the hook too, though it passes --no-check.
+  stick after = engine_now(dir, copy.launcher, e)
+  assert(after.engine == "vm" and after.module == "cached", json.stringify(after))
+  hook()
+  stick hooks = records_of(cig_home).filter(pack(r) => r.args.contains("hook"))
+  assert(hooks.len() == 2, "the hook's two records: " + json.stringify(hooks))
+  assert(hooks.filter(pack(r) => r.engine.get("engine", "") == "vm" and r.engine.get("module", "") == "cached").len() == 1, "the hook after the step: " + json.stringify(hooks))
+  # The step again: nothing to lower.
+  stick again = lower_now(dir, copy.launcher, e)
+  assert(again.engine == "vm" and again.kept == true and again.lowered == false, json.stringify(again))
+  # cigo changes (an update): every call is on the tree-walker again, and none lowers.
+  burn {
+    fs.write_text(copy.tool, fs.read_text(copy.tool) + "\n# a later cigo\n")
+  }
+  stick changed = engine_now(dir, copy.launcher, e)
+  assert(changed.engine == "tree" and changed.asked == null, json.stringify(changed))
+  hook()
+  # The step lowers the new one, and the VM is back.
+  stick second = lower_now(dir, copy.launcher, e)
+  assert(second.engine == "vm" and second.kept == true and second.lowered == true, json.stringify(second))
+  assert(engine_now(dir, copy.launcher, e).module == "cached", "after the second step")
+  # What #142 asks: in this cig home, the only runs that lowered are the
+  # step's own, one for each cigo.
+  stick lowered = records_of(cig_home).filter(pack(r) => r.engine.get("module", "") == "lowered")
+  assert(lowered.len() == 2, "two lowerings, one a cigo: " + json.stringify(lowered))
+  for r in lowered {
+    assert(r.args == ["__engine", "--json"], "a call that was not the step's lowered cigo: " + json.stringify(r))
+  }
+  # And the file holds both cigos' lines, the newest first.
+  stick lines = fs.read_text(path.join(e.CIGO_HOME, "engine")).lines().filter(pack(x) => x != "")
+  assert(lines.len() == 2 and lines.all(pack(x) => x.starts_with("vm|")), json.stringify(lines))
+})
+
+test("engine: `cigo config engine tree` puts cigo on the tree-walker even where cig's own config says vm, `auto` lowers and brings the VM back, and `cigo __doctor` says which and why", pack() {
+  if on_windows or not cig_has_vm() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick copy = launcher_copy(dir, fs.read_text(tool))
+  stick cig_home = dir + "-cig-home"
+  stick e = {HOME: dir + "-home", CIGO_HOME: dir + "-cigo-home", CIGSCRIPT_HOME: cig_home, CIGO_FLOOR_CACHE: "on"}.merge(ENGINE_UNSAID)
+  burn {
+    fs.mkdir(e.HOME)
+  }
+  pull engine_finding() {
+    stick r = launch_env(dir, copy.launcher, ["__doctor", "--json"], e)
+    exits(r, 0)
+    snuff finding_of(json.parse(r.out), "engine")
+  }
+  # Nothing kept: the tree-walker, with the command that changes it.
+  stick before = engine_finding()
+  assert(before.severity == "note" and before.fix == "cigo config engine auto", json.stringify(before))
+  says(before.found, "tree-walker")
+  says(before.because, "no module of this cigo is kept")
+  # auto: the step runs at the terminal that asked.
+  stick auto = launch_env(dir, copy.launcher, ["config", "engine", "auto"], e)
+  exits(auto, 0)
+  says(auto.out, "cigo runs on cig's VM from its next call")
+  stick kept = engine_finding()
+  assert(kept.severity == "ok" and kept.fix == null, json.stringify(kept))
+  says(kept.found, "from the module kept in cig's tin")
+  # tree, with cig's own default set to the VM: cigo is on the tree-walker all the same.
+  exits(hop_env(dir, "cig", ["config", "engine", "vm"], e), 0)
+  stick tree = launch_env(dir, copy.launcher, ["config", "engine", "tree"], e)
+  exits(tree, 0)
+  says(tree.out, "cigo runs on cig's tree-walker: `engine` is set to `tree`")
+  assert(fs.read_text(path.join(e.CIGO_HOME, "engine")) == "tree\n", fs.read_text(path.join(e.CIGO_HOME, "engine")))
+  stick now = engine_now(dir, copy.launcher, e)
+  assert(now.engine == "tree" and now.setting == "tree", json.stringify(now))
+  stick set = engine_finding()
+  assert(set.severity == "ok", json.stringify(set))
+  says(set.because, "`engine` is set to `tree`")
+  # The step under `tree` keeps it so, and says why.
+  stick stays = lower_now(dir, copy.launcher, e)
+  assert(stays.engine == "tree" and stays.kept == false, json.stringify(stays))
+  says(stays.reason, "`engine` is set to `tree`")
+  # CIGO_ENGINE=auto for one call sets the kept `tree` aside: cig decides, and its config says vm.
+  assert(engine_now(dir, copy.launcher, e.merge({CIGO_ENGINE: "auto"})).engine == "vm", "CIGO_ENGINE=auto over `tree`")
+  # Back to auto: the module is still in the tin, so nothing is lowered.
+  stick back = launch_env(dir, copy.launcher, ["config", "engine", "--unset"], e)
+  exits(back, 0)
+  says(back.out, "cigo runs on cig's VM from its next call")
+  stick again = engine_now(dir, copy.launcher, e)
+  assert(again.engine == "vm" and again.module == "cached" and again.setting == "auto", json.stringify(again))
+  assert(records_of(cig_home).filter(pack(r) => r.engine.get("module", "") == "lowered").len() == 1, "one lowering in all")
+})
+
+test("engine: the step keeps nothing it has not seen cig keep: with no key from the launcher cigo stays on the tree-walker and says why, and a dry run of the step writes nothing", pack() {
+  if on_windows or not cig_has_vm() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick e = {HOME: dir + "-home", CIGO_HOME: dir + "-cigo-home", CIGSCRIPT_HOME: dir + "-cig-home"}.merge(ENGINE_UNSAID)
+  burn {
+    fs.mkdir(e.HOME)
+  }
+  # Not through the launcher: no key to keep a module under.
+  stick bare = hop_env(dir, tool_prog("cig"), tool_args(["__lower", "--json"]), e.merge({CIGO_ENGINE_KEY: "", CIGO_TOOL: ""}))
+  exits(bare, 0)
+  stick said = json.parse(bare.out)
+  assert(said.engine == "tree" and said.kept == false and said.lowered == false, bare.out)
+  says(said.reason, "handed it no key for this call")
+  assert(not fs.is_file(path.join(e.CIGO_HOME, "engine")), "a file was written")
+  # In text, one line.
+  stick line = hop_env(dir, tool_prog("cig"), tool_args(["__lower"]), e.merge({CIGO_ENGINE_KEY: "", CIGO_TOOL: ""}))
+  exits(line, 0)
+  says(line.out, "cigo runs on cig's tree-walker: cigo's launcher handed it no key for this call")
+  # A dry run of the step lowers nothing and writes nothing.
+  stick dry = launch_env(dir, launcher, ["--dry-run", "__lower", "--json"], e.merge({CIGO_FLOOR_CACHE: "on"}))
+  exits(dry, 0)
+  assert(not fs.is_file(path.join(e.CIGO_HOME, "engine")), "a dry run wrote the engine file")
+})
+
+test("engine: where cig no longer finds the module the file says is kept, the one call that finds out takes the line out: it lowers, and no call after it does", pack() {
+  if on_windows or not cig_has_vm() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick cig_home = dir + "-cig-home"
+  stick e = {HOME: dir + "-home", CIGO_HOME: dir + "-cigo-home", CIGSCRIPT_HOME: cig_home, CIGO_FLOOR_CACHE: "on"}.merge(ENGINE_UNSAID)
+  burn {
+    fs.mkdir(e.HOME)
+  }
+  assert(lower_now(dir, launcher, e).kept == true, "the step")
+  assert(engine_now(dir, launcher, e).module == "cached", "after the step")
+  # The modules go from cig's tin behind cigo's back; the file still has its line.
+  burn {
+    for f in fs.glob(path.join(cig_home, "tin", "modules", "*")) {
+      fs.rm(f)
+    }
+  }
+  assert(fs.read_text(path.join(e.CIGO_HOME, "engine")).starts_with("vm|"), "the line before the call")
+  # The next call is asked to run on the VM, lowers, and takes the line out.
+  stick found_out = launch_env(dir, launcher, ["version"], e)
+  exits(found_out, 0)
+  says(found_out.out, "cig-orchestrator ")
+  assert(not fs.read_text(path.join(e.CIGO_HOME, "engine")).contains("vm|"), "the line after the call: " + fs.read_text(path.join(e.CIGO_HOME, "engine")))
+  # Every call after it is on the tree-walker, and none lowers.
+  stick after = engine_now(dir, launcher, e)
+  assert(after.engine == "tree" and after.asked == null, json.stringify(after))
+  exits(launch_env(dir, launcher, ["version"], e), 0)
+  stick lowered = records_of(cig_home).filter(pack(r) => r.engine.get("module", "") == "lowered")
+  assert(lowered.len() == 2 and lowered.filter(pack(r) => r.args == ["version"]).len() == 1, "the step's lowering and the one call's: " + json.stringify(lowered))
+  # `cigo __doctor` says where things stand and what to type; the step puts it right.
+  stick d = launch_env(dir, launcher, ["__doctor", "--json"], e)
+  exits(d, 0)
+  assert(finding_of(json.parse(d.out), "engine").fix == "cigo config engine auto", d.out)
+  assert(lower_now(dir, launcher, e).kept == true, "the step again")
+  assert(engine_now(dir, launcher, e).module == "cached", "after the step again")
+})
+
+test("engine: `cigo update` runs the step through the cigo on PATH once the installer is done, and not for --check", pack() {
+  if on_windows or not cig_has_vm() {
+    snuff
+  }
+  stick dir = fresh("tests/fixtures/chain")
+  stick bindir = write_fake_installer(dir)
+  stick log = dir + "-installer.log"
+  # cigo as a carton lays it down: `cigo update` refuses in a checkout.
+  stick prefix = dir + "-prefix"
+  stick inst_tool = path.join(prefix, "share", "cig-orchestrator", "orchestrate.cig")
+  stick inst_launcher = path.join(prefix, "bin", "cigo")
+  burn {
+    fs.mkdir(path.join(prefix, "bin"))
+    fs.mkdir(path.join(prefix, "share", "cig-orchestrator"))
+    fs.cp(tool, inst_tool)
+    fs.write_text(inst_launcher, text.replace(fs.read_text(launcher).replace("\r\n", "\n"), "(?m)^tool=.*$", "tool='" + inst_tool + "'"))
+    stick m = proc.run("chmod", ["755", inst_launcher], {timeout_ms: 10000})
+    assert(m.code == 0, m.err)
+  }
+  stick e = {PATH: bindir + path_sep + path.join(prefix, "bin") + path_sep + env.get("PATH", ""), FAKE_INSTALLER_LOG: log, HOME: dir + "-home", CIGO_HOME: dir + "-cigo-home", CIGSCRIPT_HOME: dir + "-cig-home", CIGO_FLOOR_CACHE: "on"}.merge(ENGINE_UNSAID)
+  burn {
+    fs.mkdir(e.HOME)
+  }
+  stick checked = launch_env(dir, inst_launcher, ["update", "--check"], e)
+  exits(checked, 0)
+  assert(not fs.is_file(path.join(e.CIGO_HOME, "engine")), "--check ran the step")
+  stick r = launch_env(dir, inst_launcher, ["update"], e)
+  exits(r, 0)
+  in_order(r.out, ["fake-installer-says-hello", "cigo runs on cig's VM from its next call"])
+  assert(fs.read_text(path.join(e.CIGO_HOME, "engine")).starts_with("vm|"), fs.read_text(path.join(e.CIGO_HOME, "engine")))
+  assert(engine_now(dir, inst_launcher, e).module == "cached", "the call after the update")
 })
 
 # ----- the tool itself on every machine (0.4.0): programs, paths, interpreters, encodings
@@ -9639,6 +10152,9 @@ while fs.exists(path.join(home, "ashtray", ".flush.lock")) and waited < 600 {
   waited += 1
   time.sleep_ms(100)
 }
-burn {
-  fs.rm(work)
+# A run of tests that copied no fixture made no work folder.
+if fs.exists(work) {
+  burn {
+    fs.rm(work)
+  }
 }

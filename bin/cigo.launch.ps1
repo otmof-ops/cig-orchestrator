@@ -91,6 +91,84 @@ if ($version -match '^(\d+)\.(\d+)\.(\d+)') {
     exit 2
 }
 
+# The engine (#142). From 1.25.0 cig can run cigo on its bytecode VM, from a
+# module of the script that it keeps in its tin. Lowering the script takes
+# several times a normal start, so this launcher asks for the VM only where
+# a module is already kept: `cigo __lower` (the installer and `cigo update`
+# run it) lowers the script and leaves a line `vm|<key>` in the engine file
+# under CIGO_HOME, and a call whose own key is not there asks for nothing.
+# The key is what decides whether cig will find the module, as this launcher
+# sees it: the cig on PATH and the tool file (path, size, time), cig's home
+# and where it keeps its keys (CIG_KEYS_DIR, else beside its home or under
+# APPDATA), and under ciginstaller the carton and the shim index. The
+# script never makes a key: it keeps the one it is handed in
+# CIGO_ENGINE_KEY. The choice goes to cig as a flag, not as CIG_ENGINE,
+# which would reach everything cigo starts.
+# - CIG_ENGINE already set: the caller chose, and nothing is added.
+# - `engine = tree`: the file's first line is `tree`, or CIGO_ENGINE=tree;
+#   CIGO_ENGINE=auto sets a `tree` line aside.
+# - A cig before 1.25.0 is handed nothing.
+# With the VM asked for, `--no-check` is left out: a kept module was checked
+# when it was lowered, and with the flag cig would run the tree-walker.
+Remove-Item Env:CIGO_ENGINE_KEY -ErrorAction SilentlyContinue
+Remove-Item Env:CIGO_ENGINE_ASKED -ErrorAction SilentlyContinue
+$engineArgs = @()
+$engineKey = ''
+if (($major -gt 1) -or ($major -eq 1 -and $minor -ge 25)) {
+    $toolSize = -1
+    $toolMtime = ''
+    try {
+        $toolItem = Get-Item -LiteralPath $tool -ErrorAction Stop
+        $toolSize = [int64]$toolItem.Length
+        $toolMtime = [string]$toolItem.LastWriteTimeUtc.Ticks
+    } catch { }
+    $cigHomeDir = $env:CIGSCRIPT_HOME
+    if (-not $cigHomeDir) { $cigHomeDir = Join-Path $HOME '.cigscript' }
+    $indexSize = ''
+    $indexMtime = ''
+    try {
+        $indexItem = Get-Item -LiteralPath (Join-Path (Join-Path $cigHomeDir 'installer') 'shim-index') -ErrorAction Stop
+        if (-not $indexItem.PSIsContainer) {
+            $indexSize = [string]$indexItem.Length
+            $indexMtime = [string]$indexItem.LastWriteTimeUtc.Ticks
+        }
+    } catch { }
+    if ($cigSize -ge 0 -and $cigMtime -ne '' -and $toolSize -ge 0 -and $toolMtime -ne '') {
+        $engineKey = "$cigReal|$cigSize|$cigMtime|$tool|$toolSize|$toolMtime|$cigHomeDir|$($env:CIG_KEYS_DIR)|$($env:APPDATA)|$($env:CIGI_CARTON)|$indexSize|$indexMtime"
+        $env:CIGO_ENGINE_KEY = $engineKey
+    }
+    if (-not $env:CIG_ENGINE) {
+        if ($env:CIGO_ENGINE -ceq 'tree') {
+            $engineArgs = @('--engine', 'tree')
+        } else {
+            $engineFile = Join-Path $cigoHomeDir 'engine'
+            $engineLines = @()
+            try {
+                if (Test-Path -LiteralPath $engineFile -PathType Leaf) {
+                    $engineLines = @(Get-Content -LiteralPath $engineFile -TotalCount 8 -Encoding UTF8 -ErrorAction Stop)
+                }
+            } catch { $engineLines = @() }
+            $n = 0
+            foreach ($line in $engineLines) {
+                $n++
+                $line = [string]$line
+                if ($line -ceq 'tree') {
+                    if ($n -eq 1 -and $env:CIGO_ENGINE -cne 'auto') {
+                        $engineArgs = @('--engine', 'tree')
+                        break
+                    }
+                } elseif ($engineKey -ne '' -and $line -ceq "vm|$engineKey") {
+                    # The script is told, so that it can see whether cig did
+                    # load the module, and take the line out if it did not.
+                    $engineArgs = @('--engine', 'vm')
+                    $env:CIGO_ENGINE_ASKED = 'vm'
+                    break
+                }
+            }
+        }
+    }
+}
+
 # The flag lists are single words, split on purpose.
 $global = @()
 $run = @()
@@ -99,7 +177,10 @@ if ($args) { $argsList = @($args) }
 $i = 0
 while ($i -lt $argsList.Count) {
     $a = [string]$argsList[$i]
-    if ($a -eq '--dry-run' -or $a -eq '--no-check' -or $a -eq '--no-rollback') {
+    if ($a -eq '--no-check') {
+        if (-not ($engineArgs.Count -eq 2 -and $engineArgs[1] -eq 'vm')) { $run += $a }
+        $i++
+    } elseif ($a -eq '--dry-run' -or $a -eq '--no-rollback') {
         $run += $a
         $i++
     } elseif ($a -eq '--max-steps') {
@@ -127,7 +208,7 @@ if ($i -lt $argsList.Count) { $rest = @($argsList[$i..($argsList.Count - 1)]) }
 $cmd = 'help'
 if ($rest.Count -gt 0) { $cmd = [string]$rest[0] }
 
-$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'uninstall', 'doctor', 'crash', 'config', 'blacklist', 'quarantine', 'guard', 'undo', 'run-url', 'agent', 'approve', '__dump-rules', '--help', '-h', '--version')
+$leaveDir = @('adopt', 'help', 'version', 'toolchains', 'update', 'uninstall', 'doctor', 'crash', 'config', 'blacklist', 'quarantine', 'guard', 'undo', 'run-url', 'agent', 'approve', '__dump-rules', '__lower', '__engine', '--help', '-h', '--version')
 # From the home folder itself (or a drive's root), cig would take all of it
 # as the run's pack and watch every file in it around each step: these run
 # from an empty folder of cigo's instead, told where you are.
@@ -152,11 +233,11 @@ if ($leaveDir -notcontains $cmd) {
     if ($dir -and (Test-Path -LiteralPath (Join-Path $dir 'cig-tasks.json')) -and ($dir -ne $startDir)) {
         Set-Location -LiteralPath $dir
     }
-    # The installer asks for `__doctor` from wherever it was run, a home
-    # folder included: with no project above, it runs from cigo's own empty
-    # folder like the commands above.
+    # The installer asks for `__doctor`, `__lower` or `__engine` from
+    # wherever it was run, a home folder included: with no project above,
+    # these run from cigo's own empty folder like the commands above.
     $nowDir = (Get-Location).Path
-    if ($cmd -eq '__doctor' -and -not ($dir -and (Test-Path -LiteralPath (Join-Path $dir 'cig-tasks.json'))) -and (($nowDir -eq $HOME) -or ($nowDir -eq [IO.Path]::GetPathRoot($nowDir)))) {
+    if ((@('__doctor', '__lower', '__engine') -contains $cmd) -and -not ($dir -and (Test-Path -LiteralPath (Join-Path $dir 'cig-tasks.json'))) -and (($nowDir -eq $HOME) -or ($nowDir -eq [IO.Path]::GetPathRoot($nowDir)))) {
         $cigoHome = $env:CIGO_HOME
         if (-not $cigoHome) { $cigoHome = Join-Path $HOME '.cig-orchestrator' }
         $neutral = Join-Path $cigoHome 'here'
@@ -174,6 +255,7 @@ $env:CIGO_LAUNCHER = $PSCommandPath
 $cigArgs = @()
 foreach ($g in $global) { $cigArgs += [string]$g }
 $cigArgs += 'run'
+foreach ($e in $engineArgs) { $cigArgs += [string]$e }
 foreach ($r in $run) { $cigArgs += [string]$r }
 $cigArgs += [string]$tool
 $cigArgs += '--'
